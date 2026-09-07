@@ -41,3 +41,16 @@ Phase 1 的多個 Worker 任務在同一 worktree 平行執行。若各自增修
 `DeepResearchPlan` 物件，spec 原 schema 的 `research_id` / `cid` 不足以復原。
 `DeepResearchPlan` 為 pydantic BaseModel，以 `model_dump_json()` 持久化。
 此為對 spec schema 的必要增補，已核可。
+
+## D4 — migration 目前僅支援「建表」，T3.3 需要真正的版本化 migration
+
+T1.2 實作的 `migrate()` 是單一 `executescript(SCHEMA_SQL)`，內容為
+`CREATE TABLE IF NOT EXISTS`。這對「初次建表」與「重複執行」都正確（已實測 3 次冪等），
+**但無法為既有資料表新增欄位**。
+
+D3 要求 `research_tasks` 增設 `plan_json`。因此 T3.3 不能只改 `SCHEMA_SQL`，
+必須一併引入最小可用的版本化機制（例如 `PRAGMA user_version` + 依序套用的
+`ALTER TABLE research_tasks ADD COLUMN plan_json TEXT`），
+否則已部署的資料庫升級後會缺欄位而在執行期才炸。
+
+此為 Commander 已知並接受的技術債，於 T3.3 償還；T1.2 依其任務規格實作 spec schema 屬正確。
