@@ -47,8 +47,24 @@ import 時務必使用限定名稱（如 `from gemini_webapi import exceptions a
 | **Transient** | `gemini_webapi.exceptions.TimeoutError`、`asyncio.TimeoutError`、連線中斷類（`curl_cffi` / OSError） | 退避重試最多 2 次 |
 | **Fatal** | `ModelInvalidError`、`ImageGenerationError`、`APIError`、`GeminiError`（基底兜底） | 不重試，回報使用者明確訊息（不得吐 stack trace） |
 
-`TemporarilyBlockedError` 歸為 RateLimit 而非 Fatal：它是暫時性封鎖，退避後可能恢復；
-但若連續觸發應升級為 DEGRADED，由 T2.2 的狀態機決定門檻。
+`TemporarilyBlockedError` 歸為 RateLimit 而非 Fatal：它是暫時性封鎖，退避後可能恢復。
+
+#### DEGRADED 升級政策（Commander 裁定，T2.2 實作）
+
+DEGRADED 有兩種成因，**必須可區分**（`DegradedReason.AUTH` / `DegradedReason.BLOCKED`），
+因為兩者的恢復路徑完全不同：
+
+| 成因 | 觸發 | 恢復方式 | 推播語氣 |
+|---|---|---|---|
+| `AUTH` | `AuthError`，**立即**升級 | **僅能**由 `reinit()`（管理員 `/setcookie`）恢復；不會隨時間自行恢復 | 「認證失效，請 /setcookie」 |
+| `BLOCKED` | **連續 3 次** `TemporarilyBlockedError`（`BLOCKED_ESCALATION_THRESHOLD`） | `blocked_until = now + 900s` 到期後 half-open 探測，成功即回 HEALTHY | 「暫時封鎖，約 N 分鐘後自動重試，無需人工介入」 |
+
+- 計數器語義為「**連續**」：任何一次成功請求即歸零。
+- `UsageLimitExceededError` **不**累加此計數器（配額問題，非封鎖）。
+- 時間來源需可注入（`time_source`，預設 `time.monotonic`），讓測試不必 sleep。
+
+理由：AUTH 是憑證問題，等待無意義，必須人工換 cookie；BLOCKED 是上游節流，
+會自行恢復，若也要求人工介入只會製造無謂的管理員噪音。
 
 ### 傳輸層例外 — `curl_cffi` 0.16.3
 
