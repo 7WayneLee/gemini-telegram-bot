@@ -1,0 +1,705 @@
+{
+  "chat_session": {
+    "metadata": {
+      "actual_type": "list[str | None]",
+      "constructor_parameter_type": "list[str | None] | None",
+      "descriptor_type": "builtins.property",
+      "getter_return_type_hint": null,
+      "runtime_element_types": [
+        "builtins.str",
+        "builtins.NoneType"
+      ],
+      "runtime_length": 10,
+      "runtime_type": "builtins.list"
+    },
+    "public_methods": {
+      "choose_candidate": {
+        "defined_on": "gemini_webapi.client.ChatSession",
+        "is_async_generator": false,
+        "is_coroutine": false,
+        "signature": "(self, index: int) -> gemini_webapi.types.modeloutput.ModelOutput",
+        "type_hints": {
+          "index": "int",
+          "return": "gemini_webapi.types.modeloutput.ModelOutput"
+        }
+      },
+      "read_history": {
+        "defined_on": "gemini_webapi.client.ChatSession",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, limit: int = 10) -> gemini_webapi.types.chathistory.ChatHistory | None",
+        "type_hints": {
+          "limit": "int",
+          "return": "gemini_webapi.types.chathistory.ChatHistory | None"
+        }
+      },
+      "send_message": {
+        "defined_on": "gemini_webapi.client.ChatSession",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, prompt: str, files: list[str | pathlib.Path | bytes | _io.BytesIO] | None = None, temporary: bool = False, deep_research: bool = False, extended_thinking: bool = False, **kwargs) -> gemini_webapi.types.modeloutput.ModelOutput",
+        "type_hints": {
+          "deep_research": "bool",
+          "extended_thinking": "bool",
+          "files": "list[str | pathlib.Path | bytes | _io.BytesIO] | None",
+          "prompt": "str",
+          "return": "gemini_webapi.types.modeloutput.ModelOutput",
+          "temporary": "bool"
+        }
+      },
+      "send_message_stream": {
+        "defined_on": "gemini_webapi.client.ChatSession",
+        "is_async_generator": true,
+        "is_coroutine": false,
+        "signature": "(self, prompt: str, files: list[str | pathlib.Path | bytes | _io.BytesIO] | None = None, temporary: bool = False, deep_research: bool = False, extended_thinking: bool = False, **kwargs) -> collections.abc.AsyncGenerator[gemini_webapi.types.modeloutput.ModelOutput, None]",
+        "type_hints": {
+          "deep_research": "bool",
+          "extended_thinking": "bool",
+          "files": "list[str | pathlib.Path | bytes | _io.BytesIO] | None",
+          "prompt": "str",
+          "return": "collections.abc.AsyncGenerator[gemini_webapi.types.modeloutput.ModelOutput, None]",
+          "temporary": "bool"
+        }
+      }
+    },
+    "qualified_name": "gemini_webapi.client.ChatSession",
+    "signature": "(geminiclient: gemini_webapi.client.GeminiClient, metadata: list[str | None] | None = None, cid: str = '', rid: str = '', rcid: str = '', model: gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None = None, gem: gemini_webapi.types.gem.Gem | str | None = None)"
+  },
+  "exceptions": {
+    "APIError": {
+      "mro": [
+        "gemini_webapi.exceptions.APIError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.APIError"
+    },
+    "AuthError": {
+      "mro": [
+        "gemini_webapi.exceptions.AuthError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.AuthError"
+    },
+    "GeminiError": {
+      "mro": [
+        "gemini_webapi.exceptions.GeminiError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.GeminiError"
+    },
+    "ImageGenerationError": {
+      "mro": [
+        "gemini_webapi.exceptions.ImageGenerationError",
+        "gemini_webapi.exceptions.APIError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.ImageGenerationError"
+    },
+    "ModelInvalidError": {
+      "mro": [
+        "gemini_webapi.exceptions.ModelInvalidError",
+        "gemini_webapi.exceptions.GeminiError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.ModelInvalidError"
+    },
+    "TemporarilyBlockedError": {
+      "mro": [
+        "gemini_webapi.exceptions.TemporarilyBlockedError",
+        "gemini_webapi.exceptions.GeminiError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.TemporarilyBlockedError"
+    },
+    "TimeoutError": {
+      "mro": [
+        "gemini_webapi.exceptions.TimeoutError",
+        "gemini_webapi.exceptions.GeminiError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.TimeoutError"
+    },
+    "UsageLimitExceededError": {
+      "mro": [
+        "gemini_webapi.exceptions.UsageLimitExceededError",
+        "gemini_webapi.exceptions.GeminiError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.exceptions.UsageLimitExceededError"
+    }
+  },
+  "gemini_client": {
+    "public_methods": {
+      "close": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, delay: float = 0) -> NoneType",
+        "type_hints": {
+          "delay": "float",
+          "return": "NoneType"
+        }
+      },
+      "create_deep_research_plan": {
+        "defined_on": "gemini_webapi.components.research_mixin.ResearchMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, prompt: str, chat: Optional[gemini_webapi.client.ChatSession] = None, model: gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None = None) -> gemini_webapi.types.research.DeepResearchPlan",
+        "type_hints": {
+          "chat": "Optional[gemini_webapi.client.ChatSession]",
+          "model": "gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None",
+          "prompt": "str",
+          "return": "gemini_webapi.types.research.DeepResearchPlan"
+        }
+      },
+      "create_gem": {
+        "defined_on": "gemini_webapi.components.gem_mixin.GemMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, name: str, prompt: str, description: str = '') -> gemini_webapi.types.gem.Gem",
+        "type_hints": {
+          "description": "str",
+          "name": "str",
+          "prompt": "str",
+          "return": "gemini_webapi.types.gem.Gem"
+        }
+      },
+      "deep_research": {
+        "defined_on": "gemini_webapi.components.research_mixin.ResearchMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, prompt: str, poll_interval: float = 10.0, timeout: float = 600.0, model: gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None = None, chat: Optional[gemini_webapi.client.ChatSession] = None) -> gemini_webapi.types.researchresult.DeepResearchResult",
+        "type_hints": {
+          "chat": "Optional[gemini_webapi.client.ChatSession]",
+          "model": "gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None",
+          "poll_interval": "float",
+          "prompt": "str",
+          "return": "gemini_webapi.types.researchresult.DeepResearchResult",
+          "timeout": "float"
+        }
+      },
+      "delete_chat": {
+        "defined_on": "gemini_webapi.components.chat_mixin.ChatMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, cid: str) -> NoneType",
+        "type_hints": {
+          "cid": "str",
+          "return": "NoneType"
+        }
+      },
+      "delete_gem": {
+        "defined_on": "gemini_webapi.components.gem_mixin.GemMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, gem: gemini_webapi.types.gem.Gem | str, **kwargs) -> NoneType",
+        "type_hints": {
+          "gem": "gemini_webapi.types.gem.Gem | str",
+          "return": "NoneType"
+        }
+      },
+      "fetch_gems": {
+        "defined_on": "gemini_webapi.components.gem_mixin.GemMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, include_hidden: bool = False, **kwargs) -> gemini_webapi.types.gem.GemJar",
+        "type_hints": {
+          "include_hidden": "bool",
+          "return": "gemini_webapi.types.gem.GemJar"
+        }
+      },
+      "fetch_latest_chat_response": {
+        "defined_on": "gemini_webapi.components.chat_mixin.ChatMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, cid: str, limit: int = 5, match: collections.abc.Callable[[gemini_webapi.types.modeloutput.ModelOutput], bool] | None = None) -> gemini_webapi.types.modeloutput.ModelOutput | None",
+        "type_hints": {
+          "cid": "str",
+          "limit": "int",
+          "match": "collections.abc.Callable[[gemini_webapi.types.modeloutput.ModelOutput], bool] | None",
+          "return": "gemini_webapi.types.modeloutput.ModelOutput | None"
+        }
+      },
+      "generate_content": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, prompt: str, files: list[str | pathlib.Path | bytes | _io.BytesIO] | None = None, model: gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None = None, gem: gemini_webapi.types.gem.Gem | str | None = None, chat: Optional[gemini_webapi.client.ChatSession] = None, temporary: bool = False, deep_research: bool = False, extended_thinking: bool = False, **kwargs) -> gemini_webapi.types.modeloutput.ModelOutput",
+        "type_hints": {
+          "chat": "Optional[gemini_webapi.client.ChatSession]",
+          "deep_research": "bool",
+          "extended_thinking": "bool",
+          "files": "list[str | pathlib.Path | bytes | _io.BytesIO] | None",
+          "gem": "gemini_webapi.types.gem.Gem | str | None",
+          "model": "gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None",
+          "prompt": "str",
+          "return": "gemini_webapi.types.modeloutput.ModelOutput",
+          "temporary": "bool"
+        }
+      },
+      "generate_content_stream": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": true,
+        "is_coroutine": false,
+        "signature": "(self, prompt: str, files: list[str | pathlib.Path | bytes | _io.BytesIO] | None = None, model: gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None = None, gem: gemini_webapi.types.gem.Gem | str | None = None, chat: Optional[gemini_webapi.client.ChatSession] = None, temporary: bool = False, deep_research: bool = False, extended_thinking: bool = False, **kwargs) -> collections.abc.AsyncGenerator[gemini_webapi.types.modeloutput.ModelOutput, None]",
+        "type_hints": {
+          "chat": "Optional[gemini_webapi.client.ChatSession]",
+          "deep_research": "bool",
+          "extended_thinking": "bool",
+          "files": "list[str | pathlib.Path | bytes | _io.BytesIO] | None",
+          "gem": "gemini_webapi.types.gem.Gem | str | None",
+          "model": "gemini_webapi.types.availablemodel.AvailableModel | gemini_webapi.constants.Model | str | dict | None",
+          "prompt": "str",
+          "return": "collections.abc.AsyncGenerator[gemini_webapi.types.modeloutput.ModelOutput, None]",
+          "temporary": "bool"
+        }
+      },
+      "init": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, timeout: float = 450, auto_close: bool = False, close_delay: float = 450, auto_refresh: bool = True, refresh_interval: float = 600, watchdog_timeout: float = 120, impersonate: Literal['edge99', 'edge101', 'chrome99', 'chrome100', 'chrome101', 'chrome104', 'chrome107', 'chrome110', 'chrome116', 'chrome119', 'chrome120', 'chrome123', 'chrome124', 'chrome131', 'chrome133a', 'chrome136', 'chrome142', 'chrome145', 'chrome146', 'chrome150', 'chrome99_android', 'chrome131_android', 'safari153', 'safari155', 'safari170', 'safari172_ios', 'safari180', 'safari180_ios', 'safari184', 'safari184_ios', 'safari260', 'safari2601', 'safari260_ios', 'firefox133', 'firefox135', 'firefox144', 'firefox147', 'tor145', 'chrome', 'edge', 'safari', 'safari_ios', 'safari_beta', 'safari_ios_beta', 'chrome_android', 'firefox', 'safari15_3', 'safari15_5', 'safari17_0', 'safari17_2_ios', 'safari18_0', 'safari18_0_ios', 'safari18_4', 'safari18_4_ios'] = 'chrome145', verbose: bool = False) -> NoneType",
+        "type_hints": {
+          "auto_close": "bool",
+          "auto_refresh": "bool",
+          "close_delay": "float",
+          "impersonate": "Literal['edge99', 'edge101', 'chrome99', 'chrome100', 'chrome101', 'chrome104', 'chrome107', 'chrome110', 'chrome116', 'chrome119', 'chrome120', 'chrome123', 'chrome124', 'chrome131', 'chrome133a', 'chrome136', 'chrome142', 'chrome145', 'chrome146', 'chrome150', 'chrome99_android', 'chrome131_android', 'safari153', 'safari155', 'safari170', 'safari172_ios', 'safari180', 'safari180_ios', 'safari184', 'safari184_ios', 'safari260', 'safari2601', 'safari260_ios', 'firefox133', 'firefox135', 'firefox144', 'firefox147', 'tor145', 'chrome', 'edge', 'safari', 'safari_ios', 'safari_beta', 'safari_ios_beta', 'chrome_android', 'firefox', 'safari15_3', 'safari15_5', 'safari17_0', 'safari17_2_ios', 'safari18_0', 'safari18_0_ios', 'safari18_4', 'safari18_4_ios']",
+          "refresh_interval": "float",
+          "return": "NoneType",
+          "timeout": "float",
+          "verbose": "bool",
+          "watchdog_timeout": "float"
+        }
+      },
+      "list_chats": {
+        "defined_on": "gemini_webapi.components.chat_mixin.ChatMixin",
+        "is_async_generator": false,
+        "is_coroutine": false,
+        "signature": "(self) -> list[gemini_webapi.types.chatinfo.ChatInfo] | None",
+        "type_hints": {
+          "return": "list[gemini_webapi.types.chatinfo.ChatInfo] | None"
+        }
+      },
+      "list_models": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": false,
+        "signature": "(self) -> list[gemini_webapi.types.availablemodel.AvailableModel] | None",
+        "type_hints": {
+          "return": "list[gemini_webapi.types.availablemodel.AvailableModel] | None"
+        }
+      },
+      "read_chat": {
+        "defined_on": "gemini_webapi.components.chat_mixin.ChatMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, cid: str, limit: int = 10) -> gemini_webapi.types.chathistory.ChatHistory | None",
+        "type_hints": {
+          "cid": "str",
+          "limit": "int",
+          "return": "gemini_webapi.types.chathistory.ChatHistory | None"
+        }
+      },
+      "reset_close_task": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self) -> NoneType",
+        "type_hints": {
+          "return": "NoneType"
+        }
+      },
+      "resolve_model": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": false,
+        "signature": "(self, name: str) -> gemini_webapi.types.availablemodel.AvailableModel",
+        "type_hints": {
+          "name": "str",
+          "return": "gemini_webapi.types.availablemodel.AvailableModel"
+        }
+      },
+      "start_activity_watchdog": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self) -> NoneType",
+        "type_hints": {
+          "return": "NoneType"
+        }
+      },
+      "start_auto_refresh": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self) -> NoneType",
+        "type_hints": {
+          "return": "NoneType"
+        }
+      },
+      "start_chat": {
+        "defined_on": "gemini_webapi.client.GeminiClient",
+        "is_async_generator": false,
+        "is_coroutine": false,
+        "signature": "(self, **kwargs) -> gemini_webapi.client.ChatSession",
+        "type_hints": {
+          "return": "gemini_webapi.client.ChatSession"
+        }
+      },
+      "start_deep_research": {
+        "defined_on": "gemini_webapi.components.research_mixin.ResearchMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, plan: gemini_webapi.types.research.DeepResearchPlan, chat: Optional[gemini_webapi.client.ChatSession] = None, confirm_prompt: str | None = None) -> gemini_webapi.types.modeloutput.ModelOutput",
+        "type_hints": {
+          "chat": "Optional[gemini_webapi.client.ChatSession]",
+          "confirm_prompt": "str | None",
+          "plan": "gemini_webapi.types.research.DeepResearchPlan",
+          "return": "gemini_webapi.types.modeloutput.ModelOutput"
+        }
+      },
+      "update_gem": {
+        "defined_on": "gemini_webapi.components.gem_mixin.GemMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, gem: gemini_webapi.types.gem.Gem | str, name: str, prompt: str, description: str = '') -> gemini_webapi.types.gem.Gem",
+        "type_hints": {
+          "description": "str",
+          "gem": "gemini_webapi.types.gem.Gem | str",
+          "name": "str",
+          "prompt": "str",
+          "return": "gemini_webapi.types.gem.Gem"
+        }
+      },
+      "wait_for_deep_research": {
+        "defined_on": "gemini_webapi.components.research_mixin.ResearchMixin",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, plan: gemini_webapi.types.research.DeepResearchPlan, poll_interval: float = 10.0, timeout: float = 600.0) -> gemini_webapi.types.researchresult.DeepResearchResult",
+        "type_hints": {
+          "plan": "gemini_webapi.types.research.DeepResearchPlan",
+          "poll_interval": "float",
+          "return": "gemini_webapi.types.researchresult.DeepResearchResult",
+          "timeout": "float"
+        }
+      }
+    },
+    "qualified_name": "gemini_webapi.client.GeminiClient"
+  },
+  "images": {
+    "GeneratedImage": {
+      "attributes": {
+        "alt": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "cid": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "client": {
+          "default": "None",
+          "required": false,
+          "type": "curl_cffi.requests.session.AsyncSession | None"
+        },
+        "client_ref": {
+          "default": "None",
+          "required": false,
+          "type": "Any"
+        },
+        "image_id": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "proxy": {
+          "default": "None",
+          "required": false,
+          "type": "str | None"
+        },
+        "rcid": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "rid": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "title": {
+          "default": "'[Image]'",
+          "required": false,
+          "type": "str"
+        },
+        "url": {
+          "required": true,
+          "type": "str"
+        }
+      },
+      "mro": [
+        "gemini_webapi.types.image.GeneratedImage",
+        "gemini_webapi.types.image.Image",
+        "pydantic.main.BaseModel",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.types.image.GeneratedImage",
+      "save": {
+        "defined_on": "gemini_webapi.types.image.Image",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, path: str = 'temp', filename: str | None = None, verbose: bool = False, client: curl_cffi.requests.session.AsyncSession | None = None, **kwargs) -> str",
+        "type_hints": {
+          "client": "curl_cffi.requests.session.AsyncSession | None",
+          "filename": "str | None",
+          "path": "str",
+          "return": "str",
+          "verbose": "bool"
+        }
+      },
+      "signature": "(*, url: str, title: str = '[Image]', alt: str = '', proxy: str | None = None, client: curl_cffi.requests.session.AsyncSession | None = None, client_ref: Any = None, cid: str = '', rid: str = '', rcid: str = '', image_id: str = '') -> None"
+    },
+    "Image": {
+      "attributes": {
+        "alt": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "client": {
+          "default": "None",
+          "required": false,
+          "type": "curl_cffi.requests.session.AsyncSession | None"
+        },
+        "proxy": {
+          "default": "None",
+          "required": false,
+          "type": "str | None"
+        },
+        "title": {
+          "default": "'[Image]'",
+          "required": false,
+          "type": "str"
+        },
+        "url": {
+          "required": true,
+          "type": "str"
+        }
+      },
+      "mro": [
+        "gemini_webapi.types.image.Image",
+        "pydantic.main.BaseModel",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.types.image.Image",
+      "save": {
+        "defined_on": "gemini_webapi.types.image.Image",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, path: str = 'temp', filename: str | None = None, verbose: bool = False, client: curl_cffi.requests.session.AsyncSession | None = None, **kwargs) -> str",
+        "type_hints": {
+          "client": "curl_cffi.requests.session.AsyncSession | None",
+          "filename": "str | None",
+          "path": "str",
+          "return": "str",
+          "verbose": "bool"
+        }
+      },
+      "signature": "(*, url: str, title: str = '[Image]', alt: str = '', proxy: str | None = None, client: curl_cffi.requests.session.AsyncSession | None = None) -> None"
+    },
+    "WebImage": {
+      "attributes": {
+        "alt": {
+          "default": "''",
+          "required": false,
+          "type": "str"
+        },
+        "client": {
+          "default": "None",
+          "required": false,
+          "type": "curl_cffi.requests.session.AsyncSession | None"
+        },
+        "proxy": {
+          "default": "None",
+          "required": false,
+          "type": "str | None"
+        },
+        "title": {
+          "default": "'[Image]'",
+          "required": false,
+          "type": "str"
+        },
+        "url": {
+          "required": true,
+          "type": "str"
+        }
+      },
+      "mro": [
+        "gemini_webapi.types.image.WebImage",
+        "gemini_webapi.types.image.Image",
+        "pydantic.main.BaseModel",
+        "builtins.object"
+      ],
+      "qualified_name": "gemini_webapi.types.image.WebImage",
+      "save": {
+        "defined_on": "gemini_webapi.types.image.Image",
+        "is_async_generator": false,
+        "is_coroutine": true,
+        "signature": "(self, path: str = 'temp', filename: str | None = None, verbose: bool = False, client: curl_cffi.requests.session.AsyncSession | None = None, **kwargs) -> str",
+        "type_hints": {
+          "client": "curl_cffi.requests.session.AsyncSession | None",
+          "filename": "str | None",
+          "path": "str",
+          "return": "str",
+          "verbose": "bool"
+        }
+      },
+      "signature": "(*, url: str, title: str = '[Image]', alt: str = '', proxy: str | None = None, client: curl_cffi.requests.session.AsyncSession | None = None) -> None"
+    }
+  },
+  "model_output": {
+    "attributes": {
+      "candidates": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "field",
+        "required": true,
+        "type": "list[gemini_webapi.types.candidate.Candidate]"
+      },
+      "chosen": {
+        "default": "0",
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "field",
+        "required": false,
+        "type": "int"
+      },
+      "citations": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "list[gemini_webapi.types.citation.Citation]"
+      },
+      "deep_research_document": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "gemini_webapi.types.research.DeepResearchDocument | None"
+      },
+      "deep_research_plan": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "gemini_webapi.types.research.DeepResearchPlan | None"
+      },
+      "images": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "list[gemini_webapi.types.image.Image]"
+      },
+      "media": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "list[gemini_webapi.types.video.GeneratedMedia]"
+      },
+      "metadata": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "field",
+        "required": true,
+        "type": "list[str]"
+      },
+      "rcid": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "str"
+      },
+      "text": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "str"
+      },
+      "text_delta": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "str"
+      },
+      "thoughts": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "str | None"
+      },
+      "thoughts_delta": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "str"
+      },
+      "videos": {
+        "defined_on": "gemini_webapi.types.modeloutput.ModelOutput",
+        "kind": "property",
+        "type": "list[gemini_webapi.types.video.GeneratedVideo]"
+      }
+    },
+    "qualified_name": "gemini_webapi.types.modeloutput.ModelOutput",
+    "required_attributes": {
+      "candidates": {
+        "present": true,
+        "type": "list[gemini_webapi.types.candidate.Candidate]",
+        "visible_in_dir": false
+      },
+      "deep_research_document": {
+        "present": true,
+        "type": "gemini_webapi.types.research.DeepResearchDocument | None",
+        "visible_in_dir": true
+      },
+      "images": {
+        "present": true,
+        "type": "list[gemini_webapi.types.image.Image]",
+        "visible_in_dir": true
+      },
+      "media": {
+        "present": true,
+        "type": "list[gemini_webapi.types.video.GeneratedMedia]",
+        "visible_in_dir": true
+      },
+      "text": {
+        "present": true,
+        "type": "str",
+        "visible_in_dir": true
+      },
+      "text_delta": {
+        "present": true,
+        "type": "str",
+        "visible_in_dir": true
+      },
+      "thoughts": {
+        "present": true,
+        "type": "str | None",
+        "visible_in_dir": true
+      },
+      "videos": {
+        "present": true,
+        "type": "list[gemini_webapi.types.video.GeneratedVideo]",
+        "visible_in_dir": true
+      }
+    },
+    "signature": "(*, metadata: list[str], candidates: list[gemini_webapi.types.candidate.Candidate], chosen: int = 0) -> None"
+  },
+  "package": {
+    "distribution": "gemini-webapi",
+    "module": "gemini_webapi",
+    "version": "2.1.1"
+  }
+}
