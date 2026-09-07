@@ -54,3 +54,15 @@ D3 要求 `research_tasks` 增設 `plan_json`。因此 T3.3 不能只改 `SCHEMA
 否則已部署的資料庫升級後會缺欄位而在執行期才炸。
 
 此為 Commander 已知並接受的技術債，於 T3.3 償還；T1.2 依其任務規格實作 spec schema 屬正確。
+
+## D5 — schema 擁有權目前分散於兩處（技術債，於 T3.3 一併收斂）
+
+T2.4 的 `auth.py` 自帶 `CREATE TABLE IF NOT EXISTS telegram_user_access` 的 DDL，
+未納入 `storage/models.py` 的 `SCHEMA_SQL`。已實測在只跑過中央 migration 的乾淨 DB 上
+可正常自建資料表，功能正確（deny-all 預設、admin bypass、deny 優先於靜態白名單皆通過）。
+
+但這使 schema 擁有權分散：中央 migration 不知道 `telegram_user_access` 存在。
+與 D4 的版本化 migration 需求合併處理 —— T3.3 導入 `PRAGMA user_version` 機制時，
+一併把 `telegram_user_access` 收進中央 `SCHEMA_SQL`，讓所有資料表由單一處遷移。
+
+判定：**不退回 T2.4**。其 DoD 通過且行為正確，屬架構整併議題而非缺陷。
