@@ -127,6 +127,60 @@ update_gem, wait_for_deep_research
 | `start_auto_refresh` | **async** | `() -> None` |
 | `close` | **async** | `(delay: float = 0) -> None` |
 
+### 建構子與 cookie 持久化
+
+```python
+GeminiClient(
+    secure_1psid: str | None = None,
+    secure_1psidts: str | None = None,
+    proxy: str | None = None,
+    **kwargs,
+)
+```
+
+#### ⚠️ `GEMINI_COOKIE_PATH` 是環境變數，不是建構子參數
+
+`gemini_webapi/utils/rotate_1psidts.py` 內部自行讀取，且為 **lazy**（每次輪替才讀）：
+
+```python
+_path = os.getenv("GEMINI_COOKIE_PATH")
+return Path(_path) if _path else Path(tempfile.gettempdir()) / "gemini_webapi"
+```
+
+- 正確作法：**process 啟動時把設定值寫入 `os.environ["GEMINI_COOKIE_PATH"]`**，
+  再建立 client。
+- 錯誤作法：當成參數傳給 `GeminiClient(...)` — 會被 `**kwargs` 吞掉而**靜默失效**。
+- 未設定時落在 `tempdir`，容器重建即失效 → 這是 spec 要求掛 volume 的直接原因。
+
+#### 快取檔路徑含有 cookie 明文
+
+```
+{GEMINI_COOKIE_PATH}/.cached_cookies_{__Secure-1PSID}.json
+```
+
+**檔名本身帶有 1PSID 原始值。** 因此此路徑**不得寫入 log**（不變量 3），
+且目錄權限需收斂。
+
+#### reinit 語義（Commander 裁定）
+
+必須 **close 後重建新物件**，不可對同一物件重複呼叫 `init()`：
+
+```python
+if self._client is not None:
+    await self._client.close()     # async, (delay: float = 0)
+self._client = GeminiClient(...)   # src/ 內唯一的建構點
+await self._client.init(...)       # async, auto_refresh 預設 True
+```
+
+只 `init` 不 `close` 會留下孤兒 `AsyncSession` 與重複的背景 refresh task，
+正是不變量 2 要防的「多重輪替互相作廢」。
+
+**不變量 2 的正確解讀**：同時只有一個存活實例，且 `src/` 內只有**一處**
+`GeminiClient(...)` 建構點。經同一工廠方法重建新實例是允許的。
+
+相關工具：`gemini_webapi.utils` 匯出 `clear_cookies_cache(cookies)` 與 `save_cookies`，
+T3.4 的 `/setcookie` 熱更新可能需要。
+
 **要點**
 
 - `auto_refresh` 預設就是 `True`，`refresh_interval` 預設 600 秒。此即不變量 2 的成因：
