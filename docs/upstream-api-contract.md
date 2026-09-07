@@ -369,11 +369,58 @@ confirmation_url, metadata, cid, response_text, raw_state
 
 ---
 
-## 七、合約未涵蓋範圍
+## 七、`AvailableModel` / `Gem` / `GemJar`（T2.5 依據）
+
+皆為 pydantic `BaseModel`（`GemJar` 為一般容器類別）。
+
+```python
+class AvailableModel:            # client.list_models() -> list[...] | None   （同步）
+    model_id: str
+    model_name: str              # ← 穩定識別，用這個
+    display_name: str            # ← 給人看的
+    description: str
+    capacity: int
+    capacity_field: int = 12
+    model_number: int = 1
+    is_available: bool = True
+    aliases: list[str] = []
+
+class Gem:                       # await client.fetch_gems(include_hidden=False) -> GemJar
+    id: str
+    name: str
+    description: str | None = None
+    prompt: str | None = None
+    predefined: bool
+```
+
+`client.resolve_model(name: str) -> AvailableModel`（**同步**）可由 `model_name` 反查。
+
+`GemJar` 方法：
+
+```python
+filter(predefined: bool | None = None, name: str | None = None) -> GemJar
+get(id: str | None = None, name: str | None = None, default: Gem | None = None) -> Gem | None
+keys() / values() / items()      # key 為 gem id
+```
+
+### ⚠️ inline keyboard 的 64-byte 約束（Commander 裁定）
+
+Telegram `callback_data` 上限 **64 bytes**。因此：
+
+- **不要**把 `model_id`、`description` 或清單索引放進 `callback_data`
+  （索引會在重啟後錯位）。
+- 模型：`callback_data = f"model:{model_name}"`，送出前驗證編碼後 ≤ 64 bytes，
+  超過則略過並記 log。選定後以 `resolve_model(model_name)` 取回物件。
+  `chat_sessions.model` 存 `model_name`，`NULL` = 帳號預設。
+- Gem：`callback_data = f"gem:{gem.id}"`，同樣驗證長度。`chat_sessions.gem_id` 存 `gem.id`。
+- 清單只顯示 `is_available` 為 `True` 者；顯示用 `display_name`，識別用 `model_name`。
+
+---
+
+## 八、合約未涵蓋範圍
 
 以下尚未反射確認，需要時**必須回報 Commander 補做偵察，不得猜測**：
 
-- `AvailableModel` / `Gem` / `GemJar` 的欄位結構（T2.5 `/model`、`/gem` 實作前需補）
 - `Candidate`、`Citation`、`ChatHistory` 的欄位結構
 - `GeneratedVideo` / `GeneratedMedia` 的屬性與 `save()` 簽章（T3.2b 若處理影音需補）
 - `Image.url` 的對外可存取性 → **由 T3.2a HUMAN gate 實測回答**
