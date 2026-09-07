@@ -1,0 +1,28 @@
+# --- Secrets: NEVER commit ---
+.env
+.env.*
+!.env.example
+cookies/
+*.cookie
+*.cookies
+
+# --- Runtime data ---
+data/
+!data/.gitkeep
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# --- OS / editor ---
+.DS_Store
