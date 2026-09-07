@@ -1,0 +1,418 @@
+from __future__ import annotations
+
+import inspect
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, call
+
+import pytest
+from pydantic import SecretStr
+from telegram.constants import ParseMode
+
+from gemini_tg_bot.gemini.service import ServiceState
+from gemini_tg_bot.queue import RequestQueue
+from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
+from gemini_tg_bot.telegram.handlers import (
+    CALLBACK_DATA_LIMIT,
+    GEM_LIST_UNAVAILABLE,
+    MODEL_LIST_UNAVAILABLE,
+    EgressMeter,
+    TelegramHandlers,
+    register_handlers,
+)
+
+try:
+    from gemini_tg_bot.gemini.sessions import ChatSessionRegistry as _RegistrySpec
+except ModuleNotFoundError:
+    # T2.3 is landing independently in the shared worktree.  Keep this task's
+    # mechanical DoD runnable until that module is present; once it lands the
+    # exact production class above automatically becomes the mock spec.
+    class _RegistrySpec:
+        async def get_state(self, chat_id: int) -> Any: ...
+        async def get_or_create(self, chat_id: int) -> Any: ...
+        async def reset(self, chat_id: int) -> None: ...
+        async def set_model(self, chat_id: int, model: str | None) -> None: ...
+        async def set_gem(self, chat_id: int, gem_id: str | None) -> None: ...
+        async def set_temporary(self, chat_id: int, temporary: bool) -> None: ...
+        async def persist(self, chat_id: int, session: Any) -> None: ...
+        async def restore_all(self) -> None: ...
+
+
+NOW = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
+
+
+def _state(
+    *,
+    chat_id: int = 202,
+    cid: str | None = "cid-test",
+    model: str | None = "dynamic-model",
+    temporary: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        chat_id=chat_id,
+        cid=cid,
+        model=model,
+        gem_id=None,
+        temporary=temporary,
+        updated_at=NOW.isoformat(),
+    )
+
+
+def _update(
+    *,
+    text: str = "hello",
+    user_id: int = 101,
+    chat_id: int = 202,
+) -> SimpleNamespace:
+    message = SimpleNamespace(text=text, reply_text=AsyncMock())
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_message=message,
+        callback_query=None,
+    )
+
+
+def _callback_update(
+    data: str,
+    *,
+    user_id: int = 101,
+    chat_id: int = 202,
+) -> SimpleNamespace:
+    query = SimpleNamespace(
+        data=data,
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_message=None,
+        callback_query=query,
+    )
+
+
+def _client_service(client: Any) -> MagicMock:
+    async def execute(operation: Any) -> Any:
+        result = operation(client)
+        return await result if inspect.isawaitable(result) else result
+
+    service = MagicMock()
+    service.execute = AsyncMock(side_effect=execute)
+    service.health = SimpleNamespace(
+        state=ServiceState.HEALTHY,
+        degraded_reason=None,
+    )
+    return service
+
+
+@pytest.fixture
+def registry() -> AsyncMock:
+    mocked = AsyncMock(spec=_RegistrySpec)
+    mocked.get_state.return_value = _state()
+    return mocked
+
+
+@pytest.fixture
+def handlers_factory(tmp_path: Path, registry: AsyncMock):
+    def make(
+        client: Any | None = None,
+        *,
+        usage_dao: UsageLogDAO | AsyncMock | None = None,
+        egress_meter: EgressMeter | None = None,
+        cookie_path: Path | None = None,
+    ) -> tuple[TelegramHandlers, MagicMock]:
+        service = _client_service(client or MagicMock())
+        handlers = TelegramHandlers(
+            service=service,
+            sessions=registry,
+            request_queue=RequestQueue(
+                max_concurrency=1,
+                user_rate_limit_per_min=10,
+            ),
+            usage_dao=usage_dao,
+            egress_meter=egress_meter or EgressMeter(now=lambda: NOW),
+            cookie_path=cookie_path or tmp_path,
+            secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
+            now=lambda: NOW,
+        )
+        return handlers, service
+
+    return make
+
+
+async def test_help_and_new_commands(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    handlers, _ = handlers_factory()
+    update = _update()
+
+    await handlers.start(update, SimpleNamespace())
+    assert "/model" in update.effective_message.reply_text.await_args.args[0]
+    assert "/status" in update.effective_message.reply_text.await_args.args[0]
+
+    await handlers.new(update, SimpleNamespace())
+    registry.reset.assert_awaited_once_with(202)
+    assert "新的對話" in update.effective_message.reply_text.await_args.args[0]
+
+
+async def test_temp_toggles_from_registry_state(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    handlers, _ = handlers_factory()
+    update = _update()
+    registry.get_state.side_effect = [
+        _state(temporary=False),
+        _state(temporary=True),
+    ]
+
+    await handlers.temp(update, SimpleNamespace())
+    await handlers.temp(update, SimpleNamespace())
+
+    assert registry.set_temporary.await_args_list == [
+        call(202, True),
+        call(202, False),
+    ]
+
+
+async def test_model_lists_dynamic_available_models_and_skips_oversized_data(
+    handlers_factory,
+) -> None:
+    available = SimpleNamespace(
+        model_name="dynamic-model",
+        display_name="Dynamic Model",
+        is_available=True,
+    )
+    unavailable = SimpleNamespace(
+        model_name="disabled-model",
+        display_name="Disabled Model",
+        is_available=False,
+    )
+    oversized = SimpleNamespace(
+        model_name="界" * CALLBACK_DATA_LIMIT,
+        display_name="Too Large",
+        is_available=True,
+    )
+    client = MagicMock()
+    client.list_models.return_value = [available, unavailable, oversized]
+    handlers, _ = handlers_factory(client)
+    update = _update()
+
+    await handlers.model(update, SimpleNamespace())
+
+    client.list_models.assert_called_once_with()
+    reply = update.effective_message.reply_text.await_args
+    keyboard = reply.kwargs["reply_markup"].inline_keyboard
+    assert len(keyboard) == 1
+    assert keyboard[0][0].text == "Dynamic Model"
+    assert keyboard[0][0].callback_data == "model:dynamic-model"
+
+
+async def test_model_handles_upstream_none(handlers_factory) -> None:
+    client = MagicMock()
+    client.list_models.return_value = None
+    handlers, _ = handlers_factory(client)
+    update = _update()
+
+    await handlers.model(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        MODEL_LIST_UNAVAILABLE
+    )
+
+
+async def test_model_callback_revalidates_and_resolves_stable_name(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    model = SimpleNamespace(
+        model_name="dynamic-model",
+        display_name="Dynamic Model",
+        is_available=True,
+    )
+    client = MagicMock()
+    client.list_models.return_value = [model]
+    client.resolve_model.return_value = model
+    handlers, _ = handlers_factory(client)
+    update = _callback_update("model:dynamic-model")
+
+    await handlers.callback(update, SimpleNamespace())
+
+    update.callback_query.answer.assert_awaited_once_with()
+    client.list_models.assert_called_once_with()
+    client.resolve_model.assert_called_once_with("dynamic-model")
+    registry.set_model.assert_awaited_once_with(202, "dynamic-model")
+    assert "Dynamic Model" in (
+        update.callback_query.edit_message_text.await_args.args[0]
+    )
+
+
+async def test_gem_lists_and_selects_from_fresh_gem_jar(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    gem = SimpleNamespace(id="gem-id", name="My Gem")
+    gem_jar = MagicMock()
+    gem_jar.values.return_value = [gem]
+    gem_jar.get.return_value = gem
+    client = MagicMock()
+    client.fetch_gems = AsyncMock(return_value=gem_jar)
+    handlers, _ = handlers_factory(client)
+    command_update = _update()
+
+    await handlers.gem(command_update, SimpleNamespace())
+
+    client.fetch_gems.assert_awaited_once_with(include_hidden=False)
+    keyboard = command_update.effective_message.reply_text.await_args.kwargs[
+        "reply_markup"
+    ].inline_keyboard
+    assert keyboard[0][0].text == "My Gem"
+    assert keyboard[0][0].callback_data == "gem:gem-id"
+
+    callback_update = _callback_update("gem:gem-id")
+    await handlers.callback(callback_update, SimpleNamespace())
+
+    assert client.fetch_gems.await_count == 2
+    gem_jar.get.assert_called_once_with(id="gem-id")
+    registry.set_gem.assert_awaited_once_with(202, "gem-id")
+    assert "My Gem" in (
+        callback_update.callback_query.edit_message_text.await_args.args[0]
+    )
+
+
+async def test_gem_handles_empty_jar(handlers_factory) -> None:
+    gem_jar = MagicMock()
+    gem_jar.values.return_value = []
+    client = MagicMock()
+    client.fetch_gems = AsyncMock(return_value=gem_jar)
+    handlers, _ = handlers_factory(client)
+    update = _update()
+
+    await handlers.gem(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        GEM_LIST_UNAVAILABLE
+    )
+
+
+async def test_text_uses_current_session_service_renders_and_persists_usage(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    session = SimpleNamespace(send_message=AsyncMock())
+    session.send_message.return_value = SimpleNamespace(text="**hello**\n\nworld")
+    registry.get_state.return_value = _state(temporary=True)
+    registry.get_or_create.return_value = session
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    handlers, service = handlers_factory(usage_dao=usage_dao)
+    update = _update(text="question")
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    registry.get_or_create.assert_awaited_once_with(202)
+    service.execute.assert_awaited_once()
+    session.send_message.assert_awaited_once_with("question", temporary=True)
+    registry.persist.assert_awaited_once_with(202, session)
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "<b>hello</b>\n\nworld",
+        parse_mode=ParseMode.HTML,
+    )
+    saved = usage_dao.add.await_args.args[0]
+    assert saved.user_id == 101
+    assert saved.chat_id == 202
+    assert saved.model == "dynamic-model"
+    assert saved.ok is True
+
+
+async def test_status_reports_required_fields_and_does_not_expose_cookie(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    cache_file = tmp_path / ".cached_cookies_FAKE_1PSID_FOR_TEST.json"
+    cache_file.write_text("{}", encoding="utf-8")
+    refresh_timestamp = datetime(2026, 9, 7, 7, 30, tzinfo=UTC).timestamp()
+    os.utime(cache_file, (refresh_timestamp, refresh_timestamp))
+
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    usage_dao.list_for_chat.return_value = [
+        UsageLog(
+            id=1,
+            user_id=101,
+            chat_id=202,
+            command="message",
+            model="dynamic-model",
+            ok=True,
+            created_at="2026-09-07T01:00:00+00:00",
+        ),
+        UsageLog(
+            id=2,
+            user_id=101,
+            chat_id=202,
+            command="message",
+            model="dynamic-model",
+            ok=True,
+            created_at="2026-09-06T23:59:59+00:00",
+        ),
+    ]
+    egress = EgressMeter(now=lambda: NOW)
+    egress.record(2048)
+    handlers, _ = handlers_factory(
+        usage_dao=usage_dao,
+        egress_meter=egress,
+        cookie_path=tmp_path,
+    )
+    update = _update()
+
+    await handlers.status(update, SimpleNamespace())
+
+    text = update.effective_message.reply_text.await_args.args[0]
+    assert "目前模型：dynamic-model" in text
+    assert "Session CID：cid-test" in text
+    assert "Cookie 最後刷新時間：2026-09-07 07:30:00 UTC" in text
+    assert "佇列深度：0" in text
+    assert "今日用量：1" in text
+    assert "本月累計 egress 估算值：2.0 KiB" in text
+    assert "FAKE_1PSID_FOR_TEST" not in text
+
+
+async def test_status_reports_cookie_not_refreshed_when_cache_is_missing(
+    handlers_factory,
+) -> None:
+    handlers, _ = handlers_factory()
+    update = _update()
+
+    await handlers.status(update, SimpleNamespace())
+
+    assert "Cookie 最後刷新時間：尚未刷新" in (
+        update.effective_message.reply_text.await_args.args[0]
+    )
+
+
+def test_egress_meter_resets_on_calendar_month() -> None:
+    clock = [datetime(2026, 9, 30, 23, 59, tzinfo=UTC)]
+    meter = EgressMeter(now=lambda: clock[0])
+    meter.record(100)
+    assert meter.month_to_date_bytes == 100
+
+    clock[0] = datetime(2026, 10, 1, tzinfo=UTC)
+    assert meter.month_to_date_bytes == 0
+
+
+def test_registration_places_auth_in_first_group(
+    handlers_factory,
+) -> None:
+    handlers, _ = handlers_factory()
+    application = SimpleNamespace(add_handler=MagicMock())
+    auth = AsyncMock()
+
+    register_handlers(application, auth=auth, handlers=handlers)
+
+    calls = application.add_handler.call_args_list
+    assert calls[0].kwargs == {"group": -1}
+    assert len(calls) == 10
