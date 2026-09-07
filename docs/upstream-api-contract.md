@@ -50,6 +50,53 @@ import 時務必使用限定名稱（如 `from gemini_webapi import exceptions a
 `TemporarilyBlockedError` 歸為 RateLimit 而非 Fatal：它是暫時性封鎖，退避後可能恢復；
 但若連續觸發應升級為 DEGRADED，由 T2.2 的狀態機決定門檻。
 
+### 傳輸層例外 — `curl_cffi` 0.16.3
+
+`gemini_webapi` 底層以 `curl_cffi` 發送請求，其例外會穿透上來。
+
+**實測繼承事實：**
+
+```
+curl_cffi.curl.CurlError                    → Exception            （不是 OSError！）
+curl_cffi.requests.exceptions.RequestException → CurlError, OSError   （雙重繼承）
+    ├── Timeout ── ConnectTimeout / ReadTimeout
+    ├── ConnectionError ── DNSError / SSLError ── CertificateVerifyError
+    ├── ProxyError / ChunkedEncodingError / IncompleteRead
+    └── InvalidURL / MissingSchema / InvalidSchema / ImpersonateError / ...
+```
+
+- 因為 `RequestException` 繼承 `OSError`，**所有 requests 層例外都已是 `OSError` 子類**。
+- 但 **裸 `CurlError` 不是 `OSError`**，單用 `except OSError` 會漏接。
+
+**T2.1 實作指定：**
+
+```python
+import asyncio
+from curl_cffi.curl import CurlError
+from curl_cffi.requests import exceptions as cc_exc
+
+FATAL_TRANSPORT = (          # 設定／程式錯誤，重試無意義
+    cc_exc.InvalidURL, cc_exc.MissingSchema, cc_exc.InvalidSchema,
+    cc_exc.URLRequired, cc_exc.InvalidHeader, cc_exc.ImpersonateError,
+)
+TRANSIENT = (
+    cc_exc.Timeout, cc_exc.ConnectionError, cc_exc.ChunkedEncodingError,
+    cc_exc.IncompleteRead, cc_exc.ProxyError,
+    CurlError, asyncio.TimeoutError, OSError,   # 兜底，必須放最後
+)
+```
+
+**兩個必守的順序規則：**
+
+1. **Fatal 的比對必須早於 Transient。** `InvalidURL` 繼承 `RequestException → CurlError`，
+   若先比 Transient 會被 `CurlError` 兜底吃掉而錯誤地重試。
+2. **`gemini_webapi` 的分類優先於 `curl_cffi`。** 先判 `AuthError` /
+   `UsageLimitExceededError` / `TemporarilyBlockedError` / `gw_exc.TimeoutError`，
+   再落到傳輸層。
+
+**命名遮蔽**：`cc_exc.ConnectionError` 與 `cc_exc.Timeout` 會遮蔽 builtins 同名例外，
+務必以限定名稱使用，不可 `from curl_cffi.requests.exceptions import ConnectionError`。
+
 ---
 
 ## 二、`GeminiClient`
