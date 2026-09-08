@@ -23,6 +23,7 @@ from telegram.ext import (
     filters,
 )
 
+from gemini_tg_bot.config import persist_runtime_credentials
 from gemini_tg_bot.gemini.errors import AccountStatusError, classify_error
 from gemini_tg_bot.gemini.service import (
     DegradedReason,
@@ -99,9 +100,6 @@ IMAGE_GENERATION_PREFIX = (
     "Generate an original AI image based on the following request. "
     "Do not search for or return existing web images:"
 )
-_ACCOUNT_STATUS_UNSET = object()
-
-
 class _StreamingMessageProxy:
     """Capture the placeholder while delegating Telegram reply operations."""
 
@@ -551,11 +549,9 @@ class TelegramHandlers:
         account_status = getattr(
             self._service.health,
             "account_status",
-            _ACCOUNT_STATUS_UNSET,
+            None,
         )
-        if account_status is not _ACCOUNT_STATUS_UNSET and (
-            account_status is not AccountStatus.AVAILABLE
-        ):
+        if account_status is not AccountStatus.AVAILABLE:
             if isinstance(account_status, AccountStatus):
                 guidance = account_status_guidance(account_status)
             else:
@@ -567,6 +563,20 @@ class TelegramHandlers:
             return
 
         self._secure_1psid = SecretStr(secure_1psid)
+        try:
+            persist_runtime_credentials(
+                self._cookie_path,
+                secure_1psid,
+                secure_1psidts,
+            )
+        except Exception as error:
+            _log_handler_error("runtime credential persistence", error)
+            await send_text_or_busy(
+                message,
+                "Cookie 已套用且 Gemini 服務已恢復，"
+                "但無法保存供重啟使用；請重新執行 /setcookie。",
+            )
+            return
         await send_text_or_busy(
             message,
             "Cookie 已更新，Gemini 服務已熱重啟。",

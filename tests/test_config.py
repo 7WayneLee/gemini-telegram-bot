@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
+import stat
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from gemini_tg_bot.config import Settings
+from gemini_tg_bot.config import (
+    RUNTIME_CREDENTIALS_FILENAME,
+    Settings,
+    persist_runtime_credentials,
+)
 
 
 REQUIRED_SETTINGS = {
@@ -147,3 +153,76 @@ def test_secrets_are_masked_in_settings_repr() -> None:
 
     assert "FAKE_1PSID_FOR_TEST" not in rendered
     assert "FAKE_1PSIDTS_FOR_TEST" not in rendered
+
+
+def test_runtime_credentials_are_private_and_override_configured_values(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cookie_path = tmp_path / "cookies"
+    replacement_1psid = "FAKE_REPLACEMENT_1PSID_FOR_TEST"
+    replacement_1psidts = "FAKE_REPLACEMENT_1PSIDTS_FOR_TEST"
+
+    with caplog.at_level(logging.WARNING):
+        persist_runtime_credentials(
+            cookie_path,
+            replacement_1psid,
+            replacement_1psidts,
+        )
+        restarted = make_settings(GEMINI_COOKIE_PATH=cookie_path)
+
+    override_path = cookie_path / RUNTIME_CREDENTIALS_FILENAME
+    assert stat.S_IMODE(cookie_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(override_path.stat().st_mode) == 0o600
+    override_text = override_path.read_text(encoding="utf-8")
+    assert replacement_1psid not in override_text
+    assert replacement_1psidts not in override_text
+    assert replacement_1psid not in caplog.text
+    assert replacement_1psidts not in caplog.text
+    assert (
+        restarted.gemini_secure_1psid.get_secret_value()
+        == replacement_1psid
+    )
+    assert (
+        restarted.gemini_secure_1psidts.get_secret_value()
+        == replacement_1psidts
+    )
+
+
+def test_missing_runtime_credentials_falls_back_without_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        settings = make_settings(GEMINI_COOKIE_PATH=tmp_path / "cookies")
+
+    assert settings.gemini_secure_1psid.get_secret_value() == "FAKE_1PSID_FOR_TEST"
+    assert (
+        settings.gemini_secure_1psidts.get_secret_value()
+        == "FAKE_1PSIDTS_FOR_TEST"
+    )
+    assert "Runtime credential override" not in caplog.text
+
+
+def test_invalid_runtime_credentials_warns_and_falls_back(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cookie_path = tmp_path / "cookies"
+    cookie_path.mkdir()
+    (cookie_path / RUNTIME_CREDENTIALS_FILENAME).write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        settings = make_settings(GEMINI_COOKIE_PATH=cookie_path)
+
+    assert settings.gemini_secure_1psid.get_secret_value() == "FAKE_1PSID_FOR_TEST"
+    assert (
+        settings.gemini_secure_1psidts.get_secret_value()
+        == "FAKE_1PSIDTS_FOR_TEST"
+    )
+    assert "Runtime credential override is unreadable or invalid" in caplog.text
+    assert "FAKE_1PSID_FOR_TEST" not in caplog.text
+    assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text

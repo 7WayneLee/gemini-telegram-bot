@@ -17,7 +17,11 @@ from pydantic import SecretStr
 from telegram.constants import MediaGroupLimit, ParseMode
 from telegram.error import BadRequest, RetryAfter
 
-from gemini_tg_bot.__main__ import _start_application
+from gemini_tg_bot.__main__ import (
+    _initialize_and_start_polling,
+    _start_application,
+)
+from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME
 from gemini_tg_bot.gemini.service import DegradedReason, ServiceState
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
@@ -798,6 +802,43 @@ async def test_setcookie_rejects_non_available_account_status(
     assert "Cookie 已更新" not in reply
 
 
+async def test_setcookie_success_persists_private_runtime_override(
+    handlers_factory,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cookie_path = tmp_path / "cookies"
+    handlers, service = handlers_factory(cookie_path=cookie_path)
+    service.reinit = AsyncMock()
+    handlers.bind_auth(SimpleNamespace(is_admin=lambda user_id: user_id == 101))
+    handlers._awaiting_cookie_users.add(101)
+    replacement_1psid = "FAKE_REPLACEMENT_1PSID_FOR_TEST"
+    replacement_1psidts = "FAKE_REPLACEMENT_1PSIDTS_FOR_TEST"
+    update = _update(
+        text=(
+            f"__Secure-1PSID={replacement_1psid}\n"
+            f"__Secure-1PSIDTS={replacement_1psidts}"
+        )
+    )
+
+    await handlers.setcookie_value(update, SimpleNamespace())
+
+    service.reinit.assert_awaited_once_with(
+        secure_1psid=replacement_1psid,
+        secure_1psidts=replacement_1psidts,
+    )
+    override_path = cookie_path / RUNTIME_CREDENTIALS_FILENAME
+    assert override_path.stat().st_mode & 0o777 == 0o600
+    override_text = override_path.read_text(encoding="utf-8")
+    assert replacement_1psid not in override_text
+    assert replacement_1psidts not in override_text
+    assert replacement_1psid not in caplog.text
+    assert replacement_1psidts not in caplog.text
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "Cookie 已更新，Gemini 服務已熱重啟。"
+    )
+
+
 @pytest.mark.parametrize(
     ("artifact_text", "expected_text", "parse_mode"),
     [
@@ -1100,6 +1141,28 @@ async def test_startup_registers_public_command_menu() -> None:
         {"setcookie", "allow", "deny", "health"}
     )
     application.start.assert_awaited_once_with()
+
+
+async def test_degraded_gemini_startup_still_starts_polling() -> None:
+    service = SimpleNamespace(
+        init=AsyncMock(),
+        state=ServiceState.DEGRADED,
+    )
+    sessions = SimpleNamespace(restore_all=AsyncMock())
+    research = SimpleNamespace(restore_running=AsyncMock())
+    updater = SimpleNamespace(start_polling=AsyncMock())
+
+    await _initialize_and_start_polling(
+        service,
+        sessions,
+        research,
+        updater,
+    )
+
+    service.init.assert_awaited_once_with()
+    sessions.restore_all.assert_awaited_once_with()
+    research.restore_running.assert_awaited_once_with()
+    updater.start_polling.assert_awaited_once()
 
 
 async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:

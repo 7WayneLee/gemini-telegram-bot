@@ -258,6 +258,25 @@ class GeminiService:
         if failure is not None:
             if notification is not None:
                 await self._notify_admin(notification)
+            if self._state is ServiceState.DEGRADED:
+                degraded_reason = (
+                    self._degraded_reason.value
+                    if self._degraded_reason is not None
+                    else "unknown"
+                )
+                account_status = (
+                    self._account_status.name
+                    if self._account_status is not None
+                    else "unknown"
+                )
+                LOGGER.warning(
+                    "Gemini startup is DEGRADED reason=%s account_status=%s; "
+                    "Telegram polling will continue; use /setcookie to "
+                    "restore service",
+                    degraded_reason,
+                    account_status,
+                )
+                return
             raise failure.with_traceback(failure.__traceback__)
 
     async def reinit(

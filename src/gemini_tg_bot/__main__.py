@@ -109,10 +109,12 @@ async def _run_polling(settings: Settings) -> None:
 
         try:
             async with application:
-                await service.init()
-                await sessions.restore_all()
-                await research.restore_running()
-                await updater.start_polling(allowed_updates=Update.ALL_TYPES)
+                await _initialize_and_start_polling(
+                    service,
+                    sessions,
+                    research,
+                    updater,
+                )
                 try:
                     await _start_application(application)
                     await stop_event.wait()
@@ -135,6 +137,20 @@ async def _run_polling(settings: Settings) -> None:
                 await service.close()
             finally:
                 await database.close()
+
+
+async def _initialize_and_start_polling(
+    service: GeminiService,
+    sessions: Any,
+    research: ResearchManager,
+    updater: Any,
+) -> None:
+    """Restore runtime state and start polling even if Gemini is degraded."""
+
+    await service.init()
+    await sessions.restore_all()
+    await research.restore_running()
+    await updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
 
 async def _start_application(

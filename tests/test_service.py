@@ -117,6 +117,7 @@ async def test_new_service_does_not_trust_client_default_available_status(
 async def test_post_init_unauthenticated_status_enters_auth_degraded(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     client = _mock_client()
 
@@ -129,10 +130,8 @@ async def test_post_init_unauthenticated_status_enters_auth_degraded(
     notifier = AsyncMock()
     service = GeminiService(settings, notifier)
 
-    with pytest.raises(AccountStatusError) as exc_info:
-        await service.init()
+    await service.init()
 
-    assert exc_info.value.status is AccountStatus.UNAUTHENTICATED
     assert service.state is ServiceState.DEGRADED
     assert service.health.degraded_reason is DegradedReason.AUTH
     assert service.health.account_status is AccountStatus.UNAUTHENTICATED
@@ -140,6 +139,11 @@ async def test_post_init_unauthenticated_status_enters_auth_degraded(
     notification = notifier.await_args.args[0]
     assert AUTH_DEGRADED_NOTIFICATION in notification
     assert AccountStatus.UNAUTHENTICATED.description in notification
+    assert "reason=auth" in caplog.text
+    assert "account_status=UNAUTHENTICATED" in caplog.text
+    assert "/setcookie" in caplog.text
+    assert "FAKE_1PSID_FOR_TEST" not in caplog.text
+    assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text
 
 
 async def test_post_init_location_rejected_has_distinct_remediation(
@@ -151,8 +155,7 @@ async def test_post_init_location_rejected_has_distinct_remediation(
     notifier = AsyncMock()
     service = GeminiService(settings, notifier)
 
-    with pytest.raises(AccountStatusError):
-        await service.init()
+    await service.init()
 
     assert service.state is ServiceState.DEGRADED
     assert service.health.degraded_reason is DegradedReason.AUTH
@@ -178,8 +181,7 @@ async def test_temporarily_unavailable_status_uses_blocked_half_open_recovery(
         blocked_cooldown_sec=60.0,
     )
 
-    with pytest.raises(AccountStatusError):
-        await service.init()
+    await service.init()
 
     assert service.state is ServiceState.DEGRADED
     assert service.health.degraded_reason is DegradedReason.BLOCKED
@@ -531,13 +533,28 @@ async def test_auth_failure_during_init_is_degraded_and_mock_client_is_closed(
     notifier = AsyncMock()
     service = GeminiService(settings, notifier)
 
-    with pytest.raises(gw_exc.AuthError):
-        await service.init()
+    await service.init()
 
     client.close.assert_awaited_once_with()
     assert service.state is ServiceState.DEGRADED
     assert service.health.degraded_reason is DegradedReason.AUTH
     notifier.assert_awaited_once_with(AUTH_DEGRADED_NOTIFICATION)
+
+
+async def test_non_auth_failure_during_init_remains_fatal(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _mock_client()
+    client.init.side_effect = RuntimeError("synthetic startup failure")
+    _patch_client_factory(monkeypatch, client)
+    service = GeminiService(settings)
+
+    with pytest.raises(RuntimeError, match="synthetic startup failure"):
+        await service.init()
+
+    client.close.assert_awaited_once_with()
+    assert service.state is ServiceState.FAILED
 
 
 async def test_health_and_errors_never_render_credentials(
