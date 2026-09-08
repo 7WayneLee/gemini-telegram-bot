@@ -1,7 +1,11 @@
 # Gemini Telegram Bot
 
+[![CI](https://github.com/7WayneLee/gemini-telegram-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/7WayneLee/gemini-telegram-bot/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
 透過 [`gemini-webapi`](https://github.com/HanaokaYuzu/Gemini-API) 提供 Gemini 對話能力的
-Telegram bot，設計為部署在資源受限、且與其他服務共用的 GCP VM 上。
+Telegram bot。設計取向是**在資源受限、且與其他服務共用的小型 VM 上長期穩定運行** ——
+記憶體上限、零 egress 的圖片路徑、cookie 生命週期管理都是照這個前提做的。
 
 **這不是官方 Gemini API。** 認證方式是瀏覽器 cookie，不是 API key。
 
@@ -38,18 +42,29 @@ Telegram bot，設計為部署在資源受限、且與其他服務共用的 GCP 
 
 ## 快速開始
 
+需要 **Python 3.12+** 與 [uv](https://docs.astral.sh/uv/)。
+
 ```bash
-# 1. 建立設定檔
+# 1. 取得程式碼並安裝相依
+git clone https://github.com/7WayneLee/gemini-telegram-bot.git
+cd gemini-telegram-bot
+uv sync
+
+# 2. 建立設定檔
 cp .env.example .env && chmod 600 .env
 
-# 2. 填入五個必要值（見下方「設定」）
+# 3. 填入五個必要值（見下方「設定」）
 #    TELEGRAM_BOT_TOKEN / ADMIN_USER_ID / ALLOWED_USER_IDS
 #    GEMINI_SECURE_1PSID / GEMINI_SECURE_1PSIDTS
+#    cookie 的取得方式見下一節 —— 那是本專案最關鍵的步驟
 
-# 3. 起飛前檢查（不會發出任何 Gemini 請求，也不會印出任何祕密值）
-uv run python scripts/preflight.py --check-ip
+# 4. 起飛前檢查（不會發出任何 Gemini 請求，也不會印出任何祕密值）
+uv run python scripts/preflight.py
 
-# 4. 啟動
+# 5. 不需憑證的全鏈路煙霧測試
+uv run python -m gemini_tg_bot --dry-run
+
+# 6. 啟動
 uv run python -m gemini_tg_bot
 ```
 
