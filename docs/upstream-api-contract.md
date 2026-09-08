@@ -477,6 +477,46 @@ AGENT_TAG_RE = re.compile(
 清理必須在**解析出 code fence 之後、只作用於 fence 外的文字**，
 不得對整段原始文字直接做 regex 替換。
 
+#### ✅ 實測樣本已回答的問題（2026-09-08，`tests/fixtures/`）
+
+使用者以 `scripts/dump_response.py` 擷取兩份真實 `ModelOutput`。結論如下。
+
+**兩種圖片來源使用完全不同的佔位符格式：**
+
+| 來源 | `text` 中的佔位符 | `url` 網域 | 有 `image_id`？ |
+|---|---|---|---|
+| `GeneratedImage` | googleusercontent 殘留（`_543`） | `lh3.googleusercontent.com/gg-dl/...` | ✅ 有 |
+| `WebImage` | XML `<Image src="image_agent_tag_NNNN"/>` | **第三方公開網址**（`travel.taipei`、`ctplayer.com`） | ❌ 無 |
+
+**`image_id` 證實了 `<a>_<b>` 的推斷。** 實測值：
+
+```
+image_id = "http://googleusercontent.com/image_generation_content/0_543"
+text     = "\n\n_543\n\n"
+```
+
+上游 `ARTIFACTS_RE` 只吃到 `0`，殘留 `_543`。與先前由症狀反推的結論完全一致。
+
+**`WebImage` 沒有 `image_id`**，欄位僅 `url / title / alt / proxy`。
+因此 XML tag 中的 `image_agent_tag_NNNN` **無法對應回具體圖片** ——
+再次確認「只能移除佔位符、另以 `sendPhoto` 送出」，不可嘗試就地替換。
+
+**對 T3.2a（egress）的直接影響：**
+`WebImage` 指向第三方公開網址，Telegram 幾乎確定可直接抓取（零 egress 可行）。
+`GeneratedImage` 指向 Google CDN 的 `gg-dl` 路徑，**很可能帶時效簽章或需認證**。
+兩者行為極可能不同 → `web_image_mode` 與 `generated_image_mode`
+必須維持為**獨立開關**，不可合併成單一設定。
+
+**`alt` 不適合當 caption：**
+`WebImage.alt` 為空字串；`GeneratedImage.alt` 是檔名
+（`watermarked_img_3040285439948722320.jpg`）。兩者皆無敘述價值。
+
+**上游品質觀察（非本專案缺陷，但需容忍）：**
+- 單一 candidate 的 `text` 中出現**兩段串接的完整回答**，且第一段在
+  「⋯呈現青竹般的藍」處被截斷後直接接上第二段。渲染層不應嘗試修復，照實呈現即可。
+- 模型文字聲稱「目前環境無法直接提供即時圖片附件」，但 `web_images` 實際有 2 張圖。
+  文字與 payload 不一致，**以 payload 為準**。
+
 #### 尚未確認
 
 - 是否存在**成對**形式（`<Tag ...>內容</Tag>`）而非只有自閉合。目前樣本只見自閉合。

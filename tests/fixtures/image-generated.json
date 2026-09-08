@@ -1,0 +1,34 @@
+{
+  "metadata": [
+    "c_4e4cdc7d95baae80",
+    "r_5272db7831c6900e"
+  ],
+  "candidates": [
+    {
+      "rcid": "rc_201e07234e0956c0",
+      "text": "\n\n_543\n\n",
+      "text_delta": "",
+      "thoughts": null,
+      "thoughts_delta": "",
+      "web_images": [],
+      "generated_images": [
+        {
+          "url": "https://lh3.googleusercontent.com/gg-dl/AAQ_wbGpmWlWuUflGFMEWGmX5Dvp46KXjvYw7DTgUPLrRVu73P2Q5od6EAYQLqRRo5E5rFqDPBkT_YSniOZIT_nOZu-DU4e_vbMooJ_BfBKDLwqcSdv1KzlpvEQJKxOr__xpGCuxLRAOaCuiu_APNl0azp1nyeKTzfd9sETLhK7P5M282loykg",
+          "title": "[Generated Image 0]",
+          "alt": "watermarked_img_3040285439948722320.jpg",
+          "proxy": "socks5h://127.0.0.1:1080",
+          "cid": "c_4e4cdc7d95baae80",
+          "rid": "r_5272db7831c6900e",
+          "rcid": "rc_201e07234e0956c0",
+          "image_id": "http://googleusercontent.com/image_generation_content/0_543"
+        }
+      ],
+      "generated_videos": [],
+      "generated_media": [],
+      "citations": [],
+      "deep_research_plan": null,
+      "deep_research_document": null
+    }
+  ],
+  "chosen": 0
+}
