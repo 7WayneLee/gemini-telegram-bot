@@ -115,3 +115,48 @@ T3.3 的 `plan_json` 遷移實作在 `gemini/research.py` 的 `_ensure_schema()`
 **償還計畫**：併入接線任務 T2.7 一併處理 ——
 導入 `PRAGMA user_version`，把三處遷移收斂到 `storage/db.py`，
 補上資料保存/冪等測試，並保留各元件既有的 `IF NOT EXISTS` / 欄位檢查作為無害的防護。
+
+## D8 — movie-nas 實測資源與 T4.1 數值推導（2026-09-08 人工實測）
+
+```
+nproc: 2
+Mem:   total 969Mi   used 528Mi   free 345Mi   buff/cache 235Mi   available 441Mi
+Swap:  total 2.0Gi   used 234Mi   free 1.8Gi
+Disk:  /dev/sda1  49G  used 6.2G  avail 41G  14%  /
+docker stats --no-stream: 無輸出（連表頭都沒有）
+```
+
+### 關鍵發現：機器遠比 spec 範例假設的小
+
+總記憶體僅 **969Mi**（推測為 GCP e2-micro），且 **swap 已使用 234Mi** ——
+在 bot 加入之前，系統就已有記憶體壓力。
+
+spec 範例的 `mem_limit: 400m` 在此**不安全**：佔總記憶體 41%、佔目前可用量 **91%**。
+照抄會把機器推向 OOM 邊緣，與該限制的原始目的（讓 bot 先死、不波及 Jellyfin）背道而馳。
+
+### 裁定數值
+
+| 項目 | 值 | 推導 |
+|---|---|---|
+| `mem_limit` | **256m** | 典型 Python asyncio bot RSS 約 120–180Mi；256m 留餘裕但仍遠低於 available 441Mi，觸限時被殺的是 bot 而非媒體服務 |
+| `memswap_limit` | **512m** | mem_limit 兩倍，允許 256m 溢出到 swap（swap 尚有 1.8Gi） |
+| `cpus` | **0.5** | 共 2 核，取 25% 總算力；bot 以 I/O 為主，不與轉檔搶 CPU |
+| 媒體暫存上限 | **256m** | `MAX_CONCURRENCY=1` 且單檔上限 20MB，實際用量遠低於此 |
+| logging | `max-size 5m`, `max-file 2` | 上限 10MB，磁碟 41G 充裕 |
+
+### ⚠️ 媒體暫存必須落在磁碟，不得使用 tmpfs
+
+此機器的稀缺資源是**記憶體（441Mi）而非磁碟（41G）**。
+tmpfs 會消耗 RAM，等同於繞過 `mem_limit` 去吃掉媒體服務的記憶體。
+暫存目錄必須掛在磁碟 volume 上。
+
+### 待釐清：既有服務是否以 Docker 執行
+
+`docker stats --no-stream` 無任何輸出（連表頭都沒有），代表目前沒有執行中的容器。
+但 spec 述明此主機同時運行 Jellyfin 與 qBittorrent，且 `free` 顯示已用 528Mi。
+推論：既有媒體服務**可能是原生安裝（systemd）而非容器**。
+
+若確實如此，為了 bot 而引入 Docker daemon 會在 969Mi 的機器上額外付出常駐開銷。
+**建議把 spec 的主/備方案對調：以 `deploy/gemini-tg-bot.service`（systemd + venv）為主要部署方式，
+Docker Compose 作為替代方案。** 兩者 spec 都要求產出，因此不影響交付範圍，只影響 README 的推薦順序。
+此項需使用者確認後定案。
