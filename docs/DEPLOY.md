@@ -95,6 +95,68 @@ docker compose -p gemini-bot -f deploy/docker-compose.yml up -d
 
 ---
 
+## ⚠️ 陷阱 3：`sudo uv venv` 會把 Python 裝進 `/root`，被 `ProtectHome=true` 擋住
+
+**2026-09-08 實際踩到，症狀完全不提示真正原因。**
+
+```
+gemini-tg-bot.service: Failed to locate executable /opt/gemini-tg-bot/.venv/bin/python:
+No such file or directory
+Main process exited, code=exited, status=203/EXEC
+```
+
+`.venv` 目錄明明存在，`uv pip install` 也成功了。查 `pyvenv.cfg` 才發現：
+
+```
+home = /root/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin
+```
+
+`sudo` 讓 `$HOME` 變成 `/root`，uv 把 managed Python 下載到那裡，
+venv 內的 `bin/python` 只是指向該處的 symlink。
+
+**兩層阻擋，改權限也沒用：**
+
+1. `/root` 通常是 `drwx------`，服務帳號進不去
+2. **本專案的 systemd unit 有 `ProtectHome=true`** —— `/root` 對服務**完全不可見**
+
+因此 systemd 回報「No such file」是真的看不到，不是路徑寫錯。
+
+### 正確作法：把 managed Python 裝到全域可讀的位置
+
+```bash
+sudo rm -rf /opt/gemini-tg-bot/.venv
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python ~/.local/bin/uv python install 3.12
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python ~/.local/bin/uv venv --python 3.12 /opt/gemini-tg-bot/.venv
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python ~/.local/bin/uv pip install --python /opt/gemini-tg-bot/.venv/bin/python /opt/gemini-tg-bot
+sudo chmod -R a+rX /opt/uv-python /opt/gemini-tg-bot/.venv
+```
+
+### 驗證（**啟動 systemd 前先做這兩步，省一輪來回**）
+
+```bash
+sudo readlink -f /opt/gemini-tg-bot/.venv/bin/python
+# 應顯示 /opt/uv-python/...，若是 /root/... 就是還沒修好
+
+sudo -u gemini-tg-bot /opt/gemini-tg-bot/.venv/bin/python -c "import gemini_tg_bot; print('import ok')"
+# 以服務帳號實際執行一次，同時驗證權限與 import
+```
+
+---
+
+## 其他實際踩到的小坑
+
+- **不要整段貼多行指令。** 連續的 `install -d` 指令在貼上時會被當成續行吃掉，
+  造成目錄沒建立卻沒有錯誤訊息。逐行執行。
+- **對 `/var/lib/gemini-tg-bot/cookies`（mode 700）用萬用字元會失敗。**
+  你的 shell 讀不到該目錄，glob 展開不了，會把字面字串傳給指令：
+  ```
+  chmod: cannot access '.../cookies/.cached_cookies_*.json': No such file or directory
+  ```
+  用 `sudo sh -c "chmod 600 .../.cached_cookies_*.json"` 讓 glob 在 root 的 shell 展開。
+  **注意這個錯誤不代表檔案沒複製成功** —— `sudo cp` 的來源在 `/tmp`（可讀），複製其實是成功的。
+
+---
+
 ## 部署後驗證
 
 依序確認：
