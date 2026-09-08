@@ -598,3 +598,53 @@ log 中 `operation=text message` 的失敗次數為 **0** ——
   快取才是最新來源。這對維運有直接意義 —— **重取 cookie 時不能只看 `.env`**。
   （見 D6 未解缺口：`1PSID` 更換後無法跨重啟存活。）
 - **`auto_refresh` 正常運作**：快取檔 mtime 在 bot 啟動後更新，證明背景輪替有在動。
+
+
+## D20 — 🔴 無格式回覆在最後一次 edit 觸發 400「message is not modified」
+
+**2026-09-08 22:00 flood control 測試期間發現**（測試本身未觸發 flood control，
+但用量堆出了這個獨立缺陷）。
+
+### 症狀
+
+```
+22:00:44,574  editMessageText  200 OK
+22:00:44,987  editMessageText  400 Bad Request     ← 相隔 0.4 秒
+22:00:44,990  ERROR  operation=text message  error_type=BadRequest
+```
+
+`usage_log` 記為 `ok=0, error_kind='fatal'`。
+
+### 根因
+
+streaming 的設計是：中途 edit 送**純文字**（`parse_mode=None`），
+最後一次 edit 才送 **HTML 渲染結果**。這是 T3.1 為避免未閉合標籤而做的正確設計。
+
+但若回覆**不含任何 Markdown 格式**，兩者內容完全相同，
+最後一次 edit 等於沒有變更，Telegram 回 400 `message is not modified`。
+
+實測確認：
+
+```
+'好的'                  → 渲染後 '好的'                  🔴 相同
+'1'                    → 渲染後 '1'                    🔴 相同
+'你好，有什麼可以幫忙的嗎？'  → 渲染後 '你好，有什麼可以幫忙的嗎？'  🔴 相同
+'**粗體** 測試'          → 渲染後 '<b>粗體</b> 測試'        ✅ 不同
+```
+
+### 影響範圍比看起來大
+
+短回答、純敘述句、無粗體/清單/程式碼的回覆**全部**會在最後一步失敗。
+使用者其實已經透過串流看到內容，但之後會多收到一則錯誤訊息，
+且該次請求被記為 `fatal`，污染 `/status` 的用量統計。
+
+先前的測試沒發現，是因為台北101 那類長回覆都含粗體與清單，渲染後必然不同。
+
+### 修法
+
+最後一次 edit 前，比對渲染結果與「上一次已送出的文字」：
+- 相同 → **跳過該次 edit**（內容已經正確顯示，無需重送）
+- 不同 → 照常送出 HTML 版本
+
+另建議在 `sending.py` 層辨識 Telegram 的 `message is not modified` 錯誤並視為成功，
+作為第二道防護 —— 這是冪等操作，重送同樣內容本就不該算失敗。
