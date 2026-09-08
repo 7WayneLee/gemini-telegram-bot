@@ -426,6 +426,66 @@ image_id = (
 `img_idx` 而非 Google 的原始 id。**正確作法是把圖片全部移除出 text，
 另以 `sendPhoto` 送出，不要嘗試就地替換。**
 
+### ⚠️ 第二種佔位符格式：XML 風格的 agent tag（2026-09-08 實機發現）
+
+除了 googleusercontent URL 之外，Gemini **另有一種完全不同的佔位符格式**，
+以 XML 風格的自閉合 tag 出現在 `text` 中。上游 `ARTIFACTS_RE` 完全不處理這類，
+本專案原有的清理器也攔不到。
+
+實機樣本（使用者回報，「台北101 長什麼樣子?附上照片」）：
+
+```
+<Image alt="從象山俯瞰台北101與台北市景觀" caption="台北101外觀與市景"
+       src="image_agent_tag_17171708647064102964"/>
+
+<FollowUp label="想了解台北101內部的阻尼球原理或觀景台參觀資訊嗎？"
+          query="請介紹台北101的風阻尼球運作原理以及觀景台參觀重點。"/>
+```
+
+未清理時會被 HTML escape 成 `&lt;Image ...&gt;` 原樣顯示在 Telegram 訊息中。
+
+#### Commander 裁定的處理方式
+
+| tag | 處置 | 理由 |
+|---|---|---|
+| `<Image .../>` | **整個移除** | 對應的圖片已透過 `output.images` 以 `sendPhoto` 送出，就地替換沒有意義 |
+| `<FollowUp label="..." query="..."/>` | **移除 tag，但把 `label` 保留為斜體提示行** | `label` 是模型產生的有用內容（建議追問），丟掉可惜；`query` 對 Telegram 無用 |
+
+#### 必須用通用樣式，不得逐一列舉 tag 名稱
+
+Gemini 隨時可能新增其他 agent tag。請用保守的通用樣式比對
+**首字母大寫的自閉合 tag**：
+
+```python
+AGENT_TAG_RE = re.compile(
+    r'<[A-Z][A-Za-z0-9_]*(?:\s+[A-Za-z_][\w.-]*\s*=\s*"[^"]*")*\s*/>'
+)
+```
+
+首字母大寫 + 自閉合 + `name="value"` 屬性的組合，足以與使用者可能討論的一般 HTML
+（多為小寫、且通常包在 code fence 內）區隔。
+
+#### 🔴 絕對不可觸碰 code fence 內的內容
+
+若使用者問「HTML 的 `<Image src="x"/>` 是什麼意思」，該片段會出現在 code block 內，
+**必須原樣保留**。已實測目前 code fence 內的 XML 有正確保留與 escape：
+
+```
+'說明：\n<pre><code class="language-html">&lt;Image src="x"/&gt;\n</code></pre>結束'
+```
+
+清理必須在**解析出 code fence 之後、只作用於 fence 外的文字**，
+不得對整段原始文字直接做 regex 替換。
+
+#### 尚未確認
+
+- 是否存在**成對**形式（`<Tag ...>內容</Tag>`）而非只有自閉合。目前樣本只見自閉合。
+  若實作時遇到成對形式，回報 Commander 補合約。
+- `src="image_agent_tag_NNNN"` 的數字與 `output.images` 的順序是否有對應關係。
+  目前不依賴此對應（圖片一律另外送出）。
+
+---
+
 ### 尚待實機確認
 
 - `<a>_<b>` 中兩段數字的實際語意（是否為 candidate index / image index）
