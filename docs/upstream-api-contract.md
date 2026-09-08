@@ -327,6 +327,86 @@ async for chunk in client.generate_content_stream(...):
 
 ---
 
+## 四之二、⚠️ 回應含圖片時 `text` 的佔位符格式（上游 bug，實測確認）
+
+> 此節補 T0.1 的偵察缺口。由 G1 實機回報的症狀反推 + 上游原始碼確認。
+
+### 症狀
+
+- `Generate an image...` → bot 只回 `_551`
+- `台北101 長什麼樣子?附上照片` → 文字完整，但末尾殘留 `_0`
+
+### 根因：上游 `ARTIFACTS_RE` 漏清
+
+Gemini 在 `text` 中以 URL 形式嵌入圖片佔位符：
+
+```
+http://googleusercontent.com/image_generation_content/<a>_<b>
+```
+
+上游 `client.py` 於解析時會嘗試清除（`text = ARTIFACTS_RE.sub("", text)`），
+但 `constants.py` 的樣式為：
+
+```python
+ARTIFACTS_RE = re.compile(r"https?://googleusercontent\.com/(?:\w+/)+\d+\n*")
+```
+
+其結尾只吃 `\d+`。當 Google 送出 `<數字>_<數字>` 形式的 id 時，
+只有第一段數字被吃掉，**殘留 `_<數字>`**：
+
+| 輸入 | `ARTIFACTS_RE.sub` 之後 |
+|---|---|
+| `.../image_generation_content/551` | `''`（乾淨，舊格式） |
+| `.../image_generation_content/0_551` | `'_551'` ← **殘留** |
+| `.../image_generation_content/1_0` | `'_0'` ← **殘留** |
+
+**這是上游缺陷，不是本專案 handlers 的錯。** 版本 `gemini-webapi 2.1.1`。
+升級上游時必須重測此節；若上游修好，本專案的補救仍應保留（無害且防回歸）。
+
+### 本專案的補救（T3.2b 實作）
+
+在 rendering / media 層再做一次清理，樣式需同時涵蓋新舊格式與殘留：
+
+```python
+# 完整 URL（含 <a>_<b> 形式的 id）
+GOOGLEUSERCONTENT_ARTIFACT_RE = re.compile(
+    r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*"
+)
+# 上游已吃掉 URL 前段後留下的孤兒殘骸，行首/獨立出現才算
+ORPHAN_ARTIFACT_SUFFIX_RE = re.compile(r"(?m)^[ \t]*_\d+[ \t]*$\n?")
+```
+
+**順序**：先清完整 URL，再清孤兒殘骸。孤兒樣式必須夠保守
+（限定整行只有 `_數字`），否則會誤刪正常文字中的底線片語。
+
+### 佔位符與 `Image` 物件的對應
+
+`GeneratedImage.image_id` 取自 `get_nested_value(gen_img_data, [1, 0])`，
+**當該值不存在時，上游會退回填入同樣的佔位字串**：
+
+```python
+image_id = (
+    get_nested_value(gen_img_data, [1, 0])
+    or f"http://googleusercontent.com/image_generation_content/{img_idx}"
+)
+```
+
+因此 `image_id` 有時可用來把 `text` 中的佔位符對應回具體圖片。
+但**不可依賴**：`[1, 0]` 存在時 `image_id` 會是另一種值，且退回值用的是
+`img_idx` 而非 Google 的原始 id。**正確作法是把圖片全部移除出 text，
+另以 `sendPhoto` 送出，不要嘗試就地替換。**
+
+### 尚待實機確認
+
+- `<a>_<b>` 中兩段數字的實際語意（是否為 candidate index / image index）
+- web search 來的圖（`WebImage`）是否也用同一種佔位符
+- 一則回應含多張圖時，佔位符在 text 中的排列方式
+
+→ 由 `scripts/dump_response.py` 擷取真實 `ModelOutput` 後補齊，並轉為
+`tests/fixtures/` 的實測樣本，取代憑空捏造的 mock。
+
+---
+
 ## 五、Image 類別
 
 三個類別皆為 **pydantic `BaseModel`**。
