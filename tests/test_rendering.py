@@ -1,3 +1,4 @@
+import json
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -70,11 +71,11 @@ def test_links_with_titles_angle_destinations_and_malformed_markup() -> None:
     assert "broken (javascript:bad)" in rendered
 
 
-def test_lists_headings_and_blockquotes_use_supported_plain_forms() -> None:
+def test_lists_headings_and_blockquotes_use_supported_telegram_html() -> None:
     source = "# Heading\n- **one**\n  * two\n1. three\n> quoted *text*\n"
 
     assert markdown_to_telegram_html(source) == (
-        "Heading\n"
+        "<b>Heading</b>\n"
         "• <b>one</b>\n"
         f"{LIST_INDENT_CHARACTER * 2}◦ two\n"
         "1. three\n"
@@ -253,3 +254,67 @@ def test_artifact_only_text_renders_as_no_chunks() -> None:
     assert render_markdown_chunks(
         "http://googleusercontent.com/image_generation_content/1_0\n"
     ) == []
+
+
+def test_agent_image_and_follow_up_tags_are_removed_completely() -> None:
+    source = (
+        "before\n"
+        '<Image alt="view" src="image_agent_tag_123"/>\n'
+        '<FollowUp label="useful suggestion" query="unused query"/>\n'
+        "after"
+    )
+
+    assert markdown_to_telegram_html(source) == "before\n\nafter"
+    assert markdown_to_telegram_html('<Image src="first"/> text') == "text"
+    assert markdown_to_telegram_html('text <Image src="last"/>') == "text"
+
+
+def test_agent_tag_inside_code_fence_is_preserved_verbatim() -> None:
+    source = (
+        "說明：\n"
+        "```html\n"
+        '<Image src="x"/>\n'
+        "---\n"
+        "```\n"
+        "結束\n"
+        '<Image src="outside"/>\n'
+    )
+
+    assert markdown_to_telegram_html(source) == (
+        "說明：\n"
+        '<pre><code class="language-html">'
+        '&lt;Image src="x"/&gt;\n'
+        "---\n"
+        "</code></pre>結束"
+    )
+
+
+def test_unknown_agent_tag_is_removed_but_lowercase_html_is_untouched() -> None:
+    source = '<Suggestion foo="bar"/>\n<widget foo="bar"/>'
+
+    assert markdown_to_telegram_html(source) == '&lt;widget foo="bar"/&gt;'
+
+
+def test_headings_are_bold_and_horizontal_rules_are_removed() -> None:
+    source = "# One\n## Two\n### Three\n\n---\n\nafter"
+
+    assert markdown_to_telegram_html(source) == (
+        "<b>One</b>\n<b>Two</b>\n<b>Three</b>\n\nafter"
+    )
+
+
+def test_agent_tag_only_text_renders_as_no_chunks() -> None:
+    assert render_markdown_chunks('<Image src="image_agent_tag_123"/>\n') == []
+
+
+def test_real_web_image_fixture_removes_agent_tag_rule_and_bolds_heading() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "image-web.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    source = fixture["candidates"][0]["text"]
+
+    rendered = markdown_to_telegram_html(source)
+
+    assert "Image alt=" not in rendered
+    assert "---" not in rendered
+    assert "<b>外觀核心設計特點</b>" in rendered
+    assert f"{LIST_INDENT_CHARACTER * 2}◦ <b>古錢幣符號：</b>" in rendered

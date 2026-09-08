@@ -26,10 +26,20 @@ GOOGLEUSERCONTENT_ARTIFACT_RE = re.compile(
     r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*"
 )
 ORPHAN_ARTIFACT_SUFFIX_RE = re.compile(r"(?m)^[ \t]*_\d+[ \t]*$\n?")
+AGENT_TAG_RE = re.compile(
+    r'<[A-Z][A-Za-z0-9_]*(?:\s+[A-Za-z_][\w.-]*\s*=\s*"[^"]*")*\s*/>'
+)
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")
 _LIST_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])\s+(?P<body>.*)$")
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(?P<body>.*?)(?:\s+#+)?$")
+_HORIZONTAL_RULE_RE = re.compile(r"(?m)^ {0,3}-{3,}[ \t]*\r?$")
+_EXCESS_BLANK_LINES_RE = re.compile(
+    r"\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)+"
+)
+_BLANK_LINE_WHITESPACE_RE = re.compile(r"(?m)^[ \t]+(?=\r?$)")
+_LEADING_BLANK_LINES_RE = re.compile(r"^(?:[ \t]*\r?\n)+")
+_TRAILING_BLANK_LINES_RE = re.compile(r"(?:\r?\n[ \t]*)+$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 _SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto", "tg"})
 
@@ -283,6 +293,43 @@ def _normalise_language(info: str) -> str:
     return language if _LANGUAGE_RE.fullmatch(language) else ""
 
 
+def _clean_text_block(block: str) -> tuple[str, bool]:
+    agent_matches = list(AGENT_TAG_RE.finditer(block))
+    cleaned, agent_tags = AGENT_TAG_RE.subn("", block)
+    cleaned, horizontal_rules = _HORIZONTAL_RULE_RE.subn("", cleaned)
+    changed = bool(agent_tags or horizontal_rules)
+    if changed:
+        if agent_matches and not block[: agent_matches[0].start()].strip():
+            cleaned = cleaned.lstrip(" \t")
+        if agent_matches and not block[agent_matches[-1].end() :].strip():
+            cleaned = cleaned.rstrip(" \t")
+        cleaned = _BLANK_LINE_WHITESPACE_RE.sub("", cleaned)
+        cleaned = _EXCESS_BLANK_LINES_RE.sub("\n\n", cleaned)
+    return cleaned, changed
+
+
+def _clean_markdown(markdown: str) -> str:
+    """Remove non-content placeholders only from outside fenced code blocks."""
+
+    blocks = _parse_blocks(strip_googleusercontent_artifacts(markdown))
+    cleaned: list[str] = []
+    changed_text_blocks: list[bool] = []
+    for block in blocks:
+        if isinstance(block, _TextBlock):
+            text, changed = _clean_text_block(block.raw)
+            cleaned.append(text)
+            changed_text_blocks.append(changed)
+        else:
+            cleaned.append(block.raw)
+            changed_text_blocks.append(False)
+
+    if cleaned and isinstance(blocks[0], _TextBlock) and changed_text_blocks[0]:
+        cleaned[0] = _LEADING_BLANK_LINES_RE.sub("", cleaned[0])
+    if cleaned and isinstance(blocks[-1], _TextBlock) and changed_text_blocks[-1]:
+        cleaned[-1] = _TRAILING_BLANK_LINES_RE.sub("", cleaned[-1])
+    return "".join(cleaned)
+
+
 def _render_text_block(block: str) -> str:
     rendered: list[str] = []
     plain_lines: list[str] = []
@@ -316,7 +363,7 @@ def _render_text_block(block: str) -> str:
             rendered.append(f"<blockquote>{_render_inline(quote)}</blockquote>{ending}")
         elif heading is not None:
             flush_plain_lines()
-            rendered.append(f"{_render_inline(heading.group('body'))}{ending}")
+            rendered.append(f"<b>{_render_inline(heading.group('body'))}</b>{ending}")
         else:
             plain_lines.append(body + ending)
     flush_plain_lines()
@@ -340,7 +387,7 @@ def markdown_to_telegram_html(markdown: str) -> str:
     """
 
     rendered: list[str] = []
-    for block in _parse_blocks(strip_googleusercontent_artifacts(markdown)):
+    for block in _parse_blocks(_clean_markdown(markdown)):
         if isinstance(block, _TextBlock):
             rendered.append(_render_text_block(block.raw))
             continue
@@ -444,7 +491,7 @@ def render_markdown_chunks(markdown: str, limit: int = MAX_MESSAGE_LENGTH) -> li
     a rendered chunk longer than Telegram's safe limit.
     """
 
-    cleaned = strip_googleusercontent_artifacts(markdown)
+    cleaned = _clean_markdown(markdown)
     if not cleaned.strip():
         return []
 
@@ -474,6 +521,7 @@ render_markdown = markdown_to_telegram_html
 
 
 __all__ = [
+    "AGENT_TAG_RE",
     "GOOGLEUSERCONTENT_ARTIFACT_RE",
     "LIST_INDENT_CHARACTER",
     "LIST_INDENT_CHARACTERS_PER_LEVEL",
