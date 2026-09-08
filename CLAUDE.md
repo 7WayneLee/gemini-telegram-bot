@@ -1,6 +1,5 @@
 # CLAUDE.md — Gemini Telegram Bot
 
-規格來源：`docs/spec.md`（功能規格）／`docs/orchestration-plan.md`（執行編排）。
 本檔為**專案不變量**。違反任何一條即為任務失敗，不接受「已完成但略作調整」。
 
 ---
@@ -20,10 +19,10 @@
 3. **禁止將 cookie 值寫入 log、測試 fixture、commit、或任何 `docs/` 產出。**
    測試用假值一律使用顯性假字串，格式為 `FAKE_1PSID_FOR_TEST` / `FAKE_1PSIDTS_FOR_TEST`。
 
-4. **禁止在正式主機 `movie-nas` 上執行任何指令。**
-   該主機同時運行 Jellyfin、qBittorrent 等既有服務，一次誤下的 docker 指令即可造成
-   媒體服務中斷。Agent 只在開發環境寫碼與跑 mock 測試；
-   **所有部署、重啟、docker 操作一律為 HUMAN gate。**
+4. **禁止在正式主機上執行任何指令。**
+   本專案設計為與其他服務共用主機，一次誤下的指令即可造成同機服務中斷。
+   Agent 只在開發環境寫碼與跑 mock 測試；
+   **所有部署、重啟、容器操作一律由人工執行。**
 
 5. **禁止執行任何會展開或印出 `.env` 的指令。**
    已知會觸發的：`docker compose config`、`docker-compose config`
@@ -32,8 +31,7 @@
    同理適用於任何 dotenv / direnv 類工具，以及 `env`、`printenv`、
    `set` 等會列出環境變數的指令。
 
-   **這條在 2026-09-08 真實發生過並造成憑證洩漏**（見 `docs/decisions.md` D15），
-   憑證已輪替。`.gitignore` 只能防 commit，擋不住「讀取並印出」。
+   **這條曾真實發生過並造成憑證洩漏。**`.gitignore` 只能防 commit，擋不住「讀取並印出」。
 
    驗證 compose 檔請改用：
    - 拋棄式目錄搭配只含 `FAKE_` 值的 `.env.example`
@@ -118,8 +116,8 @@ Worker 的報告僅用於失敗時的診斷輸入。
 | 項目 | 時機 |
 |---|---|
 | VM 資源實測（`free -h` / `docker stats` / `swapon`） | T4.1 前 |
-| SSH SOCKS 取得 cookie（`ssh -D 1080 -C -q -N movie-nas`） | G1 前，及每次 cookie 失效 |
+| SSH SOCKS 取得 cookie（`ssh -D 1080 -C -q -N 正式主機`） | G1 前，及每次 cookie 失效 |
 | M1 連通性實測 | G1 |
 | egress URL 可抓取性實測 | T3.2a |
 | M5 cookie 失效演練 | G2 |
-| **所有在 `movie-nas` 上的操作** | 全程 |
+| **所有在正式主機上的操作** | 全程 |

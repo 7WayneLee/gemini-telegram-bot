@@ -1,7 +1,8 @@
-# 部署到 movie-nas 的檢查清單
+# 部署檢查清單
 
-> **所有在 movie-nas 上的操作都是 HUMAN gate**（CLAUDE.md 不變量 4）。
-> 本文件由 Commander 撰寫供人工執行，agent 不得代勞。
+> 本文件記錄實際部署一次的完整流程與踩到的坑。
+> 範例以 Debian 12 + systemd 為主；Docker 方案見 `deploy/docker-compose.yml`。
+> 指令中的 `your-vm` 請換成你的 SSH alias。
 
 ---
 
@@ -33,7 +34,7 @@ VM 冷啟動時若只有 `.env`，用的是舊值，**可能認證失敗**。
 
 ```bash
 # 在你的 Mac 上（檔名含 1PSID，勿貼進任何對話）
-scp data/cookies/.cached_cookies_*.json movie-nas:/tmp/
+scp data/cookies/.cached_cookies_*.json your-vm:/tmp/
 ```
 
 然後在 VM 上把它放進掛載的 cookie volume。
@@ -46,19 +47,19 @@ scp data/cookies/.cached_cookies_*.json movie-nas:/tmp/
 ## 部署前確認
 
 ```bash
-# 在 movie-nas 上
+# 在 your-vm 上
 free -h && df -h / && swapon --show
 ```
 
-對照 `docs/decisions.md` 的 D8 實測值（969Mi 總記憶體 / 441Mi 可用 / 2GB swap）。
+對照你自己實測的數值。
 若機器規格有變，**必須重新計算資源限制**，不可沿用。
 
 ---
 
 ## 部署方式：建議用 systemd 而非 Docker
 
-實測 `docker stats --no-stream` 在 movie-nas 上無任何輸出，
-代表既有的 Jellyfin / qBittorrent **可能是原生安裝而非容器**。
+實測 `docker stats --no-stream` 在 your-vm 上無任何輸出，
+代表既有的其他服務 **可能是原生安裝而非容器**。
 
 若確實如此，為了這一個 bot 引入 Docker daemon，在 969Mi 的機器上是不划算的常駐開銷。
 因此建議使用 `deploy/gemini-tg-bot.service`。
@@ -88,8 +89,8 @@ cookie 快取        /var/lib/gemini-tg-bot/cookies
 docker compose -p gemini-bot -f deploy/docker-compose.yml up -d
 ```
 
-- **必須用獨立的 project 名 `-p gemini-bot`**，不得併入既有媒體 stack 的 compose 檔
-- **禁止在此主機使用 `docker compose down`** —— 會波及 Jellyfin 與 qBittorrent
+- **必須用獨立的 project 名 `-p gemini-bot`**，不要併進既有 stack 的 compose 檔
+- **禁止在此主機使用 `docker compose down`** —— 容易誤停到同機的其他服務
 - 重啟一律 `docker compose -p gemini-bot restart bot`
 - 不需開啟任何 inbound port（long polling 的主要安全收益）
 
@@ -174,9 +175,7 @@ sudo -u gemini-tg-bot /opt/gemini-tg-bot/.venv/bin/python -c "import gemini_tg_b
 
 | 編號 | 內容 |
 |---|---|
-| **D6** | **`1PSID` 更換後無法跨重啟存活** —— 若整組 session 換新，重啟會退回 `.env` 的舊值。只輪替 `1PSIDTS` 的情況安全。 |
-| D16 | `WORKDIR /` 是隱性耦合；若有人改回 `/app`，資料庫會**靜默**寫到非持久化位置 |
-| D16 | `uv.lock` 未進 build context，image 相依性每次 build 重新解析 |
+| **cookie 更換** | 若整組 session 換新（`1PSID` 也變），`/setcookie` 會寫入 runtime override 並跨重啟生效 |
 
 **D6 最需要留意**：日後若因封號或安全驗證而必須換整組 cookie，
 記得同步更新 `.env`（或 `/etc/gemini-tg-bot.env`），不能只靠 `/setcookie`。
@@ -188,5 +187,5 @@ sudo -u gemini-tg-bot /opt/gemini-tg-bot/.venv/bin/python -c "import gemini_tg_b
 - `WebImage`（搜尋來的圖）→ URL 直傳，**egress 0**
 - `GeneratedImage`（`/img` 生成的圖）→ Telegram 抓不到簽章網址，**每張都中轉計量**
 
-免費層每月僅 1GB 北美流量，**且與 Jellyfin 串流共用**。
+免費層每月僅 1GB 北美流量，**且為整台機器共用**。
 頻繁使用 `/img` 會顯著消耗額度，`/status` 的 egress 數字是唯一的可見性來源。

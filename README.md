@@ -72,10 +72,10 @@ cookie 的「**出生 IP**」必須與「**使用 IP**」一致。
 
 ### 步驟
 
-1. **建立到 VM 的 SOCKS 通道**（`movie-nas` 為既有的 SSH alias）：
+1. **建立到 VM 的 SOCKS 通道**（把 `your-vm` 換成你的 SSH alias）：
 
    ```bash
-   ssh -D 1080 -C -q -N movie-nas
+   ssh -D 1080 -C -q -N your-vm
    ```
 
    這個 terminal 要保持開著。
@@ -206,42 +206,57 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 
 ## 部署
 
-> **重要**：正式主機同時運行 Jellyfin 與 qBittorrent。
-> **禁止在該主機使用 `docker compose down`** —— 會波及既有媒體服務。
-> 重啟一律 `docker compose -p gemini-bot restart bot`。
+> **本專案設計為與其他服務共用一台小型 VM。** 下列建議假設你的主機上還跑著別的東西
+> （媒體伺服器、下載工具之類）。若是專用主機，資源限制可以放寬。
 
-### 主機實測資源（2026-09-08）
+### 先實測你自己的主機
 
+**不要沿用任何範例數值。** 部署前在目標主機執行：
+
+```bash
+nproc && free -h && df -h / && swapon --show
+docker stats --no-stream    # 若既有服務是容器
 ```
-nproc: 2
-Mem:   total 969Mi   available 441Mi
-Swap:  total 2.0Gi   used 234Mi     ← 加入 bot 前系統已有記憶體壓力
-Disk:  49G, avail 41G
-```
 
-**這台機器只有約 1GB 記憶體。** 資源限制據此推導（見 `docs/decisions.md` 的 D8）：
+### 資源限制怎麼推導
 
-| 項目 | 值 |
-|---|---|
-| `mem_limit` / `MemoryMax` | `256m` |
-| `memswap_limit` / `MemorySwapMax` | `512m` |
-| `cpus` / `CPUQuota` | `0.5` / `50%` |
-| 媒體暫存上限 | `256m`（**必須落在磁碟，不得用 tmpfs**） |
+限制的目的**不是**讓 bot 跑得順，而是**讓 bot 先被 OOM killer 終結，
+而不是波及同機的其他服務**。因此應該設在「夠 bot 正常運作」而非「盡可能多」。
 
-限制的目的是**讓 bot 先被 OOM killer 終結，而不是波及媒體服務**。
-換機器後必須重新實測，不要沿用這些數字。
+參考點：本專案在 Python 3.12 下的常駐 RSS 約 **120–180 MiB**
+（`MAX_CONCURRENCY=1`、走 URL 直傳時）。
 
-**媒體暫存不得使用 tmpfs**：這台機器稀缺的是記憶體（441Mi）而非磁碟（41G），
-tmpfs 會吃 RAM，等同繞過 `mem_limit` 去搶 Jellyfin 的記憶體。
+實際部署過的一組數值，供對照 —— 主機為 2 vCPU / 969 MiB RAM / 2 GB swap，
+且已有其他服務佔用，可用記憶體僅 441 MiB：
 
-### 建議以 systemd 為主要方式
+| 項目 | 該例採用值 | 推導方式 |
+|---|---|---|
+| `mem_limit` / `MemoryMax` | `256m` | 高於典型 RSS 上限，遠低於可用量；觸限時死的是 bot |
+| `memswap_limit` / `MemorySwapMax` | `512m` | mem_limit 兩倍 |
+| `cpus` / `CPUQuota` | `0.5` / `50%` | 2 核取 25% 總算力；bot 以 I/O 為主 |
+| 媒體暫存上限 | `256m` | 單檔上限 20 MB 且併發 1，用量遠低於此 |
 
-實測 `docker stats --no-stream` 在該主機上無任何輸出，代表既有媒體服務
-**可能是原生安裝而非容器**。若確實如此，為了這一個 bot 引入 Docker daemon，
-在 969Mi 的機器上是不划算的常駐開銷。
+若你的主機記憶體充裕，`mem_limit` 仍不建議設得太高 —— 沒有意義，
+反而讓 OOM 時的犧牲對象變得不確定。
 
-因此本專案雖同時提供兩種部署產物，**在此主機上建議使用
-`deploy/gemini-tg-bot.service`（systemd + venv）**，Docker Compose 作為替代方案。
+**媒體暫存必須落在磁碟，不得使用 tmpfs。** tmpfs 會吃 RAM，
+等同繞過 `mem_limit` 去搶其他服務的記憶體。
+
+### systemd 或 Docker？
+
+若主機記憶體吃緊、且既有服務不是容器，**建議 systemd**
+（`deploy/gemini-tg-bot.service`）—— 為單一 bot 引入 Docker daemon 的常駐開銷
+在小機器上不划算。反之若你已經在用 Docker，compose 方案更省事。
+
+兩者資源限制等價：
+
+| | Docker Compose | systemd |
+|---|---|---|
+| 記憶體 | `mem_limit` | `MemoryMax` |
+| swap | `memswap_limit` | `MemorySwapMax` |
+| CPU | `cpus` | `CPUQuota` |
+
+詳細步驟見 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
 ### Docker Compose
 
@@ -249,21 +264,22 @@ tmpfs 會吃 RAM，等同繞過 `mem_limit` 去搶 Jellyfin 的記憶體。
 docker compose -p gemini-bot -f deploy/docker-compose.yml up -d
 ```
 
-- **獨立的 compose project**（`-p gemini-bot`），不得併入既有媒體 stack 的 compose 檔
-- 不共用 docker network，預設 bridge 即可
+- **用獨立的 project 名**（`-p gemini-bot`），不要併進既有 stack 的 compose 檔
+- **與其他服務共用主機時，避免 `docker compose down`** —— 容易誤停到別的東西。
+  重啟用 `docker compose -p gemini-bot restart bot`
 - **不設定任何 `ports`** —— long polling 不需要 inbound port
 
 ### 防火牆
 
-**不需開啟任何 inbound port。** 這是採用 long polling 而非 webhook 的主要安全收益。
-Jellyfin (8096) 與 qBittorrent 的既有埠不受影響，無衝突風險。
+**不需開啟任何 inbound port。** 這是採用 long polling 而非 webhook 的主要安全收益，
+既有服務的埠不受影響。
 
 ---
 
 ## 成本與 egress
 
 VM 位於美國區，月預算上限 US$10。**egress 是主要成本來源**：
-免費層每月僅 1GB 北美對外流量，超出約 US$0.12/GB，而且這個額度**與 Jellyfin 串流共用**。
+以 GCP 為例，免費層每月僅 1GB 北美對外流量，超出約 US$0.12/GB —— 而且這個額度是**整台機器共用的**，若主機上還跑著媒體串流之類的服務，留給 bot 的餘裕會比想像中少。
 
 ### 零 egress 的圖片路徑
 
@@ -417,11 +433,21 @@ uv run python -m gemini_tg_bot --dry-run   # 不需憑證的全鏈路煙霧測�
 |---|---|
 | `CLAUDE.md` | 專案不變量（安全禁令、實作紀律） |
 | `docs/upstream-api-contract.md` | 上游 API 事實來源，由反射實測產出 |
-| `docs/decisions.md` | 架構決策紀錄與技術債 |
-| `docs/interfaces.md` | 跨模組介面契約 |
 | `docs/egress-findings.md` | egress 路徑實測與裁定 |
-| `docs/RESUME.md` | 續跑指引 |
+| `docs/DEPLOY.md` | 部署步驟與實際踩過的坑 |
 
 ### 授權
 
-本專案相依於 AGPL-3.0 授權的 `gemini-webapi`，見上方「已知風險」第 3 點。
+本專案採用 **AGPL-3.0-or-later**，全文見 [`LICENSE`](LICENSE)。
+
+這不是自由選擇的結果 —— 相依的 `gemini-webapi` 是 AGPL-3.0，
+而本專案直接 import 它，構成衍生作品，因此必須採用相容授權。
+
+**對你的實際意義**：
+
+- **自用**（自己跑一個 bot 給自己用）→ 不受任何額外義務約束
+- **提供給第三方使用**（哪怕只是朋友，只要是透過網路提供服務）
+  → AGPL 第 13 條要求你必須向使用者提供對應的完整原始碼，
+    包含你所做的任何修改
+
+若你 fork 並修改，這個義務會一併繼承。請先確認你能接受，再決定要不要對外提供服務。

@@ -8,7 +8,7 @@
 #
 # 前提：
 #   1. SSH SOCKS tunnel 必須開著（cookie 的出生 IP 必須是 VM 的 IP）
-#        ssh -D 1080 -C -q -N movie-nas
+#        ssh -D 1080 -C -q -N your-vm
 #   2. 已用該 profile 透過 tunnel 登入過 gemini.google.com
 #
 # 用法：
