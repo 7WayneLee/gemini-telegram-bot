@@ -105,6 +105,26 @@ cookie 的「**出生 IP**」必須與「**使用 IP**」一致。
 
 6. 填入 `.env`，或透過 bot 的 `/setcookie` 指令注入（不需重啟 process）。
 
+### 更快的作法：`scripts/grab_cookies.sh`
+
+步驟 5 的 F12 手動複製可以省略。保持 tunnel 開著並登入後，在 Mac 上執行：
+
+```bash
+sh scripts/grab_cookies.sh
+```
+
+它會直接從 Firefox profile 的 `cookies.sqlite` 讀出兩個 cookie 並**送進剪貼簿**，
+接著在 Telegram 傳 `/setcookie` 貼上即可。終端機只顯示長度，不顯示任何值。
+
+指定其他 profile：`sh scripts/grab_cookies.sh <profile-name>`（預設 `gemini-us`）。
+
+**前提仍然是 tunnel 必須開著** —— cookie 的出生 IP 必須是 VM 的 IP，
+這一點不會因為取得方式變方便而改變。取之前先確認：
+
+```bash
+curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
+```
+
 > **預期行為**：台灣帳號首次從美國 IP 登入時，Google 大機率要求二階段驗證並寄送
 > 新裝置通知。這是正常的，通過後即穩定。
 
