@@ -28,6 +28,7 @@ from gemini_tg_bot.queue import RateLimitExceeded, RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 
 from .auth import AuthMiddleware
+from .media import MediaHandler, MediaUploadError
 from .rendering import render_markdown_chunks
 
 if TYPE_CHECKING:
@@ -111,6 +112,7 @@ class TelegramHandlers:
         cookie_path: Path,
         secure_1psid: SecretStr,
         database: Database | None = None,
+        media_handler: MediaHandler | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._service = service
@@ -121,6 +123,7 @@ class TelegramHandlers:
         self._cookie_path = cookie_path
         self._secure_1psid = secure_1psid
         self._database = database
+        self._media = media_handler or MediaHandler(egress_meter=egress_meter)
         self._auth: AuthMiddleware | None = None
         self._awaiting_cookie_users: set[int] = set()
         self._now = now or (lambda: datetime.now(UTC))
@@ -521,7 +524,7 @@ class TelegramHandlers:
                     )
                 )
             await self._sessions.persist(chat_id, session)
-            await _reply_rendered(message, output.text)
+            await self._reply_output(message, output)
             ok = True
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
@@ -542,6 +545,96 @@ class TelegramHandlers:
                 error_kind=error_kind,
                 latency_ms=round((time.monotonic() - started) * 1000),
             )
+
+    async def user_message(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """Route ordinary text and supported Telegram uploads."""
+
+        message = update.effective_message
+        if message is None:
+            return
+        if getattr(message, "photo", None) or getattr(message, "document", None):
+            await self.media_message(update, context)
+            return
+        await self.text_message(update, context)
+
+    async def media_message(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """Send one size-checked photo/document through the current session."""
+
+        del context
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        user_id, chat_id, message = identity
+        started = time.monotonic()
+        state = await self._sessions.get_state(chat_id)
+        ok = False
+        error_kind: str | None = None
+
+        try:
+            async with self._media.prepare_upload(message) as upload:
+                async with self._request_queue.request(user_id):
+                    session = await self._sessions.get_or_create(chat_id)
+                    output = await self._service.execute(
+                        lambda _client: session.send_message(
+                            upload.prompt,
+                            files=upload.files,
+                            temporary=state.temporary,
+                        )
+                    )
+                self._media.record_upload(upload)
+            await self._sessions.persist(chat_id, session)
+            await self._reply_output(message, output)
+            ok = True
+        except MediaUploadError as error:
+            error_kind = "media_rejected"
+            await message.reply_text(str(error))
+        except RateLimitExceeded as error:
+            error_kind = "rate_limit"
+            await _reply_rate_limited(message, error)
+        except ServiceUnavailableError:
+            error_kind = "unavailable"
+            await message.reply_text(SERVICE_UNAVAILABLE)
+        except Exception as error:
+            error_kind = classify_error(error).value
+            _log_handler_error("media message", error)
+            await message.reply_text(GENERIC_FAILURE)
+        finally:
+            await self._record_usage(
+                user_id=user_id,
+                chat_id=chat_id,
+                model=state.model,
+                ok=ok,
+                error_kind=error_kind,
+                latency_ms=round((time.monotonic() - started) * 1000),
+            )
+
+    async def _reply_output(self, message: Any, output: Any) -> None:
+        images = getattr(output, "images", ())
+        LOGGER.debug(
+            "Gemini response text=%r image_count=%d",
+            output.text,
+            len(images),
+        )
+        for index, image in enumerate(images):
+            LOGGER.debug(
+                "Gemini response image index=%d url=%s title=%r alt=%r",
+                index,
+                image.url,
+                image.title,
+                image.alt,
+            )
+
+        await _reply_rendered(message, output.text)
+        if images:
+            await self._media.send_output_images(message, output)
 
     async def _select_model(
         self,
@@ -729,9 +822,10 @@ def register_handlers(
             pattern=rf"^(?:{MODEL_CALLBACK_PREFIX}|{GEM_CALLBACK_PREFIX})",
         )
     )
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.text_message)
+    user_messages = (
+        (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.ALL
     )
+    application.add_handler(MessageHandler(user_messages, handlers.user_message))
 
 
 def _message_identity(update: Update) -> tuple[int, int, Any] | None:

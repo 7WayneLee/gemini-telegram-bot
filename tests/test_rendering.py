@@ -23,6 +23,7 @@ markdown_to_telegram_html = _RENDERING.markdown_to_telegram_html
 render_markdown = _RENDERING.render_markdown
 render_markdown_chunks = _RENDERING.render_markdown_chunks
 split_message = _RENDERING.split_message
+strip_googleusercontent_artifacts = _RENDERING.strip_googleusercontent_artifacts
 
 
 def test_nested_inline_formatting_code_and_escapes() -> None:
@@ -189,3 +190,30 @@ def test_rendered_chunks_account_for_html_expansion() -> None:
 def test_rendered_chunks_reject_impossibly_small_html_budget() -> None:
     with pytest.raises(ValueError, match="too small for the rendered HTML"):
         render_markdown_chunks("&" * 40, 32)
+
+
+def test_googleusercontent_artifact_urls_and_orphan_suffixes_are_removed() -> None:
+    source = (
+        "before\n"
+        "http://googleusercontent.com/image_generation_content/0_551\n"
+        "middle\n"
+        "https://googleusercontent.com/image_generation_content/551\n"
+        "_0\n"
+        "after"
+    )
+
+    assert strip_googleusercontent_artifacts(source) == "before\nmiddle\nafter"
+    assert render_markdown_chunks(source) == ["before\nmiddle\nafter"]
+
+
+def test_orphan_cleanup_does_not_remove_normal_inline_underscore_text() -> None:
+    source = "變數 _1 是有效正文。\nprefix _551\n_2 suffix"
+
+    assert strip_googleusercontent_artifacts(source) == source
+
+
+def test_artifact_only_text_renders_as_no_chunks() -> None:
+    assert render_markdown_chunks("_551\n") == []
+    assert render_markdown_chunks(
+        "http://googleusercontent.com/image_generation_content/1_0\n"
+    ) == []

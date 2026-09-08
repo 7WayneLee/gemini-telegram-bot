@@ -19,6 +19,11 @@ from urllib.parse import urlsplit
 
 MAX_MESSAGE_LENGTH = 4000
 
+GOOGLEUSERCONTENT_ARTIFACT_RE = re.compile(
+    r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*"
+)
+ORPHAN_ARTIFACT_SUFFIX_RE = re.compile(r"(?m)^[ \t]*_\d+[ \t]*$\n?")
+
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")
 _LIST_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])\s+(?P<body>.*)$")
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(?P<body>.*?)(?:\s+#+)?$")
@@ -307,6 +312,13 @@ def _render_text_block(block: str) -> str:
     return "".join(rendered)
 
 
+def strip_googleusercontent_artifacts(text: str) -> str:
+    """Remove Gemini image placeholders without touching inline underscore text."""
+
+    without_urls = GOOGLEUSERCONTENT_ARTIFACT_RE.sub("", text)
+    return ORPHAN_ARTIFACT_SUFFIX_RE.sub("", without_urls)
+
+
 def markdown_to_telegram_html(markdown: str) -> str:
     """Convert a practical Markdown subset to Telegram-safe HTML.
 
@@ -317,7 +329,7 @@ def markdown_to_telegram_html(markdown: str) -> str:
     """
 
     rendered: list[str] = []
-    for block in _parse_blocks(markdown):
+    for block in _parse_blocks(strip_googleusercontent_artifacts(markdown)):
         if isinstance(block, _TextBlock):
             rendered.append(_render_text_block(block.raw))
             continue
@@ -421,7 +433,11 @@ def render_markdown_chunks(markdown: str, limit: int = MAX_MESSAGE_LENGTH) -> li
     a rendered chunk longer than Telegram's safe limit.
     """
 
-    pending = split_message(markdown, limit)
+    cleaned = strip_googleusercontent_artifacts(markdown)
+    if not cleaned.strip():
+        return []
+
+    pending = split_message(cleaned, limit)
     rendered: list[str] = []
     while pending:
         raw = pending.pop(0)
@@ -447,9 +463,12 @@ render_markdown = markdown_to_telegram_html
 
 
 __all__ = [
+    "GOOGLEUSERCONTENT_ARTIFACT_RE",
     "MAX_MESSAGE_LENGTH",
+    "ORPHAN_ARTIFACT_SUFFIX_RE",
     "markdown_to_telegram_html",
     "render_markdown",
     "render_markdown_chunks",
     "split_message",
+    "strip_googleusercontent_artifacts",
 ]
