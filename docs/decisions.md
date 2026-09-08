@@ -88,3 +88,30 @@ T2.4 的 `auth.py` 自帶 `CREATE TABLE IF NOT EXISTS telegram_user_access` 的 
 
 此缺口屬 config / `__main__` 接線層，不在 T3.4 範圍。由 Commander 於 Phase 4 整合時處理
 （可能作法：`/setcookie` 後將新憑證寫回受權限保護的 runtime 覆寫檔，並讓 Settings 優先讀它）。
+
+## D7 — schema 擁有權已擴散到三處（T3.3 未依 D4/D5 指示，功能正確但需償還）
+
+T3.3 的 `plan_json` 遷移實作在 `gemini/research.py` 的 `_ensure_schema()` 內，
+以 `PRAGMA table_info` 檢查後 `ALTER TABLE research_tasks ADD COLUMN plan_json TEXT`。
+
+**Commander 已實測確認功能正確**：在含資料列的舊版 DB 上欄位正確新增、
+舊資料完整保留、重複執行冪等。因此**不退回**。
+
+但這與派工時明訂的 D4（導入 `PRAGMA user_version` 版本化機制於 `storage/db.py`）
+與 D5（把 `telegram_user_access` 收進中央 `SCHEMA_SQL`）不符，且缺少我在 DoD 中
+要求的 migration 資料保存/冪等測試。
+
+結果是 schema 擁有權現在分散於**三處**：
+
+| 位置 | 負責的表/欄位 |
+|---|---|
+| `storage/models.py` `SCHEMA_SQL` | chat_sessions / research_tasks / usage_log（僅建表） |
+| `telegram/auth.py` | telegram_user_access（自建） |
+| `gemini/research.py` `_ensure_schema()` | research_tasks.plan_json（自行 ALTER） |
+
+風險：三處各自 lazy 遷移，沒有單一權威能回答「這個 DB 是第幾版」。
+新增第四個需要改 schema 的元件時會再分岔一次。
+
+**償還計畫**：併入接線任務 T2.7 一併處理 ——
+導入 `PRAGMA user_version`，把三處遷移收斂到 `storage/db.py`，
+補上資料保存/冪等測試，並保留各元件既有的 `IF NOT EXISTS` / 欄位檢查作為無害的防護。
