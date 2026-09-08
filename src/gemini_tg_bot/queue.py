@@ -6,7 +6,12 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
+
+
+SEMAPHORE_ACQUIRE_TIMEOUT_SECONDS = 30.0
+
+_Sleep = Callable[[float], Awaitable[None]]
 
 
 class RateLimitExceeded(Exception):
@@ -21,10 +26,54 @@ class RateLimitExceeded(Exception):
         )
 
 
+class QueueAcquireTimeout(TimeoutError):
+    """Raised when a request cannot obtain a concurrency slot in time."""
+
+    def __init__(self, user_id: int, timeout: float) -> None:
+        self.user_id = user_id
+        self.timeout = timeout
+        super().__init__(
+            f"Request queue timed out for user {user_id} after {timeout:.2f} seconds"
+        )
+
+
 @dataclass
 class _TokenBucket:
     tokens: float
     updated_at: float
+
+
+class _RequestPermit:
+    """Own one queue slot and allow flood-control sleeps without holding it."""
+
+    def __init__(self, queue: RequestQueue, user_id: int) -> None:
+        self._queue = queue
+        self._user_id = user_id
+        self._acquired = False
+
+    async def acquire(self) -> None:
+        if self._acquired:
+            return
+        await self._queue._acquire(self._user_id)
+        self._acquired = True
+
+    def release(self) -> None:
+        if not self._acquired:
+            return
+        self._queue._semaphore.release()
+        self._acquired = False
+
+    async def wait_for_flood_control(
+        self,
+        delay: float,
+        *,
+        sleep: _Sleep = asyncio.sleep,
+    ) -> None:
+        """Release the slot while waiting, then reacquire it with a timeout."""
+
+        self.release()
+        await sleep(delay)
+        await self.acquire()
 
 
 class RequestQueue:
@@ -39,6 +88,7 @@ class RequestQueue:
         self,
         max_concurrency: int = 1,
         user_rate_limit_per_min: int = 10,
+        acquire_timeout: float = SEMAPHORE_ACQUIRE_TIMEOUT_SECONDS,
     ) -> None:
         if (
             isinstance(max_concurrency, bool)
@@ -52,8 +102,15 @@ class RequestQueue:
             or user_rate_limit_per_min <= 0
         ):
             raise ValueError("user_rate_limit_per_min must be a positive integer")
+        if (
+            isinstance(acquire_timeout, bool)
+            or not isinstance(acquire_timeout, (int, float))
+            or acquire_timeout <= 0
+        ):
+            raise ValueError("acquire_timeout must be positive")
 
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._acquire_timeout = float(acquire_timeout)
         self._rate_limit = user_rate_limit_per_min
         self._refill_rate = user_rate_limit_per_min / 60.0
         self._buckets: dict[int, _TokenBucket] = {}
@@ -66,7 +123,7 @@ class RequestQueue:
         return self._queue_depth
 
     @asynccontextmanager
-    async def request(self, user_id: int) -> AsyncIterator[None]:
+    async def request(self, user_id: int) -> AsyncIterator[_RequestPermit]:
         """Consume a user token and hold a global concurrency slot.
 
         Rate-limited requests fail immediately instead of entering the queue.
@@ -76,19 +133,24 @@ class RequestQueue:
 
         self._consume_token(user_id)
 
-        acquired = False
+        permit = _RequestPermit(self, user_id)
+        await permit.acquire()
+        try:
+            yield permit
+        finally:
+            permit.release()
+
+    async def _acquire(self, user_id: int) -> None:
         self._queue_depth += 1
         try:
-            await self._semaphore.acquire()
-            acquired = True
+            await asyncio.wait_for(
+                self._semaphore.acquire(),
+                timeout=self._acquire_timeout,
+            )
+        except TimeoutError as error:
+            raise QueueAcquireTimeout(user_id, self._acquire_timeout) from error
         finally:
             self._queue_depth -= 1
-
-        try:
-            yield
-        finally:
-            if acquired:
-                self._semaphore.release()
 
     def _consume_token(self, user_id: int) -> None:
         now = time.monotonic()
@@ -112,4 +174,9 @@ class RequestQueue:
         bucket.tokens -= 1.0
 
 
-__all__ = ["RateLimitExceeded", "RequestQueue"]
+__all__ = [
+    "QueueAcquireTimeout",
+    "RateLimitExceeded",
+    "RequestQueue",
+    "SEMAPHORE_ACQUIRE_TIMEOUT_SECONDS",
+]

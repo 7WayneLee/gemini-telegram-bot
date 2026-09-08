@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, call
 
+import pytest
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter
 
+from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.telegram.streaming import (
     EDIT_CHARACTER_THRESHOLD,
     EDIT_INTERVAL_SECONDS,
+    FloodControlExceeded,
+    MAX_FLOOD_WAIT_SECONDS,
     PLACEHOLDER_TEXT,
     stream_response,
 )
@@ -112,6 +117,75 @@ async def test_retry_after_waits_then_retries_the_same_edit() -> None:
         interim,
         call("x" * EDIT_CHARACTER_THRESHOLD, parse_mode=ParseMode.HTML),
     ]
+
+
+async def test_retry_after_over_limit_fails_without_waiting() -> None:
+    clock = FakeClock()
+    client = FakeClient([], clock=clock)
+    message, _ = telegram_message()
+    message.reply_text.side_effect = RetryAfter(MAX_FLOOD_WAIT_SECONDS + 1)
+    sleep = AsyncMock()
+
+    with pytest.raises(FloodControlExceeded) as exc_info:
+        await stream_response(message, client, "hello", clock=clock, sleep=sleep)
+
+    assert exc_info.value.retry_after == MAX_FLOOD_WAIT_SECONDS + 1
+    assert exc_info.value.waited_seconds == 0
+    sleep.assert_not_awaited()
+    assert message.reply_text.await_count == 1
+    assert client.calls == []
+
+
+async def test_flood_control_wait_releases_slot_for_another_user() -> None:
+    queue = RequestQueue(
+        max_concurrency=1,
+        user_rate_limit_per_min=10,
+        acquire_timeout=0.5,
+    )
+    clock = FakeClock()
+    client = FakeClient([], clock=clock)
+    message, placeholder = telegram_message()
+    message.reply_text.side_effect = [RetryAfter(1), placeholder]
+    wait_started = asyncio.Event()
+    resume_wait = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def controlled_sleep(delay: float) -> None:
+        assert delay == 1
+        wait_started.set()
+        await resume_wait.wait()
+
+    async def first_request() -> None:
+        async with queue.request(user_id=1) as permit:
+            await stream_response(
+                message,
+                client,
+                "hello",
+                clock=clock,
+                flood_wait=lambda delay: permit.wait_for_flood_control(
+                    delay,
+                    sleep=controlled_sleep,
+                ),
+            )
+
+    async def second_request() -> None:
+        async with queue.request(user_id=2):
+            second_entered.set()
+            await release_second.wait()
+
+    first_task = asyncio.create_task(first_request())
+    await wait_started.wait()
+    second_task = asyncio.create_task(second_request())
+
+    await asyncio.wait_for(second_entered.wait(), timeout=0.1)
+    release_second.set()
+    await second_task
+    resume_wait.set()
+    await first_task
+
+    assert queue.queue_depth == 0
+    assert message.reply_text.await_count == 2
 
 
 async def test_long_final_response_replaces_placeholder_and_sends_more_chunks() -> None:

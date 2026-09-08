@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 from pydantic import SecretStr
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter
 
 from gemini_tg_bot.gemini.service import ServiceState
 from gemini_tg_bot.queue import RequestQueue
@@ -19,11 +20,16 @@ from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
     GEM_LIST_UNAVAILABLE,
     MODEL_LIST_UNAVAILABLE,
+    SERVICE_BUSY,
     EgressMeter,
     TelegramHandlers,
     register_handlers,
 )
-from gemini_tg_bot.telegram.streaming import EMPTY_RESPONSE_TEXT, PLACEHOLDER_TEXT
+from gemini_tg_bot.telegram.streaming import (
+    EMPTY_RESPONSE_TEXT,
+    MAX_FLOOD_WAIT_SECONDS,
+    PLACEHOLDER_TEXT,
+)
 
 try:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry as _RegistrySpec
@@ -147,12 +153,14 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
         egress_meter: EgressMeter | None = None,
         cookie_path: Path | None = None,
         research: AsyncMock | None = None,
+        request_queue: RequestQueue | None = None,
     ) -> tuple[TelegramHandlers, MagicMock]:
         service = _client_service(client or MagicMock())
         handlers = TelegramHandlers(
             service=service,
             sessions=registry,
-            request_queue=RequestQueue(
+            request_queue=request_queue
+            or RequestQueue(
                 max_concurrency=1,
                 user_rate_limit_per_min=10,
             ),
@@ -424,6 +432,63 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     assert saved.chat_id == 202
     assert saved.model == "dynamic-model"
     assert saved.ok is True
+
+
+async def test_text_reports_bounded_flood_control_and_releases_slot(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    queue = RequestQueue(max_concurrency=1, user_rate_limit_per_min=10)
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(
+        _StreamingClient([]),
+        usage_dao=usage_dao,
+        request_queue=queue,
+    )
+    update = _update(text="question")
+    update.effective_message.reply_text.side_effect = [
+        RetryAfter(MAX_FLOOD_WAIT_SECONDS + 1),
+        update.effective_message.placeholder,
+    ]
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    assert update.effective_message.reply_text.await_args_list == [
+        call(PLACEHOLDER_TEXT),
+        call(SERVICE_BUSY),
+    ]
+    saved = usage_dao.add.await_args.args[0]
+    assert saved.ok is False
+    assert saved.error_kind == "flood_control"
+    async with queue.request(user_id=202):
+        pass
+
+
+async def test_text_reports_queue_acquire_timeout(
+    handlers_factory,
+) -> None:
+    queue = RequestQueue(
+        max_concurrency=1,
+        user_rate_limit_per_min=10,
+        acquire_timeout=0.01,
+    )
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    handlers, service = handlers_factory(
+        _StreamingClient([]),
+        usage_dao=usage_dao,
+        request_queue=queue,
+    )
+    update = _update(text="question")
+
+    async with queue.request(user_id=999):
+        await handlers.text_message(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(SERVICE_BUSY)
+    service.execute.assert_not_awaited()
+    saved = usage_dao.add.await_args.args[0]
+    assert saved.ok is False
+    assert saved.error_kind == "queue_timeout"
 
 
 @pytest.mark.parametrize(

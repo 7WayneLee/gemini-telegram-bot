@@ -25,6 +25,8 @@ PLACEHOLDER_TEXT = "思考中…"
 EMPTY_RESPONSE_TEXT = "Gemini 未回傳文字。"
 EDIT_INTERVAL_SECONDS = 1.5
 EDIT_CHARACTER_THRESHOLD = 200
+MAX_FLOOD_WAIT_SECONDS = 30.0
+MAX_FLOOD_RETRIES = 3
 
 _ResultT = TypeVar("_ResultT")
 _Sleep = Callable[[float], Awaitable[None]]
@@ -39,6 +41,18 @@ class StreamResult:
     output: Any | None
 
 
+class FloodControlExceeded(RuntimeError):
+    """Raised when a Telegram flood-control wait exceeds the bounded budget."""
+
+    def __init__(self, retry_after: float, waited_seconds: float) -> None:
+        self.retry_after = retry_after
+        self.waited_seconds = waited_seconds
+        super().__init__(
+            "Telegram flood-control retry budget exceeded "
+            f"after waiting {waited_seconds:.2f} seconds"
+        )
+
+
 def _retry_delay(error: RetryAfter) -> float:
     retry_after = error.retry_after
     if isinstance(retry_after, timedelta):
@@ -50,14 +64,24 @@ async def _call_with_retry_after(
     operation: Callable[[], Awaitable[_ResultT]],
     *,
     sleep: _Sleep,
+    flood_wait: _Sleep | None = None,
 ) -> _ResultT:
-    """Run one Telegram operation, respecting every flood-control response."""
+    """Run a Telegram operation with bounded flood-control retries."""
 
-    while True:
+    waited_seconds = 0.0
+    wait = flood_wait or sleep
+    for attempt in range(MAX_FLOOD_RETRIES + 1):
         try:
             return await operation()
         except RetryAfter as error:
-            await sleep(_retry_delay(error))
+            delay = max(0.0, _retry_delay(error))
+            remaining = MAX_FLOOD_WAIT_SECONDS - waited_seconds
+            if attempt == MAX_FLOOD_RETRIES or delay > remaining:
+                raise FloodControlExceeded(delay, waited_seconds) from error
+            await wait(delay)
+            waited_seconds += delay
+
+    raise AssertionError("unreachable")
 
 
 async def _cancel(task: asyncio.Future[Any] | None) -> None:
@@ -77,6 +101,7 @@ async def stream_response(
     edit_interval: float = EDIT_INTERVAL_SECONDS,
     edit_character_threshold: int = EDIT_CHARACTER_THRESHOLD,
     sleep: _Sleep = asyncio.sleep,
+    flood_wait: _Sleep | None = None,
     clock: _Clock = time.monotonic,
     **generate_kwargs: Any,
 ) -> StreamResult:
@@ -106,6 +131,7 @@ async def stream_response(
     placeholder = await _call_with_retry_after(
         lambda: message.reply_text(placeholder_text),
         sleep=sleep,
+        flood_wait=flood_wait,
     )
     last_edit_at = clock()
     pending_characters = 0
@@ -122,6 +148,7 @@ async def stream_response(
         await _call_with_retry_after(
             lambda: placeholder.edit_text(latest_text, parse_mode=None),
             sleep=sleep,
+            flood_wait=flood_wait,
         )
         pending_characters = 0
         last_edit_at = clock()
@@ -174,12 +201,14 @@ async def stream_response(
         await _call_with_retry_after(
             lambda: placeholder.edit_text(EMPTY_RESPONSE_TEXT, parse_mode=None),
             sleep=sleep,
+            flood_wait=flood_wait,
         )
         return StreamResult(text=latest_text, output=latest_output)
 
     await _call_with_retry_after(
         lambda: placeholder.edit_text(rendered_chunks[0], parse_mode=ParseMode.HTML),
         sleep=sleep,
+        flood_wait=flood_wait,
     )
     for rendered_chunk in rendered_chunks[1:]:
         await _call_with_retry_after(
@@ -188,6 +217,7 @@ async def stream_response(
                 parse_mode=ParseMode.HTML,
             ),
             sleep=sleep,
+            flood_wait=flood_wait,
         )
     return StreamResult(text=latest_text, output=latest_output)
 
@@ -196,6 +226,9 @@ __all__ = [
     "EDIT_CHARACTER_THRESHOLD",
     "EDIT_INTERVAL_SECONDS",
     "EMPTY_RESPONSE_TEXT",
+    "FloodControlExceeded",
+    "MAX_FLOOD_RETRIES",
+    "MAX_FLOOD_WAIT_SECONDS",
     "PLACEHOLDER_TEXT",
     "StreamResult",
     "stream_response",

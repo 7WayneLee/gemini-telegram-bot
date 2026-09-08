@@ -24,13 +24,13 @@ from telegram.ext import (
 
 from gemini_tg_bot.gemini.errors import classify_error
 from gemini_tg_bot.gemini.service import GeminiService, ServiceUnavailableError
-from gemini_tg_bot.queue import RateLimitExceeded, RequestQueue
+from gemini_tg_bot.queue import QueueAcquireTimeout, RateLimitExceeded, RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 
 from .auth import AuthMiddleware
 from .media import MediaHandler, MediaUploadError, caption_is_eligible
 from .rendering import render_markdown_chunks
-from .streaming import stream_response
+from .streaming import FloodControlExceeded, stream_response
 
 if TYPE_CHECKING:
     from gemini_tg_bot.gemini.research import ResearchManager
@@ -59,6 +59,7 @@ MODEL_LIST_UNAVAILABLE = "模型清單暫時無法取得，請稍後再試。"
 GEM_LIST_UNAVAILABLE = "Gem 清單暫時無法取得，請稍後再試。"
 SERVICE_UNAVAILABLE = "Gemini 服務目前無法接受請求，請稍後再試。"
 GENERIC_FAILURE = "處理請求時發生錯誤，請稍後再試。"
+SERVICE_BUSY = "服務忙碌，請稍後再試。"
 ADMIN_ONLY = "此指令僅限管理員使用。"
 ADMIN_NOT_CONFIGURED = "管理員功能尚未設定。"
 COOKIE_PROMPT = (
@@ -196,6 +197,9 @@ class TelegramHandlers:
         except RateLimitExceeded as error:
             await _reply_rate_limited(message, error)
             return
+        except QueueAcquireTimeout:
+            await message.reply_text(SERVICE_BUSY)
+            return
         except ServiceUnavailableError:
             await message.reply_text(SERVICE_UNAVAILABLE)
             return
@@ -249,6 +253,9 @@ class TelegramHandlers:
                 )
         except RateLimitExceeded as error:
             await _reply_rate_limited(message, error)
+            return
+        except QueueAcquireTimeout:
+            await message.reply_text(SERVICE_BUSY)
             return
         except ServiceUnavailableError:
             await message.reply_text(SERVICE_UNAVAILABLE)
@@ -594,7 +601,7 @@ class TelegramHandlers:
         error_kind: str | None = None
         stream_message = _StreamingMessageProxy(message)
         try:
-            async with self._request_queue.request(user_id):
+            async with self._request_queue.request(user_id) as permit:
                 session = await self._sessions.get_or_create(chat_id)
                 streamed = await self._service.execute(
                     lambda client: stream_response(
@@ -603,6 +610,7 @@ class TelegramHandlers:
                         prompt,
                         chat=session,
                         temporary=state.temporary,
+                        flood_wait=permit.wait_for_flood_control,
                     )
                 )
             await self._sessions.persist(chat_id, session)
@@ -616,6 +624,14 @@ class TelegramHandlers:
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
             await _reply_rate_limited(message, error)
+        except FloodControlExceeded as error:
+            error_kind = "flood_control"
+            _log_handler_error("Telegram flood control", error)
+            await message.reply_text(SERVICE_BUSY)
+        except QueueAcquireTimeout as error:
+            error_kind = "queue_timeout"
+            _log_handler_error("request queue acquisition", error)
+            await message.reply_text(SERVICE_BUSY)
         except ServiceUnavailableError:
             error_kind = "unavailable"
             await message.reply_text(SERVICE_UNAVAILABLE)
@@ -686,6 +702,10 @@ class TelegramHandlers:
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
             await _reply_rate_limited(message, error)
+        except QueueAcquireTimeout as error:
+            error_kind = "queue_timeout"
+            _log_handler_error("request queue acquisition", error)
+            await message.reply_text(SERVICE_BUSY)
         except ServiceUnavailableError:
             error_kind = "unavailable"
             await message.reply_text(SERVICE_UNAVAILABLE)
@@ -783,6 +803,9 @@ class TelegramHandlers:
         except RateLimitExceeded as error:
             await query.edit_message_text(_rate_limit_message(error))
             return
+        except QueueAcquireTimeout:
+            await query.edit_message_text(SERVICE_BUSY)
+            return
         except ServiceUnavailableError:
             await query.edit_message_text(SERVICE_UNAVAILABLE)
             return
@@ -816,6 +839,9 @@ class TelegramHandlers:
                 )
         except RateLimitExceeded as error:
             await query.edit_message_text(_rate_limit_message(error))
+            return
+        except QueueAcquireTimeout:
+            await query.edit_message_text(SERVICE_BUSY)
             return
         except ServiceUnavailableError:
             await query.edit_message_text(SERVICE_UNAVAILABLE)
