@@ -278,3 +278,28 @@ media.py  的 RetryAfter 處理：完全沒有
 **根本教訓**：RetryAfter 是**傳輸層**關注點，不該由各個 handler 各自處理。
 當初 spec 的錯誤矩陣把它列為一列，我卻只在 T3.1（streaming）指定實作，
 沒有把它當成橫切關注點統一處理 —— 這是切分任務時的結構性錯誤。
+
+## D11 — ⚠️ `scripts/dump_response.py` 必須在 bot 停止時執行
+
+該腳本經由 `GeminiService.init()` 建立 client，而其內部呼叫
+`client.init(auto_refresh=True)` —— **會啟動背景 cookie 輪替**。
+
+若在 bot 運行中執行此腳本，將有**兩個 process 以同一組 cookie 各自輪替
+`__Secure-1PSIDTS`**，互相作廢，導致帳號反覆登出，必須重跑 SSH SOCKS 流程重取 cookie。
+這正是不變量 2 所防範的情況。
+
+腳本 docstring 寫的「reuses GeminiService so the process still owns exactly one
+Gemini client」只保證**單一 process 內**唯一，未涵蓋與運行中 bot 的併存。
+撰寫時未考慮此情境，驗收時 Commander 亦未察覺。
+
+### 正確操作順序
+
+1. 停止 bot
+2. 確認 SSH tunnel 仍存活（本機執行時）：`curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me`
+3. 執行 dump（建議先跑一個確認 JSON 正常，再跑第二個，避免白費 live 請求）
+4. 重新啟動 bot
+
+### 待補防護
+
+腳本應自行偵測並拒絕在 bot 運行時執行，例如以 `GEMINI_COOKIE_PATH` 下的 lock file
+或檢查既有 process。目前僅以文件約束，屬於可被誤觸的設計。
