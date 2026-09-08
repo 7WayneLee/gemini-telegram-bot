@@ -492,3 +492,66 @@ deleteMessage     ← placeholder 這時才刪除
 - placeholder 的刪除應在送圖**之前或同時**，不得在之後。
 
 此為使用者可見的 UX 缺陷，優先度高於剩餘的技術債。
+
+
+## D18 — 🔴 G2 演練失敗：cookie 失效不會觸發 DEGRADED，也不會推播管理員
+
+**2026-09-08 20:19-20:23 實機演練，Commander 全程比對 log。**
+
+### 演練結果
+
+| G2 驗收項目 | 結果 |
+|---|---|
+| `/setcookie` 收到後立即刪除訊息 | ✅ 通過 |
+| `reinit` 呼叫 `clear_cookies_cache` | ✅ 通過（D6 的修正確實生效） |
+| 全程 process 未重啟 | ✅ 通過（pid 20505 未變） |
+| **進入 `DEGRADED`** | 🔴 **失敗** |
+| **主動推播管理員** | 🔴 **失敗** |
+
+### 根因鏈
+
+填入無效 cookie 後的實際 log：
+
+```
+WARNING  Account status: UNAUTHENTICATED - Session is not authenticated or cookies have expired.
+WARNING  RPC request GPRiHf failed: Permission denied or unauthenticated.
+SUCCESS  Gemini client initialized successfully.          ← 上游宣稱成功
+```
+
+**上游 `init()` 在 session 未認證時不拋例外，只記 warning 並回報 SUCCESS。**
+
+於是：
+
+1. `reinit()` 收不到例外 → 判定成功 → 回覆「Cookie 已更新，Gemini 服務已熱重啟。」
+2. 服務維持 `HEALTHY`，DEGRADED 狀態機從未被觸發
+3. 後續請求最終失敗，但錯誤型別是 **`APIError` 而非 `AuthError`**
+4. 合約將 `APIError` 歸類為 `Fatal`（此歸類本身正確），而 `Fatal` **不觸發 DEGRADED**
+5. 使用者收到通用訊息「處理請求時發生錯誤，請稍後再試。」，
+   而非「認證失效，請 /setcookie」；**管理員完全沒有收到推播**
+6. `usage_log` 記錄 `error_kind='fatal'`、**`latency_ms=91014`** ——
+   每次請求會卡 91 秒才失敗，使用者只看到「思考中…」長時間不動
+
+### 我們忽略了上游提供的正確訊號
+
+`client.account_status` 是 `AccountStatus` enum，共 10 個成員：
+
+```
+AVAILABLE (1000)                     ACCESS_TEMPORARILY_UNAVAILABLE (1014)
+UNAUTHENTICATED (1016)               ACCOUNT_REJECTED (1021)
+ACCOUNT_UNTRUSTED (1033)             TOS_PENDING (1040)
+TOS_OUT_OF_DATE (1042)               ACCOUNT_REJECTED_BY_GUARDIAN (1054)
+GUARDIAN_APPROVAL_REQUIRED (1057)    LOCATION_REJECTED (1060)
+```
+
+`service.py` **一個都沒有檢查**（grep `account_status` 無命中），完全依賴 `AuthError` 例外。
+
+其中 **`LOCATION_REJECTED` (1060) 特別重要** —— 那正是「cookie 出生 IP 與使用 IP 不符」的訊號，
+整套 SSH SOCKS 流程就是為了避免它。若真的發生，目前的實作**不會察覺，也不會告知任何人**。
+
+### 這是合約層級的疏失，責任在 Commander
+
+我在合約中把錯誤分類建立在「例外型別」之上，並驗證了四類分類的正確性 ——
+但**從未驗證「上游是否真的會拋出 `AuthError`」**。
+T2.2 的 DEGRADED 測試全部以 mock 注入 `AuthError` 進行，因此永遠是綠的；
+真實情況下該例外根本不會出現。這是 mock 測試與真實行為脫節的典型案例，
+也正是 G2 這類實機 gate 存在的理由。
