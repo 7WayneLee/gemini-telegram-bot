@@ -344,3 +344,23 @@ snake_case 識別字被誤判為斜體。Gemini 實際輸出一律使用星號�
 
 **裁定：不嘗試偵測或修補接縫。** 判斷「哪裡是接縫」沒有可靠訊號，
 切錯會丟失真實內容，代價高於突兀的閱讀體驗。這是上游行為，照實呈現。
+
+
+## D14 — D9 的 `/img` 缺口已補齊（T3.7）
+
+`/img <prompt>` 已實作並納入 `PUBLIC_BOT_COMMANDS`（與 `/help`、Telegram 指令選單共用單一來源）。
+
+生成措辭定義為具名常數：
+
+```python
+IMAGE_GENERATION_PREFIX = (
+    "Generate an original AI image based on the following request. "
+    "Do not search for or return existing web images:"
+)
+```
+
+明示「不要搜尋或回傳既有網路圖片」，直接對應 fixture 揭露的事實 ——
+未明示生成時 Gemini 走 `WebImage`（圖庫照片）而非 `GeneratedImage`。
+使用者實測「台北101」拿到 alamy / iStock 圖庫照正是此現象。
+
+送圖重用 T3.6 的既有相簿路徑，未自寫送圖邏輯。
