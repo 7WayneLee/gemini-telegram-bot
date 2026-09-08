@@ -648,3 +648,66 @@ streaming 的設計是：中途 edit 送**純文字**（`parse_mode=None`），
 
 另建議在 `sending.py` 層辨識 Telegram 的 `message is not modified` 錯誤並視為成功，
 作為第二道防護 —— 這是冪等操作，重送同樣內容本就不該算失敗。
+
+
+## D21 — 🔴 啟動時認證失敗會導致 crash loop，使 `/setcookie` 完全無法使用
+
+**2026-09-08 首次部署到 movie-nas 時發現。**
+
+```
+raise AccountStatusError(self._account_status)
+gemini_tg_bot.gemini.errors.AccountStatusError: UNAUTHENTICATED:
+Session is not authenticated or cookies have expired. Please check your cookies.
+```
+
+T3.13 的 `account_status` 檢查**正確運作**（正式環境驗證通過），
+但它在 `init()` 階段拋出例外，導致 process 直接死亡。
+
+### 為何這是設計矛盾
+
+`DEGRADED(AUTH)` 加上 `/setcookie` 熱恢復的**整個用意**，
+是讓 cookie 失效時服務仍存活、管理員能用指令救回來。
+
+但目前啟動階段一遇到 `UNAUTHENTICATED` 就拋例外：
+
+```
+process 死亡 → systemd Restart=always 重啟 → 再死 → crash loop
+```
+
+**`/setcookie` 永遠沒機會被使用**，因為 bot 從未進入 polling。
+使用者只能 SSH 進主機手動改 `/etc/gemini-tg-bot.env`，
+等於這個指令的價值被抵銷一半。
+
+### 為何 G2 沒抓到
+
+G2 演練時 bot **已經在執行**，測的是「執行中降級」路徑：
+執行中的 `reinit()` 拋例外 → 被 handler 捕捉 → 進入 DEGRADED → 推播 → 服務續存。
+
+而「**啟動時就失效**」是另一條路徑：`init()` 拋例外 → 沒有 handler → process 終止。
+兩條路徑的差別在於「有沒有正在運行的 event loop 與 handler 可以接住例外」。
+
+這是我設計 G2 情境時的盲點 —— 只想到「服務跑一跑 cookie 過期」，
+沒想到「重啟時 cookie 已經是過期的」，而後者在實務上更常見
+（機器重開、部署、systemd 重啟都會遇到）。
+
+### 修法
+
+啟動時的認證失敗**不應致命**：
+
+- `init()` 遇到非 `AVAILABLE` 的 `account_status` 時，
+  進入 `DEGRADED` 並推播管理員，但**仍要啟動 Telegram polling**
+- 使用者發訊息時得到「認證失效」的明確回覆（快速失敗路徑已完成）
+- 管理員可用 `/setcookie` 熱恢復，無須 SSH 進主機
+- 僅在**設定錯誤**（缺 token、缺必要欄位）這類無法靠執行期修復的情況才終止啟動
+
+### 暫時的因應
+
+在修好之前，若 VM 上 cookie 過期，必須：
+
+```bash
+sudo nano /etc/gemini-tg-bot.env                                    # 更新兩個 cookie
+sudo sh -c "rm -f /var/lib/gemini-tg-bot/cookies/.cached_cookies_*.json"   # 必須刪舊快取
+sudo systemctl restart gemini-tg-bot
+```
+
+刪快取那步不可省 —— 上游快取優先序高於 `.env`（合約 §2 / D6）。
