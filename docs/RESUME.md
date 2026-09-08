@@ -52,11 +52,22 @@ orca orchestration worker-start --task task_87ee87bc4e67 --worktree current --ag
   （註：開發機沒有 compose plugin，只有 `docker` 二進位，本機驗不了）
 - 尚未 commit
 
-### 3. T4.2 — README（Commander 親自撰寫，不派工）
+### 3. T4.2 — README ✅ 已完成（commit 4b115b7）
 
-需涵蓋：SSH SOCKS cookie 取得流程、成本與 egress 章節、
-已知風險（ToS／封號／AGPL-3.0／singleton 擴展限制）、
-以及 D8 的部署方式建議（見下）。
+Commander 於等待額度期間完成。涵蓋 SSH SOCKS cookie 流程、實測資源與 egress 策略、
+四項已知風險、rendering 與 DEGRADED 設計說明。每項陳述皆已對照程式碼查核。
+
+**待補**：部署章節的指令在 T4.1 的 `docker compose build` DoD 通過前尚未驗證。
+
+### 4. T3.7 — 補做 `/img` 指令（新建，尚未派工）
+
+```bash
+orca orchestration worker-start --task task_0aac5f272c30 --worktree current --agent codex --json
+```
+
+見 `docs/decisions.md` 的 D9：`spec.md` 列有 `/img <prompt>` 但從未被任何任務涵蓋，
+是 Commander 切分 Phase 2 時的遺漏。使用者實測「台北101」拿到的是圖庫照片
+（`WebImage`）而非生成圖，正是此缺口的實際影響。
 
 ---
 
