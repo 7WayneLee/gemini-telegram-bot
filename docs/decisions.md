@@ -414,3 +414,44 @@ docker-compose -f deploy/docker-compose.yml config
 同類事件會重演。長期解法是把正式憑證移出 repo 目錄
 （例如 systemd 的 `EnvironmentFile=/etc/gemini-tg-bot.env`，unit 檔已如此設計），
 開發期則只用 `FAKE_` 值。
+
+
+## D16 — T4.1 交付；兩項技術債待償
+
+### worker 在部署前抓到一個真實的 production bug
+
+`__main__.py` 的 `DATABASE_PATH = Path("data/db/bot.sqlite3")` 是**相對路徑**。
+原 Dockerfile 為 `WORKDIR /app`，會解析為 `/app/data/db/bot.sqlite3` ——
+**不是 compose 掛載的 `/data/db` volume**。後果：
+
+- 容器重建即遺失整個資料庫（chat sessions、research tasks、usage log）
+- 且 `/app` 為 root 所有，非 root 的 uid 10001 連 `mkdir` 都會失敗 → 啟動直接掛掉
+
+修法：Dockerfile 末尾加 `WORKDIR /`，使相對路徑解析為 `/data/db/bot.sqlite3`，
+正好對上掛載點。systemd 側 `WorkingDirectory=/var/lib/gemini-tg-bot` 搭配
+`ExecStartPre mkdir .../data/db` 亦一致。
+
+### 債務 1：`WORKDIR /` 是隱性耦合
+
+此修法只在「應用使用相對路徑」時成立。若日後有人把 `WORKDIR` 改回 `/app`，
+資料庫會**靜默寫到非持久化位置** —— 這是最糟的失敗模式（不報錯、只是資料消失）。
+
+穩健作法是讓 `DATABASE_PATH` 比照 `GEMINI_COOKIE_PATH` 改為環境變數可設定。
+該修改屬 `src/`，不在 T4.1 範圍，故未動。**建議下次觸碰 `__main__.py` 時一併處理。**
+
+### 債務 2：`uv.lock` 未進 build context，image 相依性非鎖定
+
+`.dockerignore` 採 deny-all + allowlist（優於 denylist，`.env` 結構上無法進入 context），
+但只放行 `pyproject.toml` 與 `src/`。Dockerfile 用 `pip install .`，
+因此**每次 build 會重新解析相依版本**，與開發環境的 `uv.lock` 可能不同。
+
+影響：開發測過的版本組合不保證等於 image 內的版本組合。
+對此專案風險中等（相依少且皆有下限約束），但值得日後改為 `uv sync --frozen`。
+
+### 未能親自驗證的項目
+
+`docker compose build` 的 DoD **Commander 未能獨立重跑** —— 驗收當下本機 Docker daemon 未運行。
+worker 回報成功並附具體輸出（`Successfully built 58ce5fd1ca3c`、
+`uid=10001 workdir=/ cookie_dir=10001:10001:700 db_path=/data/db/bot.sqlite3 secret_files=absent`）。
+依驗證協定 §4，此項如實記為**未經 Commander 親自驗證**，
+`.dockerignore` 的安全性質則已靜態驗證確認。
