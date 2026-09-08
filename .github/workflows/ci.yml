@@ -1,0 +1,62 @@
+name: CI
+
+# 全部以 mock 執行，不需要任何 secret，也不會對 Gemini 發出真實請求。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      # 以假 client 與假 transport 跑完整鏈路：
+      # 收訊息 -> 白名單 -> 佇列 -> service -> streaming -> 渲染 -> 送出 -> research -> DB
+      - name: End-to-end dry run
+        run: uv run python -m gemini_tg_bot --dry-run
+
+      # 確保沒有裸露的 Telegram 送出繞過 sending.py 的 flood-control 保護。
+      # 這在 pytest 內也有 AST guard，這裡再跑一次讓失敗原因更醒目。
+      - name: Check for unprotected Telegram calls
+        run: uv run pytest tests/test_handlers.py -q -k transport
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # cookie 與 token 絕不可進入版本控制。這是專案不變量之一，
+      # 在 CI 強制執行比只寫在文件裡可靠。
+      - name: Scan for credential material
+        run: |
+          set -eu
+          if grep -rInE 'g\.a000[A-Za-z0-9_-]{20,}|sidts-[A-Za-z0-9_-]{20,}|[0-9]{9,10}:AA[A-Za-z0-9_-]{30,}' \
+               --exclude-dir=.git . ; then
+            echo "::error::Possible credential material committed to the repository."
+            exit 1
+          fi
+          echo "No credential patterns found."
