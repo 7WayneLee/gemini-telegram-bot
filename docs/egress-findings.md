@@ -96,7 +96,39 @@ media.gettyimages.com
   這正是 `web_image_mode` 與 `generated_image_mode` 必須維持獨立開關的理由 ——
   兩者已證實網域性質不同，不可假設行為相同。
 
-## 待填：`GeneratedImage` 的可抓取性
+## ✅ 已結案：`GeneratedImage` 無法直傳，必須中轉（2026-09-08 實機驗證）
+
+`/img 一隻貓` 的實測結果，與 `WebImage` **完全相反**：
+
+```
+url = https://lh3.googleusercontent.com/gg-dl/AAQ_wbFhSGjJPaD0FMkV5hQaXpNTlCLErpyn7iHox…
+      title='[Generated Image 0]'  alt='watermarked_img_744780683117238945.jpg'
+
+sendPhoto  "HTTP/1.1 400"    ← URL 直傳被 Telegram 拒絕
+WARNING  Telegram rejected image URL; falling back to VM relay source=generated
+sendPhoto  "HTTP/1.1 200"    ← 退回下載後上傳，成功
+```
+
+per-image 自動退回機制正確運作。
+
+### 最終結論：兩種來源行為相反，獨立開關是必要的
+
+| 來源 | URL 網域 | Telegram 直抓 | egress |
+|---|---|---|---|
+| `WebImage` | 第三方公開網址（unsplash / alamy / gettyimages） | ✅ 可以 | **0** |
+| `GeneratedImage` | `lh3.googleusercontent.com/gg-dl/` 簽章網址 | ❌ 400 | **每張都計量** |
+
+fixture 階段的推論（「generated 帶時效簽章，很可能抓不到」）獲得實機證實。
+**`web_image_mode` 與 `generated_image_mode` 維持獨立開關的決定是正確的** ——
+若當初合併成單一開關，這裡就只能二選一：要嘛所有圖都中轉（浪費 web 圖的零 egress），
+要嘛所有圖都直傳（生成圖直接失敗）。
+
+### 成本影響：`/img` 每張生成圖都吃 egress
+
+免費層每月僅 1GB 北美流量，且**與同機 Jellyfin 串流共用**。
+生成圖單張約數百 KB 至數 MB，頻繁使用 `/img` 會顯著消耗額度。
+`/status` 的 egress 計數是唯一的可見性來源，建議定期查看。
+若額度吃緊，可考慮對 `/img` 加上每日次數限制（目前未實作）。
 
 使用者跑過含圖片的請求後，回填：
 
