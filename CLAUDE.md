@@ -25,25 +25,42 @@
    媒體服務中斷。Agent 只在開發環境寫碼與跑 mock 測試；
    **所有部署、重啟、docker 操作一律為 HUMAN gate。**
 
-5. **禁止引入 webhook、多 worker、多 replica 設計。**
+5. **禁止執行任何會展開或印出 `.env` 的指令。**
+   已知會觸發的：`docker compose config`、`docker-compose config`
+   （兩者都會展開 `env_file` 並把解析後的 `TELEGRAM_BOT_TOKEN` 與
+   `GEMINI_SECURE_1PSID` / `1PSIDTS` 真實值印到 stdout）。
+   同理適用於任何 dotenv / direnv 類工具，以及 `env`、`printenv`、
+   `set` 等會列出環境變數的指令。
+
+   **這條在 2026-09-08 真實發生過並造成憑證洩漏**（見 `docs/decisions.md` D15），
+   憑證已輪替。`.gitignore` 只能防 commit，擋不住「讀取並印出」。
+
+   驗證 compose 檔請改用：
+   - 拋棄式目錄搭配只含 `FAKE_` 值的 `.env.example`
+   - 純 YAML 語法檢查：`yaml.safe_load(open(...))`
+   - `docker build`（不涉及 `env_file` 展開）
+
+   若不確定某指令是否會印出環境變數，**先用 ask 問 Commander，不要試跑**。
+
+6. **禁止引入 webhook、多 worker、多 replica 設計。**
    一律 long polling、單一 process、單一 event loop、不開任何 inbound port。
 
 ---
 
 ## 二、實作紀律
 
-6. **禁止憑記憶推測上游 API。**
+7. **禁止憑記憶推測上游 API。**
    所有 `gemini_webapi` 的類別名稱、方法簽章、屬性欄位，一律引用
    `docs/upstream-api-contract.md`。合約未涵蓋的，回報 Commander 補做偵察，
    **不得自行猜測**。
 
-7. **禁止硬編碼模型清單。**
+8. **禁止硬編碼模型清單。**
    模型必須來自 `client.list_models()` 動態取得。
    上游已棄用 `Model` enum 並移除 `Model.from_name` / `Model.from_dict`。
 
-8. **每個任務單一 commit**，commit message 用英文，且**只能觸碰任務宣告的檔案範圍**。
+9. **每個任務單一 commit**，commit message 用英文，且**只能觸碰任務宣告的檔案範圍**。
 
-9. **回報完成時必須附上 DoD 指令的實際輸出。**
+10. **回報完成時必須附上 DoD 指令的實際輸出。**
    不接受「測試已通過」的文字聲明。
 
 ---
