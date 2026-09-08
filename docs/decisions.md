@@ -160,3 +160,22 @@ tmpfs 會消耗 RAM，等同於繞過 `mem_limit` 去吃掉媒體服務的記憶
 **建議把 spec 的主/備方案對調：以 `deploy/gemini-tg-bot.service`（systemd + venv）為主要部署方式，
 Docker Compose 作為替代方案。** 兩者 spec 都要求產出，因此不影響交付範圍，只影響 README 的推薦順序。
 此項需使用者確認後定案。
+
+## D9 — `/img` 指令未實作（spec 缺口，待補）
+
+`docs/spec.md` 的指令表列有：
+
+> `/img <prompt>` — 明確在 prompt 中要求「生成」圖片
+> （README 指出：未明示 generate 時 Gemini 傾向回傳網路搜尋來的圖，而非 AI 生成圖）
+
+實測 `handlers.py` **沒有註冊此指令**。T2.5 交付了 `/start /help /new /model /gem /temp /status`，
+T3.3 補了 `/research /research_status`，但 `/img` 從未被任何任務涵蓋 —— 這是我在切分
+Phase 2 任務時的遺漏，不是 worker 的疏失。
+
+影響：使用者若想要 AI 生成圖，必須自己在 prompt 中明寫 "generate"，
+否則 Gemini 傾向回傳搜尋來的 `WebImage`。使用者實測的「台北101」正是此情況
+（回傳的是 alamy / iStock 的圖庫照片，非生成圖）。
+
+補做時的實作要點：`/img <prompt>` 應在送出前將 prompt 包裝成明確要求生成的措辭，
+並走既有的 media 路徑；`ENABLE_VIDEO_GENERATION` / `ENABLE_AUDIO_GENERATION` 的
+預設停用不受影響。
