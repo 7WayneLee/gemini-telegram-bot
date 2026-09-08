@@ -23,6 +23,7 @@ from gemini_tg_bot.telegram.handlers import (
     TelegramHandlers,
     register_handlers,
 )
+from gemini_tg_bot.telegram.streaming import EMPTY_RESPONSE_TEXT, PLACEHOLDER_TEXT
 
 try:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry as _RegistrySpec
@@ -67,7 +68,14 @@ def _update(
     user_id: int = 101,
     chat_id: int = 202,
 ) -> SimpleNamespace:
-    message = SimpleNamespace(text=text, reply_text=AsyncMock())
+    placeholder = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(
+        text=text,
+        reply_text=AsyncMock(return_value=placeholder),
+        reply_photo=AsyncMock(),
+        reply_document=AsyncMock(),
+        placeholder=placeholder,
+    )
     return SimpleNamespace(
         effective_user=SimpleNamespace(id=user_id),
         effective_chat=SimpleNamespace(id=chat_id),
@@ -107,6 +115,20 @@ def _client_service(client: Any) -> MagicMock:
         degraded_reason=None,
     )
     return service
+
+
+class _StreamingClient:
+    def __init__(self, outputs: list[Any]) -> None:
+        self._outputs = outputs
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def _generate(self) -> Any:
+        for output in self._outputs:
+            yield output
+
+    def generate_content_stream(self, prompt: str, **kwargs: Any) -> Any:
+        self.calls.append((prompt, kwargs))
+        return self._generate()
 
 
 @pytest.fixture
@@ -304,21 +326,34 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
-    session = SimpleNamespace(send_message=AsyncMock())
-    session.send_message.return_value = SimpleNamespace(text="**hello**\n\nworld")
+    session = SimpleNamespace()
+    output = SimpleNamespace(
+        text="**hello**\n\nworld",
+        text_delta="**hello**\n\nworld",
+        images=(),
+    )
+    client = _StreamingClient([output])
     registry.get_state.return_value = _state(temporary=True)
     registry.get_or_create.return_value = session
     usage_dao = AsyncMock(spec=UsageLogDAO)
-    handlers, service = handlers_factory(usage_dao=usage_dao)
+    handlers, service = handlers_factory(client, usage_dao=usage_dao)
     update = _update(text="question")
 
     await handlers.text_message(update, SimpleNamespace())
 
     registry.get_or_create.assert_awaited_once_with(202)
     service.execute.assert_awaited_once()
-    session.send_message.assert_awaited_once_with("question", temporary=True)
+    assert client.calls == [
+        (
+            "question",
+            {"chat": session, "temporary": True},
+        )
+    ]
     registry.persist.assert_awaited_once_with(202, session)
     update.effective_message.reply_text.assert_awaited_once_with(
+        PLACEHOLDER_TEXT,
+    )
+    update.effective_message.placeholder.edit_text.assert_awaited_once_with(
         "<b>hello</b>\n\nworld",
         parse_mode=ParseMode.HTML,
     )
@@ -327,6 +362,71 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     assert saved.chat_id == 202
     assert saved.model == "dynamic-model"
     assert saved.ok is True
+
+
+@pytest.mark.parametrize(
+    ("artifact_text", "expected_text", "parse_mode"),
+    [
+        ("_551", EMPTY_RESPONSE_TEXT, None),
+        ("_0", EMPTY_RESPONSE_TEXT, None),
+        (
+            "http://googleusercontent.com/image_generation_content/0_551",
+            EMPTY_RESPONSE_TEXT,
+            None,
+        ),
+        (
+            "台北101是台北的地標…\n_0",
+            "台北101是台北的地標…\n",
+            ParseMode.HTML,
+        ),
+    ],
+)
+async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
+    handlers_factory,
+    registry: AsyncMock,
+    artifact_text: str,
+    expected_text: str,
+    parse_mode: str | None,
+) -> None:
+    image = SimpleNamespace(
+        url="https://example.test/generated.png",
+        title="Generated",
+        alt="A generated test image",
+    )
+    output = SimpleNamespace(
+        text=artifact_text,
+        text_delta=artifact_text,
+        images=[image],
+        candidates=[
+            SimpleNamespace(web_images=[image], generated_images=[]),
+        ],
+        chosen=0,
+    )
+    client = _StreamingClient([output])
+    session = SimpleNamespace()
+    registry.get_state.return_value = _state(temporary=False)
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory(client)
+    update = _update(text="generate an image")
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
+    update.effective_message.placeholder.edit_text.assert_awaited_once_with(
+        expected_text,
+        parse_mode=parse_mode,
+    )
+    update.effective_message.reply_photo.assert_awaited_once_with(
+        image.url,
+        caption=None,
+    )
+    assert "_551" not in str(
+        update.effective_message.placeholder.edit_text.await_args_list
+    )
+    assert "_0" not in str(
+        update.effective_message.placeholder.edit_text.await_args_list
+    )
+    registry.persist.assert_awaited_once_with(202, session)
 
 
 async def test_status_reports_required_fields_and_does_not_expose_cookie(

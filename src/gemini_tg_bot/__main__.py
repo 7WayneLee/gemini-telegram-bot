@@ -26,6 +26,7 @@ from gemini_tg_bot.telegram.handlers import (
     TelegramHandlers,
     register_handlers,
 )
+from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
 
 
 LOGGER = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ async def _run_polling(settings: Settings) -> None:
             egress_meter=EgressMeter(),
             cookie_path=settings.gemini_cookie_path,
             secure_1psid=settings.gemini_secure_1psid,
+            database=database,
         )
         register_handlers(application, auth=auth, handlers=handlers)
 
@@ -120,18 +122,25 @@ class _DryRunMessage:
     def __init__(self, text: str) -> None:
         self.text = text
         self.replies: list[tuple[str, dict[str, Any]]] = []
+        self.placeholder = _DryRunPlaceholder()
 
-    async def reply_text(self, text: str, **kwargs: Any) -> None:
+    async def reply_text(self, text: str, **kwargs: Any) -> _DryRunPlaceholder:
         self.replies.append((text, kwargs))
+        return self.placeholder
+
+
+class _DryRunPlaceholder:
+    def __init__(self) -> None:
+        self.edits: list[tuple[str, dict[str, Any]]] = []
+
+    async def edit_text(self, text: str, **kwargs: Any) -> None:
+        self.edits.append((text, kwargs))
 
 
 class _DryRunSession:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, bool]] = []
-
-    async def send_message(self, prompt: str, *, temporary: bool = False) -> Any:
-        self.calls.append((prompt, temporary))
-        return SimpleNamespace(text="**dry-run ok**")
+        self.cid = ""
+        self.metadata = None
 
 
 class _DryRunRegistry:
@@ -163,7 +172,7 @@ class _DryRunRegistry:
 
 class _DryRunService:
     def __init__(self) -> None:
-        self.client = object()
+        self.client = _DryRunClient()
         self.execute_count = 0
         self.health = SimpleNamespace(
             state=SimpleNamespace(value="healthy"),
@@ -174,6 +183,22 @@ class _DryRunService:
         self.execute_count += 1
         result = operation(self.client)
         return await result if inspect.isawaitable(result) else result
+
+
+class _DryRunClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def _generate(self) -> Any:
+        yield SimpleNamespace(
+            text="**dry-run ok**",
+            text_delta="**dry-run ok**",
+            images=(),
+        )
+
+    def generate_content_stream(self, prompt: str, **kwargs: Any) -> Any:
+        self.calls.append((prompt, kwargs))
+        return self._generate()
 
 
 class _DryRunApplication:
@@ -210,6 +235,7 @@ async def _run_dry_run() -> None:
             egress_meter=EgressMeter(),
             cookie_path=Path("unused-dry-run-cookie-cache"),
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
+            database=database,
         )
         fake_application = _DryRunApplication()
         register_handlers(
@@ -232,14 +258,26 @@ async def _run_dry_run() -> None:
         usage = await UsageLogDAO(database.connection).list_for_chat(chat_id)
         assert fake_application.handlers[0][0] == -1
         assert service.execute_count == 1
-        assert sessions.session.calls == [("dry-run request", False)]
+        assert service.client.calls == [
+            (
+                "dry-run request",
+                {"chat": sessions.session, "temporary": False},
+            )
+        ]
         assert sessions.persisted is True
-        assert message.replies == [("<b>dry-run ok</b>", {"parse_mode": "HTML"})]
+        assert message.replies == [(PLACEHOLDER_TEXT, {})]
+        assert message.placeholder.edits == [
+            ("<b>dry-run ok</b>", {"parse_mode": "HTML"})
+        ]
+        assert await handlers._database_healthy() is True
         assert len(usage) == 1 and usage[0].ok is True
     finally:
         await database.close()
 
-    print("dry-run: receive -> allowlist -> queue -> service -> render -> send: ok")
+    print(
+        "dry-run: receive -> allowlist -> queue -> service -> stream -> "
+        "render -> send -> database: ok"
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

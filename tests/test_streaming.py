@@ -68,7 +68,9 @@ async def test_elapsed_interval_edits_first_and_keeps_partial_markdown_plain() -
 
     result = await stream_response(message, client, "hello", clock=clock)
 
-    assert result == "**open still**"
+    assert result.text == "**open still**"
+    assert result.output is not None
+    assert result.output.text == "**open still**"
     assert client.calls == [("hello", {})]
     message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
     assert placeholder.edit_text.await_args_list == [
@@ -120,7 +122,9 @@ async def test_long_final_response_replaces_placeholder_and_sends_more_chunks() 
 
     result = await stream_response(message, client, "hello", clock=clock)
 
-    assert result == text
+    assert result.text == text
+    assert result.output is not None
+    assert result.output.text == text
     assert placeholder.edit_text.await_count == 1
     first_chunk = placeholder.edit_text.await_args.args[0]
     assert placeholder.edit_text.await_args.kwargs == {"parse_mode": ParseMode.HTML}

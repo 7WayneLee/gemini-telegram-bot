@@ -23,6 +23,7 @@ from gemini_tg_bot.telegram.media import (
     UploadSizeUnknownError,
     UploadTooLargeError,
 )
+from gemini_tg_bot.telegram.streaming import EMPTY_RESPONSE_TEXT, PLACEHOLDER_TEXT
 from scripts.dump_response import serialize_output
 
 
@@ -289,7 +290,7 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
         alt="A generated test image",
     )
     output = _output("_551", web_images=[image])
-    session = SimpleNamespace(send_message=AsyncMock(return_value=output))
+    session = SimpleNamespace()
     sessions = AsyncMock()
     sessions.get_state.return_value = SimpleNamespace(
         model=None,
@@ -297,12 +298,21 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     )
     sessions.get_or_create.return_value = session
 
+    async def generate() -> Any:
+        yield output
+
+    client = SimpleNamespace(
+        generate_content_stream=MagicMock(return_value=generate()),
+    )
+
     async def execute(operation: Any) -> Any:
-        return await operation(MagicMock())
+        return await operation(client)
 
     service = MagicMock()
     service.execute = AsyncMock(side_effect=execute)
     message = _message()
+    placeholder = SimpleNamespace(edit_text=AsyncMock())
+    message.reply_text.return_value = placeholder
     message.text = "generate an image"
     message.photo = []
     message.document = None
@@ -327,7 +337,12 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     with caplog.at_level(logging.DEBUG, logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(update, SimpleNamespace())
 
-    message.reply_text.assert_awaited_once_with("Gemini 未回傳文字。")
+    message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
+    placeholder.edit_text.assert_awaited_once_with(
+        EMPTY_RESPONSE_TEXT,
+        parse_mode=None,
+    )
+    assert "_551" not in str(placeholder.edit_text.await_args_list)
     message.reply_photo.assert_awaited_once_with(image.url, caption=None)
     assert "text='_551' image_count=1" in caplog.text
     assert image.url in caplog.text

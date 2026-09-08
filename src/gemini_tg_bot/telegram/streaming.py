@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
 import time
 from typing import Any, TypeVar
@@ -28,6 +29,14 @@ EDIT_CHARACTER_THRESHOLD = 200
 _ResultT = TypeVar("_ResultT")
 _Sleep = Callable[[float], Awaitable[None]]
 _Clock = Callable[[], float]
+
+
+@dataclass(frozen=True, slots=True)
+class StreamResult:
+    """The final text and last complete upstream streaming output."""
+
+    text: str
+    output: Any | None
 
 
 def _retry_delay(error: RetryAfter) -> float:
@@ -70,7 +79,7 @@ async def stream_response(
     sleep: _Sleep = asyncio.sleep,
     clock: _Clock = time.monotonic,
     **generate_kwargs: Any,
-) -> str:
+) -> StreamResult:
     """Stream a Gemini response into a Telegram placeholder message.
 
     ``client`` is the application's existing singleton Gemini client.  Its
@@ -84,8 +93,9 @@ async def stream_response(
     edited mid-stream; final rendering splits it into independently valid HTML
     messages instead.
 
-    The complete unrendered Gemini text is returned for callers that need to
-    persist response metadata alongside it.
+    The complete unrendered Gemini text and the final ``ModelOutput`` are
+    returned for callers that need to persist response metadata or deliver
+    generated media after the stream finishes.
     """
 
     if edit_interval <= 0:
@@ -100,6 +110,7 @@ async def stream_response(
     last_edit_at = clock()
     pending_characters = 0
     latest_text = ""
+    latest_output: Any | None = None
 
     stream = client.generate_content_stream(prompt, **generate_kwargs)
     iterator = stream.__aiter__()
@@ -144,6 +155,7 @@ async def stream_response(
                 break
 
             next_chunk = asyncio.ensure_future(anext(iterator))
+            latest_output = chunk
             latest_text = chunk.text
             pending_characters += len(chunk.text_delta)
 
@@ -163,7 +175,7 @@ async def stream_response(
             lambda: placeholder.edit_text(EMPTY_RESPONSE_TEXT, parse_mode=None),
             sleep=sleep,
         )
-        return latest_text
+        return StreamResult(text=latest_text, output=latest_output)
 
     await _call_with_retry_after(
         lambda: placeholder.edit_text(rendered_chunks[0], parse_mode=ParseMode.HTML),
@@ -177,7 +189,7 @@ async def stream_response(
             ),
             sleep=sleep,
         )
-    return latest_text
+    return StreamResult(text=latest_text, output=latest_output)
 
 
 __all__ = [
@@ -185,5 +197,6 @@ __all__ = [
     "EDIT_INTERVAL_SECONDS",
     "EMPTY_RESPONSE_TEXT",
     "PLACEHOLDER_TEXT",
+    "StreamResult",
     "stream_response",
 ]

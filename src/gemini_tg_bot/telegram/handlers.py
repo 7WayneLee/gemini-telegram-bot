@@ -30,6 +30,7 @@ from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 from .auth import AuthMiddleware
 from .media import MediaHandler, MediaUploadError
 from .rendering import render_markdown_chunks
+from .streaming import stream_response
 
 if TYPE_CHECKING:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
@@ -496,7 +497,7 @@ class TelegramHandlers:
         update: Update,
         context: CallbackContext,
     ) -> None:
-        """Send plain text through the current ChatSession and render its reply."""
+        """Stream plain text through the current ChatSession."""
 
         identity = _message_identity(update)
         if identity is None:
@@ -517,14 +518,17 @@ class TelegramHandlers:
         try:
             async with self._request_queue.request(user_id):
                 session = await self._sessions.get_or_create(chat_id)
-                output = await self._service.execute(
-                    lambda _client: session.send_message(
+                streamed = await self._service.execute(
+                    lambda client: stream_response(
+                        message,
+                        client,
                         prompt,
+                        chat=session,
                         temporary=state.temporary,
                     )
                 )
             await self._sessions.persist(chat_id, session)
-            await self._reply_output(message, output)
+            await self._reply_output_images(message, streamed.output)
             ok = True
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
@@ -617,6 +621,14 @@ class TelegramHandlers:
             )
 
     async def _reply_output(self, message: Any, output: Any) -> None:
+        await _reply_rendered(message, output.text)
+        await self._reply_output_images(message, output)
+
+    async def _reply_output_images(self, message: Any, output: Any | None) -> None:
+        if output is None:
+            LOGGER.debug("Gemini response text='' image_count=0")
+            return
+
         images = getattr(output, "images", ())
         LOGGER.debug(
             "Gemini response text=%r image_count=%d",
@@ -632,7 +644,6 @@ class TelegramHandlers:
                 image.alt,
             )
 
-        await _reply_rendered(message, output.text)
         if images:
             await self._media.send_output_images(message, output)
 
