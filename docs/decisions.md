@@ -179,3 +179,64 @@ Phase 2 任務時的遺漏，不是 worker 的疏失。
 補做時的實作要點：`/img <prompt>` 應在送出前將 prompt 包裝成明確要求生成的措辭，
 並走既有的 media 路徑；`ENABLE_VIDEO_GENERATION` / `ENABLE_AUDIO_GENERATION` 的
 預設停用不受影響。
+
+## D10 — 🔴 Flood control 死鎖：無上限 RetryAfter 重試 × 併發 1 的 semaphore
+
+**使用者實機回報（2026-09-08 14:06）：bot 完全不回應。**
+
+### 症狀
+
+log 顯示 Gemini 端健康（`Gemini client initialized successfully`、配額 2301/2400、
+abuse status Clean），但：
+
+```
+14:06:42  POST .../sendMessage  "HTTP/1.1 429 Too Many Requests"
+14:06:52  POST .../getUpdates   200 OK
+...（之後兩分鐘只有 getUpdates，再無任何 sendMessage）
+```
+
+Telegram 端持續收到訊息，bot 一則都不回。
+
+### 根因（已用重現實驗證實）
+
+```
+使用者A 取得 slot，開始串流
+Telegram 回 429, retry_after=120s
+使用者B 送出訊息，開始等 slot
+使用者B 等 2 秒仍拿不到 slot  <<< 整個 bot 凍結
+```
+
+連鎖：
+
+1. 上一輪多張圖片以**多則獨立訊息**送出（T3.6 待修），觸發 Telegram 每聊天室 flood control。
+2. 下一則訊息的 `sendMessage` 收到 429，`retry_after` 可能長達數十秒至數分鐘。
+3. `streaming.py` 的 `_call_with_retry_after` 是 `while True` 無限重試，
+   **且不限制 sleep 時長**，於是安靜地長時間等待。
+4. 該等待發生在 **`RequestQueue` 併發 1 的全域 semaphore 內部**，
+   且 `semaphore.acquire()` **沒有 timeout**。
+5. 後續所有訊息卡在佇列，bot 對外表現為完全無回應。
+
+### 為何三次驗收都沒抓到
+
+`T3.1`（RetryAfter 處理）與 `T1.4`（semaphore）**各自單獨看都正確**，兩者的 DoD 也都通過。
+缺陷只存在於**兩者的組合**，而沒有任何單一任務的驗收範圍涵蓋組合行為。
+**這是 Commander 層級的疏失**，不是 worker 的問題。
+
+### 修法（三項，缺一不可）
+
+1. **RetryAfter 等待必須有上限**：超過門檻（建議 30 秒）不再等待，
+   直接回報使用者「服務忙碌，請稍後再試」，並記 `error_kind`。
+   無上限的 `while True` 必須移除。
+2. **等待不得持有 semaphore**：flood-control 等待期間必須釋放併發 slot，
+   或把等待移到 semaphore 之外。一個被限流的請求不得凍結整個 bot。
+3. **`semaphore.acquire()` 需有 timeout**：作為最後防線，
+   逾時後回報使用者而非無限等待。
+
+另：T3.6（`sendMediaGroup` 相簿）會把 N 則訊息降為 1 則，
+**直接減少觸發 flood control 的機率**，屬同一問題的上游治理，應優先完成。
+
+### 必須新增的測試（現有測試全數遺漏此情境）
+
+- 429 且 `retry_after` 超過上限 → 放棄等待、回報使用者、**釋放 slot**
+- 一個請求被 flood control 時，**其他使用者的請求仍能取得 slot**（本缺陷的核心）
+- `semaphore.acquire()` 逾時的行為
