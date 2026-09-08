@@ -35,6 +35,23 @@ spec 本來就要求「兩條路徑都要實作，用設定開關或自動偵測
 如此一來，實際走哪條路徑由 log 與 `/status` 的 egress 計數直接觀察得出——
 **實機使用本身就是這個 gate 的量測**，不需要另外安排一次人工實驗。
 
+## 部分答案：真實 fixture 揭露兩種來源的網域差異（2026-09-08）
+
+`tests/fixtures/` 的實測樣本顯示 **兩種圖片來源的 URL 性質根本不同**：
+
+| 來源 | 實測 URL | 可被 Telegram 直抓的可能性 |
+|---|---|---|
+| `WebImage` | `https://www.travel.taipei/image/573628/?r=...`<br>`https://www.ctplayer.com/wp-content/uploads/2019/05/101%E4%BF%A1%E7%BE%A93.jpg` | **高** —— 就是一般第三方公開網址 |
+| `GeneratedImage` | `https://lh3.googleusercontent.com/gg-dl/AAQ_wbGpmWlWuUflGFMEWGmX5Dvp46KXjvYw7DTgUPLrRVu73P2Q5od…` | **低** —— Google CDN `gg-dl` 路徑，長 token，很可能帶時效簽章 |
+
+從使用者的 Telegram 截圖可見 `WebImage` 確實正常顯示，佐證路徑 A 對 web 圖可行。
+
+**因此裁定維持不變且更有把握**：`web_image_mode` 與 `generated_image_mode`
+**必須是獨立開關**，不可合併。極可能最終設定是
+web → URL 直傳（零 egress），generated → 視實測結果決定。
+
+`GeneratedImage` 的可抓取性仍需實測 —— 需要一次成功的圖片生成回應送達 Telegram。
+
 ## 待填：實機觀察結果
 
 使用者跑過含圖片的請求後，回填：
