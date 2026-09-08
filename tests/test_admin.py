@@ -1,0 +1,281 @@
+"""Mock-only tests for administrator commands and credential hot restart."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from pydantic import SecretStr
+
+from gemini_tg_bot.config import Settings
+from gemini_tg_bot.gemini import service as service_module
+from gemini_tg_bot.gemini.errors import ErrorKind
+from gemini_tg_bot.gemini.service import GeminiService, ServiceState
+from gemini_tg_bot.queue import RequestQueue
+from gemini_tg_bot.storage.db import Database
+from gemini_tg_bot.telegram.auth import AuthMiddleware, SQLiteAccessOverrides
+from gemini_tg_bot.telegram.handlers import (
+    ADMIN_ONLY,
+    EgressMeter,
+    TelegramHandlers,
+    register_handlers,
+)
+
+
+ADMIN_USER_ID = 9001
+
+
+def _update(
+    text: str,
+    *,
+    user_id: int = ADMIN_USER_ID,
+    delete: AsyncMock | None = None,
+) -> SimpleNamespace:
+    message = SimpleNamespace(
+        text=text,
+        reply_text=AsyncMock(),
+        delete=delete or AsyncMock(),
+    )
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=user_id),
+        effective_message=message,
+        callback_query=None,
+    )
+
+
+def _mock_service() -> MagicMock:
+    service = MagicMock()
+    service.reinit = AsyncMock()
+    service.health = SimpleNamespace(
+        state=ServiceState.HEALTHY,
+        accepting_requests=True,
+        last_error_kind=None,
+        last_error_type=None,
+    )
+    return service
+
+
+async def _admin_stack(
+    tmp_path: Path,
+    *,
+    allowed_user_ids: set[int] | None = None,
+    service: MagicMock | None = None,
+) -> tuple[Database, AuthMiddleware, TelegramHandlers, MagicMock]:
+    database = Database(tmp_path / "admin.sqlite3")
+    await database.connect()
+    auth = AuthMiddleware(
+        admin_user_id=ADMIN_USER_ID,
+        allowed_user_ids=allowed_user_ids or set(),
+        access_overrides=SQLiteAccessOverrides(database.connection),
+    )
+    mocked_service = service or _mock_service()
+    handlers = TelegramHandlers(
+        service=mocked_service,
+        sessions=AsyncMock(),
+        request_queue=RequestQueue(
+            max_concurrency=1,
+            user_rate_limit_per_min=10,
+        ),
+        usage_dao=None,
+        egress_meter=EgressMeter(),
+        cookie_path=tmp_path,
+        secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
+        database=database,
+    )
+    application = SimpleNamespace(add_handler=MagicMock())
+    register_handlers(application, auth=auth, handlers=handlers)
+    return database, auth, handlers, mocked_service
+
+
+async def test_admin_commands_reject_an_allowed_non_admin(tmp_path: Path) -> None:
+    database, auth, handlers, _ = await _admin_stack(
+        tmp_path,
+        allowed_user_ids={7001},
+    )
+    try:
+        update = _update("/allow 7002", user_id=7001)
+
+        await handlers.allow(update, SimpleNamespace(args=["7002"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(ADMIN_ONLY)
+        assert await auth.is_allowed(7002) is False
+    finally:
+        await database.close()
+
+
+async def test_allow_and_deny_persist_and_take_effect_immediately(
+    tmp_path: Path,
+) -> None:
+    database, auth, handlers, _ = await _admin_stack(tmp_path)
+    try:
+        await handlers.allow(
+            _update("/allow 7002"),
+            SimpleNamespace(args=["7002"]),
+        )
+        assert await auth.is_allowed(7002) is True
+
+        await handlers.deny(
+            _update("/deny 7002"),
+            SimpleNamespace(args=["7002"]),
+        )
+        assert await auth.is_allowed(7002) is False
+
+        reloaded = AuthMiddleware(
+            admin_user_id=ADMIN_USER_ID,
+            access_overrides=SQLiteAccessOverrides(database.connection),
+        )
+        assert await reloaded.is_allowed(7002) is False
+    finally:
+        await database.close()
+
+
+async def test_setcookie_deletes_message_then_hot_restarts_without_process_restart(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _mock_service()
+
+    async def reinit(**kwargs: Any) -> None:
+        del kwargs
+        events.append("reinit")
+
+    service.reinit.side_effect = reinit
+    database, _, handlers, bound_service = await _admin_stack(
+        tmp_path,
+        service=service,
+    )
+    try:
+        await handlers.setcookie(_update("/setcookie"), SimpleNamespace())
+
+        async def delete() -> None:
+            events.append("delete")
+
+        credential_update = _update(
+            "__Secure-1PSID=FAKE_REPLACEMENT_1PSID_FOR_TEST\n"
+            "__Secure-1PSIDTS=FAKE_REPLACEMENT_1PSIDTS_FOR_TEST",
+            delete=AsyncMock(side_effect=delete),
+        )
+        process_id = os.getpid()
+        service_identity = id(bound_service)
+
+        await handlers.text_message(credential_update, SimpleNamespace())
+
+        assert events == ["delete", "reinit"]
+        assert os.getpid() == process_id
+        assert id(bound_service) == service_identity
+        credential_update.effective_message.delete.assert_awaited_once_with()
+        service.reinit.assert_awaited_once_with(
+            secure_1psid="FAKE_REPLACEMENT_1PSID_FOR_TEST",
+            secure_1psidts="FAKE_REPLACEMENT_1PSIDTS_FOR_TEST",
+        )
+        confirmation = (
+            credential_update.effective_message.reply_text.await_args.args[0]
+        )
+        assert "FAKE_REPLACEMENT_1PSID_FOR_TEST" not in confirmation
+        assert "FAKE_REPLACEMENT_1PSIDTS_FOR_TEST" not in confirmation
+    finally:
+        await database.close()
+
+
+async def test_setcookie_never_logs_credentials_on_reinit_failure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = _mock_service()
+    service.reinit.side_effect = RuntimeError(
+        "FAKE_REPLACEMENT_1PSID_FOR_TEST"
+    )
+    database, _, handlers, _ = await _admin_stack(tmp_path, service=service)
+    try:
+        await handlers.setcookie(_update("/setcookie"), SimpleNamespace())
+        update = _update(
+            "FAKE_REPLACEMENT_1PSID_FOR_TEST\n"
+            "FAKE_REPLACEMENT_1PSIDTS_FOR_TEST"
+        )
+
+        await handlers.text_message(update, SimpleNamespace())
+
+        assert "FAKE_REPLACEMENT_1PSID_FOR_TEST" not in caplog.text
+        assert "FAKE_REPLACEMENT_1PSIDTS_FOR_TEST" not in caplog.text
+        update.effective_message.delete.assert_awaited_once_with()
+    finally:
+        await database.close()
+
+
+async def test_health_reports_client_error_and_live_database(
+    tmp_path: Path,
+) -> None:
+    service = _mock_service()
+    service.health = SimpleNamespace(
+        state=ServiceState.DEGRADED,
+        accepting_requests=False,
+        last_error_kind=ErrorKind.TRANSIENT,
+        last_error_type="TimeoutError",
+    )
+    database, _, handlers, _ = await _admin_stack(tmp_path, service=service)
+    try:
+        update = _update("/health")
+
+        await handlers.health(update, SimpleNamespace())
+
+        report = update.effective_message.reply_text.await_args.args[0]
+        assert "Client 狀態：degraded" in report
+        assert "接受請求：否" in report
+        assert "最近錯誤：transient (TimeoutError)" in report
+        assert "DB 狀態：healthy" in report
+    finally:
+        await database.close()
+
+
+def _upstream_client(cookie_jar: object) -> MagicMock:
+    client = MagicMock()
+    client.cookies = cookie_jar
+    client.init = AsyncMock()
+    client.close = AsyncMock()
+    return client
+
+
+async def test_reinit_clears_old_cache_only_when_credentials_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_BOT_TOKEN="FAKE_TELEGRAM_BOT_TOKEN_FOR_TEST",
+        ADMIN_USER_ID=ADMIN_USER_ID,
+        GEMINI_SECURE_1PSID="FAKE_1PSID_FOR_TEST",
+        GEMINI_SECURE_1PSIDTS="FAKE_1PSIDTS_FOR_TEST",
+        GEMINI_COOKIE_PATH=tmp_path / "cookies",
+    )
+    old_cookie_jar = object()
+    first = _upstream_client(old_cookie_jar)
+    second = _upstream_client(object())
+    third = _upstream_client(object())
+    factory = MagicMock(side_effect=[first, second, third])
+    clear_cache = MagicMock()
+    monkeypatch.setattr(service_module, "GeminiClient", factory)
+    monkeypatch.setattr(service_module, "clear_cookies_cache", clear_cache)
+    service = GeminiService(settings)
+    try:
+        await service.init()
+
+        await service.reinit(
+            secure_1psid="FAKE_REPLACEMENT_1PSID_FOR_TEST",
+            secure_1psidts="FAKE_REPLACEMENT_1PSIDTS_FOR_TEST",
+        )
+
+        clear_cache.assert_called_once_with(old_cookie_jar)
+        first.close.assert_awaited_once_with()
+
+        clear_cache.reset_mock()
+        await service.reinit()
+
+        clear_cache.assert_not_called()
+        second.close.assert_awaited_once_with()
+    finally:
+        await service.close()

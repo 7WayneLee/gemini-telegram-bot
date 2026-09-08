@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import math
 import os
 import time
@@ -14,6 +15,7 @@ from typing import Any, ClassVar, TypeVar, cast
 
 from gemini_webapi import GeminiClient
 from gemini_webapi import exceptions as gw_exc
+from gemini_webapi.utils import clear_cookies_cache
 from pydantic import SecretStr
 
 from gemini_tg_bot.config import Settings
@@ -24,6 +26,8 @@ from .errors import ErrorKind, classify_error
 BLOCKED_ESCALATION_THRESHOLD = 3
 BLOCKED_COOLDOWN_SEC = 900.0
 AUTH_DEGRADED_NOTIFICATION = "認證失效，請 /setcookie"
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ServiceState(StrEnum):
@@ -240,6 +244,16 @@ class GeminiService:
 
             try:
                 if self._client is not None:
+                    if new_credentials is not None:
+                        try:
+                            clear_cookies_cache(self._client.cookies)
+                        except Exception:
+                            # Cache removal is best effort.  Never include the
+                            # cache path or exception text because both may
+                            # contain credential material.
+                            LOGGER.warning(
+                                "Failed to clear cached cookies during reinit"
+                            )
                     await self._client.close()
                     self._client = None
 
