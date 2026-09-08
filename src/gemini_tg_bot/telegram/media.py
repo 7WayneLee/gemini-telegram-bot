@@ -12,17 +12,23 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from html.parser import HTMLParser
 import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
+from telegram.constants import MessageLimit, ParseMode
 from telegram.error import BadRequest
 
 
 LOGGER = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+CAPTION_LENGTH_SAFETY_MARGIN = 16
+MAX_CAPTION_VISIBLE_LENGTH = (
+    MessageLimit.CAPTION_LENGTH - CAPTION_LENGTH_SAFETY_MARGIN
+)
 DEFAULT_MEDIA_PROMPT = "請分析這個檔案的內容。"
 UPLOAD_TOO_LARGE = "檔案超過 Telegram Bot API 的 20 MB 上限，無法處理。"
 UPLOAD_SIZE_UNKNOWN = "無法確認檔案大小；為避免超過 20 MB 上限，已拒絕下載。"
@@ -100,6 +106,28 @@ class DeliveryResult:
     relayed_bytes: int = 0
 
 
+class _VisibleTextParser(HTMLParser):
+    """Measure text after Telegram parses supported HTML entities and tags."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.length = 0
+
+    def handle_data(self, data: str) -> None:
+        self.length += len(data)
+
+
+def caption_is_eligible(caption: str | None) -> bool:
+    """Return whether rendered HTML safely fits Telegram's caption limit."""
+
+    if not caption:
+        return False
+    parser = _VisibleTextParser()
+    parser.feed(caption)
+    parser.close()
+    return parser.length <= MAX_CAPTION_VISIBLE_LENGTH
+
+
 class MediaHandler:
     """Prepare inbound files and deliver Gemini images through Telegram."""
 
@@ -160,6 +188,8 @@ class MediaHandler:
         self,
         message: Any,
         output: Any,
+        *,
+        caption: str | None = None,
     ) -> list[DeliveryResult]:
         """Send the chosen output candidate's web and generated images in order.
 
@@ -169,19 +199,22 @@ class MediaHandler:
         """
 
         candidate = output.candidates[output.chosen]
-        results = await self.send_images(
-            message,
-            candidate.web_images,
-            source=ImageSource.WEB,
-        )
-        results.extend(
-            await self.send_images(
+        images = [
+            (image, ImageSource.WEB) for image in candidate.web_images
+        ] + [
+            (image, ImageSource.GENERATED)
+            for image in candidate.generated_images
+        ]
+        safe_caption = caption if caption_is_eligible(caption) else None
+        return [
+            await self.send_image(
                 message,
-                candidate.generated_images,
-                source=ImageSource.GENERATED,
+                image,
+                caption=safe_caption if index == 0 else None,
+                source=source,
             )
-        )
-        return results
+            for index, (image, source) in enumerate(images)
+        ]
 
     async def send_image(
         self,
@@ -196,10 +229,13 @@ class MediaHandler:
 
         mode = self._mode_for(source)
         sender = message.reply_document if as_document else message.reply_photo
+        send_kwargs: dict[str, Any] = {"caption": caption}
+        if caption is not None:
+            send_kwargs["parse_mode"] = ParseMode.HTML
 
         if mode is not DeliveryMode.RELAY:
             try:
-                await sender(image.url, caption=caption)
+                await sender(image.url, **send_kwargs)
             except BadRequest:
                 if mode is DeliveryMode.URL:
                     raise
@@ -218,7 +254,7 @@ class MediaHandler:
             saved_path = Path(await image.save(path=temp_directory))
             num_bytes = saved_path.stat().st_size
             with saved_path.open("rb") as media_file:
-                await sender(media_file, caption=caption)
+                await sender(media_file, **send_kwargs)
 
         self._egress_meter.record(num_bytes)
         return DeliveryResult(DeliveryMode.RELAY, relayed_bytes=num_bytes)
@@ -286,11 +322,13 @@ def _safe_filename(filename: str) -> str:
 
 
 __all__ = [
+    "CAPTION_LENGTH_SAFETY_MARGIN",
     "DEFAULT_MEDIA_PROMPT",
     "DeliveryMode",
     "DeliveryResult",
     "ImageSource",
     "MAX_UPLOAD_BYTES",
+    "MAX_CAPTION_VISIBLE_LENGTH",
     "MediaHandler",
     "MediaUploadError",
     "PreparedUpload",
@@ -299,4 +337,5 @@ __all__ = [
     "UnsupportedUploadError",
     "UploadSizeUnknownError",
     "UploadTooLargeError",
+    "caption_is_eligible",
 ]

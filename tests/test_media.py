@@ -10,6 +10,7 @@ import pytest
 from curl_cffi.requests import AsyncSession
 from gemini_webapi import Candidate, ModelOutput, WebImage
 from pydantic import SecretStr
+from telegram.constants import MessageLimit, ParseMode
 from telegram.error import BadRequest
 
 from gemini_tg_bot.queue import RequestQueue
@@ -18,6 +19,7 @@ from gemini_tg_bot.telegram.media import (
     DEFAULT_MEDIA_PROMPT,
     DeliveryMode,
     ImageSource,
+    MAX_CAPTION_VISIBLE_LENGTH,
     MAX_UPLOAD_BYTES,
     MediaHandler,
     UploadSizeUnknownError,
@@ -62,6 +64,25 @@ def _output(text: str, *, web_images: list[WebImage] | None = None) -> ModelOutp
                 web_images=web_images or [],
             )
         ],
+    )
+
+
+def _simple_output(
+    *,
+    web_images: list[FakeImage] | None = None,
+    generated_images: list[FakeImage] | None = None,
+) -> SimpleNamespace:
+    web = web_images or []
+    generated = generated_images or []
+    return SimpleNamespace(
+        images=[*web, *generated],
+        candidates=[
+            SimpleNamespace(
+                web_images=web,
+                generated_images=generated,
+            )
+        ],
+        chosen=0,
     )
 
 
@@ -179,6 +200,74 @@ async def test_source_specific_mode_reserves_web_generated_configuration() -> No
 
     assert result.mode is DeliveryMode.URL
     assert image.save_calls == []
+
+
+@pytest.mark.parametrize("source", [ImageSource.WEB, ImageSource.GENERATED])
+async def test_output_caption_applies_to_each_image_source(source: ImageSource) -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    image = FakeImage(f"https://example.test/{source.value}.png")
+    output = _simple_output(
+        web_images=[image] if source is ImageSource.WEB else None,
+        generated_images=[image] if source is ImageSource.GENERATED else None,
+    )
+
+    await media.send_output_images(message, output, caption="<b>answer</b>")
+
+    message.reply_photo.assert_awaited_once_with(
+        image.url,
+        caption="<b>answer</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def test_output_caption_counts_visible_text_instead_of_html_tags() -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    image = FakeImage("https://example.test/within-limit.png")
+    output = _simple_output(web_images=[image])
+    caption = f"<b>{'x' * MAX_CAPTION_VISIBLE_LENGTH}</b>"
+
+    await media.send_output_images(message, output, caption=caption)
+
+    message.reply_photo.assert_awaited_once_with(
+        image.url,
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def test_output_caption_over_telegram_limit_is_omitted() -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    image = FakeImage("https://example.test/over-limit.png")
+    output = _simple_output(generated_images=[image])
+
+    await media.send_output_images(
+        message,
+        output,
+        caption="x" * (MessageLimit.CAPTION_LENGTH + 1),
+    )
+
+    message.reply_photo.assert_awaited_once_with(image.url, caption=None)
+
+
+async def test_output_caption_is_attached_only_to_first_image() -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    web_image = FakeImage("https://example.test/web.png")
+    generated_image = FakeImage("https://example.test/generated.png")
+    output = _simple_output(
+        web_images=[web_image],
+        generated_images=[generated_image],
+    )
+
+    await media.send_output_images(message, output, caption="answer")
+
+    assert message.reply_photo.await_args_list == [
+        call(web_image.url, caption="answer", parse_mode=ParseMode.HTML),
+        call(generated_image.url, caption=None),
+    ]
 
 
 def test_video_and_audio_generation_are_disabled_unless_explicitly_enabled() -> None:
@@ -311,7 +400,7 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     service = MagicMock()
     service.execute = AsyncMock(side_effect=execute)
     message = _message()
-    placeholder = SimpleNamespace(edit_text=AsyncMock())
+    placeholder = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
     message.reply_text.return_value = placeholder
     message.text = "generate an image"
     message.photo = []
@@ -342,6 +431,7 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
         EMPTY_RESPONSE_TEXT,
         parse_mode=None,
     )
+    placeholder.delete.assert_awaited_once_with()
     assert "_551" not in str(placeholder.edit_text.await_args_list)
     message.reply_photo.assert_awaited_once_with(image.url, caption=None)
     assert "text='_551' image_count=1" in caplog.text

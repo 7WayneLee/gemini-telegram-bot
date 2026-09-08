@@ -28,7 +28,7 @@ from gemini_tg_bot.queue import RateLimitExceeded, RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 
 from .auth import AuthMiddleware
-from .media import MediaHandler, MediaUploadError
+from .media import MediaHandler, MediaUploadError, caption_is_eligible
 from .rendering import render_markdown_chunks
 from .streaming import stream_response
 
@@ -68,6 +68,20 @@ COOKIE_PROMPT = (
 COOKIE_INPUT_INVALID = "Cookie 格式無效，請重新執行 /setcookie。"
 RESEARCH_USAGE = "用法：/research <topic>"
 RESEARCH_UNAVAILABLE = "Deep Research 服務目前無法使用，請稍後再試。"
+
+
+class _StreamingMessageProxy:
+    """Capture the placeholder while delegating Telegram reply operations."""
+
+    def __init__(self, message: Any) -> None:
+        self._message = message
+        self.placeholder: Any | None = None
+
+    async def reply_text(self, *args: Any, **kwargs: Any) -> Any:
+        reply = await self._message.reply_text(*args, **kwargs)
+        if self.placeholder is None:
+            self.placeholder = reply
+        return reply
 
 
 class EgressMeter:
@@ -578,12 +592,13 @@ class TelegramHandlers:
         state = await self._sessions.get_state(chat_id)
         ok = False
         error_kind: str | None = None
+        stream_message = _StreamingMessageProxy(message)
         try:
             async with self._request_queue.request(user_id):
                 session = await self._sessions.get_or_create(chat_id)
                 streamed = await self._service.execute(
                     lambda client: stream_response(
-                        message,
+                        stream_message,
                         client,
                         prompt,
                         chat=session,
@@ -591,7 +606,12 @@ class TelegramHandlers:
                     )
                 )
             await self._sessions.persist(chat_id, session)
-            await self._reply_output_images(message, streamed.output)
+            await self._reply_streamed_output_images(
+                message,
+                stream_message.placeholder,
+                streamed.text,
+                streamed.output,
+            )
             ok = True
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
@@ -684,10 +704,36 @@ class TelegramHandlers:
             )
 
     async def _reply_output(self, message: Any, output: Any) -> None:
-        await _reply_rendered(message, output.text)
+        rendered_chunks = render_markdown_chunks(output.text)
+        images = getattr(output, "images", ())
+        caption = _caption_from_chunks(rendered_chunks) if images else None
+        if images and (caption is not None or not rendered_chunks):
+            await self._reply_output_images(message, output, caption=caption)
+            return
+        await _reply_rendered_chunks(message, rendered_chunks)
         await self._reply_output_images(message, output)
 
-    async def _reply_output_images(self, message: Any, output: Any | None) -> None:
+    async def _reply_streamed_output_images(
+        self,
+        message: Any,
+        placeholder: Any | None,
+        markdown: str,
+        output: Any | None,
+    ) -> None:
+        images = getattr(output, "images", ()) if output is not None else ()
+        rendered_chunks = render_markdown_chunks(markdown)
+        caption = _caption_from_chunks(rendered_chunks) if images else None
+        await self._reply_output_images(message, output, caption=caption)
+        if images and (caption is not None or not rendered_chunks):
+            await _delete_placeholder(placeholder)
+
+    async def _reply_output_images(
+        self,
+        message: Any,
+        output: Any | None,
+        *,
+        caption: str | None = None,
+    ) -> None:
         if output is None:
             LOGGER.debug("Gemini response text='' image_count=0")
             return
@@ -708,7 +754,7 @@ class TelegramHandlers:
             )
 
         if images:
-            await self._media.send_output_images(message, output)
+            await self._media.send_output_images(message, output, caption=caption)
 
     async def _select_model(
         self,
@@ -977,12 +1023,31 @@ def _valid_callback_data(value: str) -> bool:
 
 
 async def _reply_rendered(message: Any, markdown: str) -> None:
-    chunks = render_markdown_chunks(markdown)
+    await _reply_rendered_chunks(message, render_markdown_chunks(markdown))
+
+
+async def _reply_rendered_chunks(message: Any, chunks: list[str]) -> None:
     if not chunks:
         await message.reply_text("Gemini 未回傳文字。")
         return
     for chunk in chunks:
         await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+def _caption_from_chunks(chunks: list[str]) -> str | None:
+    if len(chunks) != 1:
+        return None
+    caption = chunks[0]
+    return caption if caption_is_eligible(caption) else None
+
+
+async def _delete_placeholder(placeholder: Any | None) -> None:
+    if placeholder is None:
+        return
+    try:
+        await placeholder.delete()
+    except Exception as error:
+        _log_handler_error("stream placeholder deletion", error)
 
 
 def _rate_limit_message(error: RateLimitExceeded) -> str:

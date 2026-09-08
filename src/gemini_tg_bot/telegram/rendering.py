@@ -18,6 +18,9 @@ from urllib.parse import urlsplit
 
 
 MAX_MESSAGE_LENGTH = 4000
+UNORDERED_LIST_BULLETS = ("•", "◦", "▪")
+LIST_INDENT_CHARACTER = "\u2007"
+LIST_INDENT_CHARACTERS_PER_LEVEL = 2
 
 GOOGLEUSERCONTENT_ARTIFACT_RE = re.compile(
     r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*"
@@ -296,8 +299,16 @@ def _render_text_block(block: str) -> str:
         if list_item is not None:
             flush_plain_lines()
             marker = list_item.group("marker")
-            marker = "•" if marker in {"-", "+", "*"} else marker
-            indent = list_item.group("indent").replace("\t", "  ")
+            raw_indent = list_item.group("indent").replace("\t", "  ")
+            depth = min(
+                len(raw_indent) // LIST_INDENT_CHARACTERS_PER_LEVEL,
+                len(UNORDERED_LIST_BULLETS) - 1,
+            )
+            if marker in {"-", "+", "*"}:
+                marker = UNORDERED_LIST_BULLETS[depth]
+            indent = LIST_INDENT_CHARACTER * (
+                depth * LIST_INDENT_CHARACTERS_PER_LEVEL
+            )
             rendered.append(f"{indent}{marker} {_render_inline(list_item.group('body'))}{ending}")
         elif body.startswith(">"):
             flush_plain_lines()
@@ -464,8 +475,11 @@ render_markdown = markdown_to_telegram_html
 
 __all__ = [
     "GOOGLEUSERCONTENT_ARTIFACT_RE",
+    "LIST_INDENT_CHARACTER",
+    "LIST_INDENT_CHARACTERS_PER_LEVEL",
     "MAX_MESSAGE_LENGTH",
     "ORPHAN_ARTIFACT_SUFFIX_RE",
+    "UNORDERED_LIST_BULLETS",
     "markdown_to_telegram_html",
     "render_markdown",
     "render_markdown_chunks",

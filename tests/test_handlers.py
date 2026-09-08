@@ -68,7 +68,7 @@ def _update(
     user_id: int = 101,
     chat_id: int = 202,
 ) -> SimpleNamespace:
-    placeholder = SimpleNamespace(edit_text=AsyncMock())
+    placeholder = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
     message = SimpleNamespace(
         text=text,
         reply_text=AsyncMock(return_value=placeholder),
@@ -478,10 +478,17 @@ async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
         expected_text,
         parse_mode=parse_mode,
     )
+    expected_caption = (
+        expected_text if expected_text != EMPTY_RESPONSE_TEXT else None
+    )
+    expected_photo_kwargs = {"caption": expected_caption}
+    if expected_caption is not None:
+        expected_photo_kwargs["parse_mode"] = ParseMode.HTML
     update.effective_message.reply_photo.assert_awaited_once_with(
         image.url,
-        caption=None,
+        **expected_photo_kwargs,
     )
+    update.effective_message.placeholder.delete.assert_awaited_once_with()
     assert "_551" not in str(
         update.effective_message.placeholder.edit_text.await_args_list
     )
@@ -489,6 +496,75 @@ async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
         update.effective_message.placeholder.edit_text.await_args_list
     )
     registry.persist.assert_awaited_once_with(202, session)
+
+
+async def test_text_stream_merges_rendered_text_into_image_caption(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    image = SimpleNamespace(
+        url="https://example.test/generated.png",
+        title="Generated",
+        alt="Generated image",
+    )
+    output = SimpleNamespace(
+        text="**short answer**",
+        text_delta="**short answer**",
+        images=[image],
+        candidates=[
+            SimpleNamespace(web_images=[], generated_images=[image]),
+        ],
+        chosen=0,
+    )
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(_StreamingClient([output]))
+    update = _update(text="generate")
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
+    update.effective_message.reply_photo.assert_awaited_once_with(
+        image.url,
+        caption="<b>short answer</b>",
+        parse_mode=ParseMode.HTML,
+    )
+    update.effective_message.placeholder.delete.assert_awaited_once_with()
+
+
+async def test_text_stream_over_caption_limit_keeps_separate_text_message(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    text = "x" * 1025
+    image = SimpleNamespace(
+        url="https://example.test/generated.png",
+        title="Generated",
+        alt="Generated image",
+    )
+    output = SimpleNamespace(
+        text=text,
+        text_delta=text,
+        images=[image],
+        candidates=[
+            SimpleNamespace(web_images=[image], generated_images=[]),
+        ],
+        chosen=0,
+    )
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(_StreamingClient([output]))
+    update = _update(text="generate")
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    assert update.effective_message.placeholder.edit_text.await_args == call(
+        text,
+        parse_mode=ParseMode.HTML,
+    )
+    update.effective_message.reply_photo.assert_awaited_once_with(
+        image.url,
+        caption=None,
+    )
+    update.effective_message.placeholder.delete.assert_not_awaited()
 
 
 async def test_status_reports_required_fields_and_does_not_expose_cookie(

@@ -19,6 +19,7 @@ sys.modules[_COVERAGE_KEY] = _RENDERING
 _SPEC.loader.exec_module(_RENDERING)
 
 MAX_MESSAGE_LENGTH = _RENDERING.MAX_MESSAGE_LENGTH
+LIST_INDENT_CHARACTER = _RENDERING.LIST_INDENT_CHARACTER
 markdown_to_telegram_html = _RENDERING.markdown_to_telegram_html
 render_markdown = _RENDERING.render_markdown
 render_markdown_chunks = _RENDERING.render_markdown_chunks
@@ -75,9 +76,44 @@ def test_lists_headings_and_blockquotes_use_supported_plain_forms() -> None:
     assert markdown_to_telegram_html(source) == (
         "Heading\n"
         "• <b>one</b>\n"
-        "  • two\n"
+        f"{LIST_INDENT_CHARACTER * 2}◦ two\n"
         "1. three\n"
         "<blockquote>quoted <i>text</i></blockquote>\n"
+    )
+
+
+def test_unordered_lists_use_three_visual_levels_and_cap_deeper_items() -> None:
+    source = (
+        "- first\n"
+        "  - second\n"
+        "    - third\n"
+        "      - fourth\n"
+    )
+
+    rendered = markdown_to_telegram_html(source)
+
+    assert rendered == (
+        "• first\n"
+        f"{LIST_INDENT_CHARACTER * 2}◦ second\n"
+        f"{LIST_INDENT_CHARACTER * 4}▪ third\n"
+        f"{LIST_INDENT_CHARACTER * 4}▪ fourth\n"
+    )
+    assert "".join(render_markdown_chunks(source, limit=32)) == rendered
+
+
+def test_list_marker_and_bold_html_are_rendered_together() -> None:
+    assert markdown_to_telegram_html("- **important** item\n") == (
+        "• <b>important</b> item\n"
+    )
+
+
+def test_list_adjacent_to_blockquote_keeps_both_structures() -> None:
+    source = "- before\n> quoted **text**\n  - after\n"
+
+    assert markdown_to_telegram_html(source) == (
+        "• before\n"
+        "<blockquote>quoted <b>text</b></blockquote>\n"
+        f"{LIST_INDENT_CHARACTER * 2}◦ after\n"
     )
 
 
