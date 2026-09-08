@@ -455,3 +455,40 @@ worker 回報成功並附具體輸出（`Successfully built 58ce5fd1ca3c`、
 `uid=10001 workdir=/ cookie_dir=10001:10001:700 db_path=/data/db/bot.sqlite3 secret_files=absent`）。
 依驗證協定 §4，此項如實記為**未經 Commander 親自驗證**，
 `.dockerignore` 的安全性質則已靜態驗證確認。
+
+
+## D17 — 圖片-only 回應會閃現「Gemini 未回傳文字。」（實機回報）
+
+**使用者實機回報（2026-09-08 20:07，`/img 一隻貓`）**：
+先出現「Gemini 未回傳文字。」，該訊息隨後被刪除，然後才出現貓的圖片。
+
+### 根因：語義與順序都錯
+
+實測 API 序列：
+
+```
+text = '\n\n_547\n\n'   → 清理後為空 → EMPTY_RESPONSE_TEXT
+sendMessage       ← placeholder「思考中…」
+editMessageText   ← 串流
+editMessageText   ← 最後一次 edit 寫入「Gemini 未回傳文字。」  ← 使用者看到
+sendPhoto 400 → sendPhoto 200                                 ← 圖片送出
+deleteMessage     ← placeholder 這時才刪除
+```
+
+兩個問題：
+
+1. **語義錯誤**：回應含 1 張圖片，並非「空回應」。
+   `EMPTY_RESPONSE_TEXT` 只有在「既無文字也無圖片」時才為真。
+   圖片生成的正常回應（text 只有 `_NNN` 佔位符殘留）會被誤判為空。
+2. **順序錯誤**：placeholder 在圖片送出**之後**才刪除，
+   造成使用者看見一則看似錯誤的訊息閃現約一秒。
+
+### 裁定的修法
+
+- 判斷是否為空必須**同時考慮 text 與 images**：
+  清理後 text 為空 **且** `output.images` 為空時，才顯示 `EMPTY_RESPONSE_TEXT`。
+- text 為空但有圖片時：**不要**寫入任何文字，直接刪除 placeholder 後送圖，
+  或讓圖片的 caption 承載內容（此情況無文字可承載，故直接刪 placeholder）。
+- placeholder 的刪除應在送圖**之前或同時**，不得在之後。
+
+此為使用者可見的 UX 缺陷，優先度高於剩餘的技術債。
