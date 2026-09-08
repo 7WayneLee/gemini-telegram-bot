@@ -97,6 +97,7 @@ async def stream_response(
     pending_characters = 0
     latest_text = ""
     latest_output: Any | None = None
+    last_sent_text = placeholder_text
 
     stream = client.generate_content_stream(prompt, **generate_kwargs)
     iterator = stream.__aiter__()
@@ -104,14 +105,16 @@ async def stream_response(
     timer: asyncio.Future[Any] | None = None
 
     async def edit_plain_text() -> None:
-        nonlocal last_edit_at, pending_characters
-        await edit_text(
-            placeholder,
-            latest_text,
-            parse_mode=None,
-            sleep=sleep,
-            flood_wait=flood_wait,
-        )
+        nonlocal last_edit_at, last_sent_text, pending_characters
+        if latest_text != last_sent_text:
+            await edit_text(
+                placeholder,
+                latest_text,
+                parse_mode=None,
+                sleep=sleep,
+                flood_wait=flood_wait,
+            )
+            last_sent_text = latest_text
         pending_characters = 0
         last_edit_at = clock()
 
@@ -176,13 +179,14 @@ async def stream_response(
         )
         return StreamResult(text=latest_text, output=latest_output)
 
-    await edit_text(
-        placeholder,
-        rendered_chunks[0],
-        parse_mode=ParseMode.HTML,
-        sleep=sleep,
-        flood_wait=flood_wait,
-    )
+    if rendered_chunks[0] != last_sent_text:
+        await edit_text(
+            placeholder,
+            rendered_chunks[0],
+            parse_mode=ParseMode.HTML,
+            sleep=sleep,
+            flood_wait=flood_wait,
+        )
     for rendered_chunk in rendered_chunks[1:]:
         await send_text(
             message,

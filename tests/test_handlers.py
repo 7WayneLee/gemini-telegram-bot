@@ -15,7 +15,7 @@ from gemini_webapi import ModelOutput
 from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
 from telegram.constants import MediaGroupLimit, ParseMode
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from gemini_tg_bot.__main__ import _start_application
 from gemini_tg_bot.gemini.service import DegradedReason, ServiceState
@@ -34,7 +34,7 @@ from gemini_tg_bot.telegram.handlers import (
 )
 from gemini_tg_bot.telegram.media import MediaHandler
 from gemini_tg_bot.telegram.sending import MAX_FLOOD_WAIT_SECONDS, SERVICE_BUSY
-from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
+from gemini_tg_bot.telegram.streaming import EDIT_CHARACTER_THRESHOLD, PLACEHOLDER_TEXT
 
 try:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry as _RegistrySpec
@@ -649,6 +649,41 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     assert saved.ok is True
 
 
+async def test_unformatted_stream_skips_final_edit_and_records_success(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    session = SimpleNamespace()
+    text = "好" * EDIT_CHARACTER_THRESHOLD
+    output = SimpleNamespace(
+        text=text,
+        text_delta=text,
+        images=(),
+    )
+    registry.get_or_create.return_value = session
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    handlers, _ = handlers_factory(
+        _StreamingClient([output]),
+        usage_dao=usage_dao,
+    )
+    update = _update(text="question")
+    update.effective_message.placeholder.edit_text.side_effect = [
+        None,
+        BadRequest("message is not modified"),
+    ]
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    update.effective_message.placeholder.edit_text.assert_awaited_once_with(
+        text,
+        parse_mode=None,
+    )
+    registry.persist.assert_awaited_once_with(202, session)
+    saved = usage_dao.add.await_args.args[0]
+    assert saved.ok is True
+    assert saved.error_kind is None
+
+
 async def test_text_reports_bounded_flood_control_and_releases_slot(
     handlers_factory,
     registry: AsyncMock,
@@ -910,9 +945,9 @@ async def test_text_stream_over_caption_limit_keeps_separate_text_message(
 
     await handlers.text_message(update, SimpleNamespace())
 
-    assert update.effective_message.placeholder.edit_text.await_args == call(
+    update.effective_message.placeholder.edit_text.assert_awaited_once_with(
         text,
-        parse_mode=ParseMode.HTML,
+        parse_mode=None,
     )
     update.effective_message.reply_photo.assert_not_awaited()
     update.effective_message.reply_media_group.assert_awaited_once()

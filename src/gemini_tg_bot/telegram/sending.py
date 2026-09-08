@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any, TypeVar
 
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 
 MAX_FLOOD_WAIT_SECONDS = 30.0
@@ -43,7 +43,7 @@ async def call_telegram(
     sleep: _Sleep | None = None,
     flood_wait: _Sleep | None = None,
     **kwargs: Any,
-) -> _ResultT:
+) -> _ResultT | None:
     """Call one Telegram operation with a bounded flood-control budget."""
 
     waited_seconds = 0.0
@@ -58,6 +58,10 @@ async def call_telegram(
                 raise FloodControlExceeded(delay, waited_seconds) from error
             await wait(delay)
             waited_seconds += delay
+        except BadRequest as error:
+            if "message is not modified" in str(error).casefold():
+                return None
+            raise
 
     raise AssertionError("unreachable")
 

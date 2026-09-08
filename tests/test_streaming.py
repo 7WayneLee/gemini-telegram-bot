@@ -93,6 +93,58 @@ async def test_elapsed_interval_edits_first_and_keeps_partial_markdown_plain() -
     ]
 
 
+async def test_unformatted_final_edit_is_skipped_after_plain_stream_edit() -> None:
+    clock = FakeClock()
+    client = FakeClient([(EDIT_INTERVAL_SECONDS, "好的")], clock=clock)
+    message, placeholder = telegram_message()
+
+    result = await stream_response(message, client, "hello", clock=clock)
+
+    assert result.text == "好的"
+    placeholder.edit_text.assert_awaited_once_with("好的", parse_mode=None)
+
+
+async def test_formatted_final_edit_is_sent_as_html() -> None:
+    clock = FakeClock()
+    client = FakeClient(
+        [(EDIT_INTERVAL_SECONDS, "**粗體** 測試")],
+        clock=clock,
+    )
+    message, placeholder = telegram_message()
+
+    await stream_response(message, client, "hello", clock=clock)
+
+    assert placeholder.edit_text.await_args_list == [
+        call("**粗體** 測試", parse_mode=None),
+        call("<b>粗體</b> 測試", parse_mode=ParseMode.HTML),
+    ]
+
+
+async def test_unchanged_intermediate_text_is_not_edited_again() -> None:
+    clock = FakeClock()
+
+    class RepeatedTextClient:
+        async def generate(self) -> AsyncIterator[SimpleNamespace]:
+            clock.current = EDIT_INTERVAL_SECONDS
+            yield SimpleNamespace(text_delta="好的", text="好的", images=())
+            clock.current = EDIT_INTERVAL_SECONDS * 2
+            yield SimpleNamespace(text_delta="重送", text="好的", images=())
+
+        def generate_content_stream(
+            self,
+            prompt: str,
+            **kwargs: Any,
+        ) -> AsyncIterator[SimpleNamespace]:
+            del prompt, kwargs
+            return self.generate()
+
+    message, placeholder = telegram_message()
+
+    await stream_response(message, RepeatedTextClient(), "hello", clock=clock)
+
+    placeholder.edit_text.assert_awaited_once_with("好的", parse_mode=None)
+
+
 async def test_character_threshold_edits_before_interval() -> None:
     clock = FakeClock()
     first = "a" * (EDIT_CHARACTER_THRESHOLD - 1)
@@ -154,7 +206,6 @@ async def test_retry_after_waits_then_retries_the_same_edit() -> None:
     assert placeholder.edit_text.await_args_list == [
         interim,
         interim,
-        call("x" * EDIT_CHARACTER_THRESHOLD, parse_mode=ParseMode.HTML),
     ]
 
 

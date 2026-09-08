@@ -26,6 +26,7 @@ from gemini_tg_bot.telegram.media import (
     UploadSizeUnknownError,
     UploadTooLargeError,
 )
+from gemini_tg_bot.telegram.sending import edit_text, send_media_group
 from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
 from scripts.dump_response import serialize_output
 
@@ -86,6 +87,30 @@ def _simple_output(
         ],
         chosen=0,
     )
+
+
+async def test_message_not_modified_bad_request_is_success() -> None:
+    message = SimpleNamespace(
+        edit_text=AsyncMock(
+            side_effect=BadRequest("MeSsAgE Is NoT MoDiFiEd")
+        )
+    )
+
+    result = await edit_text(message, "unchanged")
+
+    assert result is None
+    message.edit_text.assert_awaited_once_with("unchanged")
+
+
+async def test_other_bad_request_still_propagates_from_sending() -> None:
+    message = _message()
+    error = BadRequest("failed to get HTTP URL content")
+    message.reply_media_group.side_effect = error
+
+    with pytest.raises(BadRequest) as exc_info:
+        await send_media_group(message, [])
+
+    assert exc_info.value is error
 
 
 async def test_default_url_delivery_has_zero_egress() -> None:
