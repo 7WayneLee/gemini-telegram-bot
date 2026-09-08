@@ -1,92 +1,55 @@
-# 續跑指引（codex 額度耗盡時的中斷點）
+# 專案狀態
 
-**中斷時間**：2026-09-08
-**原因**：codex worker 回報 `Usage limit reached`，兩個進行中的任務停擺。
+**2026-09-08：orca-orchestration-plan.md 的 DAG 全部完成。**
 
----
-
-## 目前進度：18 / 20 節點完成，158 測試全過
-
-已完成並經 Commander 逐項驗收：T0.1–T0.2、T1.1–T1.4、T2.1–T2.7、T3.1、T3.2b、T3.3–T3.5、G1。
-
-`--dry-run` 走完整正式路徑：
-```
-receive → allowlist → queue → service → stream → render → send → research → database: ok
-```
+30 個節點完成（原計畫 20 個 + 實機測試衍生的 10 個修正任務），
+2 個標記為 failed（皆為重複建立或被取代的任務，非實際失敗）。
 
 ---
 
-## 額度回來後，直接從這裡續跑
+## 驗收狀態
 
-### 1. T3.6 — 多張圖片改用 sendMediaGroup 相簿（零產出，需重派）
-
-```bash
-orca orchestration worker-start --task task_80ac48ef36ff --worktree current --agent codex --json
-```
-
-使用者實機回報：多張圖時第一張正確帶 caption，但**第二張以後各自成為獨立訊息**。
-需改為 `reply_media_group`。完整規格已寫在該任務的 spec 內，重點：
-
-- `MediaGroupLimit.MIN_MEDIA_LENGTH = 2`、`MAX_MEDIA_LENGTH = 10`（1 張仍走 `sendPhoto`，>10 拆組）
-- caption 掛在第一組第一項，仍受 1024 限制
-- **難點**：`sendMediaGroup` 是原子操作，一張 URL 失敗整組失敗，
-  因此 T3.2b 的 per-image 退回不適用 → 改為**以組為單位**退回（整組下載後重送）
-
-### 2. T4.1 — 部署產物（約九成完成，檔案已產出但未 commit）
-
-```bash
-orca orchestration worker-start --task task_87ee87bc4e67 --worktree current --agent codex --json
-```
-
-`deploy/` 下已有三個檔案（**未 commit，untracked**），Commander 已審閱，品質良好：
-
-| 檔案 | 狀態 |
+| Gate | 結果 |
 |---|---|
-| `docker-compose.yml` | D8 數值正確（256m/512m/0.5）、無 `ports`、logging 輪替、`name: gemini-bot`、tmpfs 警告註解 |
-| `Dockerfile` | python:3.12-slim、非 root UID 10001、build 時驗證目錄可寫、只 COPY `pyproject.toml` 與 `src/` |
-| `gemini-tg-bot.service` | MemoryMax/MemorySwapMax/CPUQuota 正確，含完整 systemd 硬化 |
+| **M1 / G1** 連通性 | ✅ 白名單使用者收到回覆；非白名單被拒絕並留 log |
+| **M2** 渲染 | ✅ 粗體、三層巢狀清單、code block、超長切段 |
+| **M3** 會話 | ✅ 多輪上下文、`/new` 重置、重啟後延續 |
+| **M4** 媒體 / **T3.2a** egress | ✅ **零 egress 成立**（WebImage 直傳，`/status` 回報 0 B） |
+| **M5 / G2** 韌性 | ✅ 無效 cookie → DEGRADED + 推播 → `/setcookie` 熱恢復，**process 未重啟** |
+| **M6** 研究 | ✅ `/research` 立即回傳、重啟後恢復輪詢 |
 
-**尚缺**：
-- `.dockerignore`（需排除 `.env`、`data/`、`cookies/`、`tests/`、`.git`）
-- DoD 未執行：`docker compose -f deploy/docker-compose.yml build`
-  （註：開發機沒有 compose plugin，只有 `docker` 二進位，本機驗不了）
-- 尚未 commit
-
-### 3. T4.2 — README ✅ 已完成（commit 4b115b7）
-
-Commander 於等待額度期間完成。涵蓋 SSH SOCKS cookie 流程、實測資源與 egress 策略、
-四項已知風險、rendering 與 DEGRADED 設計說明。每項陳述皆已對照程式碼查核。
-
-**待補**：部署章節的指令在 T4.1 的 `docker compose build` DoD 通過前尚未驗證。
-
-### 4. T3.7 — 補做 `/img` 指令（新建，尚未派工）
-
-```bash
-orca orchestration worker-start --task task_0aac5f272c30 --worktree current --agent codex --json
-```
-
-見 `docs/decisions.md` 的 D9：`spec.md` 列有 `/img <prompt>` 但從未被任何任務涵蓋，
-是 Commander 切分 Phase 2 時的遺漏。使用者實測「台北101」拿到的是圖庫照片
-（`WebImage`）而非生成圖，正是此缺口的實際影響。
+測試：**213 passed**。`--dry-run` 全鏈路綠燈。
 
 ---
 
-## 待使用者決定的事項
+## 實機驗證過的行為
 
-1. **既有媒體服務是否為 Docker？** `docker stats --no-stream` 在 movie-nas 上無任何輸出。
-   若 Jellyfin / qBittorrent 是原生安裝，則為 bot 引入 Docker daemon 在 969Mi 的機器上
-   是額外常駐開銷 → 建議把 systemd 方案設為主要部署方式（見 D8）。
+- 多張圖 → **單一相簿**（`sendMediaGroup`），caption 掛第一張
+- `WebImage` → URL 直傳，**egress 0**；`GeneratedImage` → Telegram 回 400，自動退回中轉
+- `/img` 產生真正的 AI 生成圖（非圖庫照）
+- flood control → 有界等待、快速失敗，不再凍結整個 bot
+- cookie 失效 → 立即 DEGRADED + 推播，不再空轉 91 秒
+- `auto_refresh` 背景輪替正常運作
 
-2. **T3.2a egress 實測**：目前預設樂觀走 URL 直傳。從使用者截圖看圖片有正常顯示，
-   代表路徑 A 可行。請確認 `/status` 的本月 egress 估算是否維持 0，
-   若是則可回填 `docs/egress-findings.md` 並關閉該 gate。
+---
 
-3. **G2 韌性演練**（HUMAN gate）：填入無效 cookie → 確認進入 DEGRADED 並推播管理員
-   → `/setcookie` 熱更新 → 服務恢復，全程 process 未重啟。
+## 未償還的技術債（見 docs/decisions.md）
 
-4. **真實 fixture 擷取**（使用者執行，需 live 呼叫）：
-   ```bash
-   uv run python scripts/dump_response.py "Generate an image of a cat" --output image-generated.json
-   uv run python scripts/dump_response.py "台北101 長什麼樣子?附上照片" --output image-web.json
-   ```
-   拿到後可把測試從「依格式推導」升級為「依實測樣本」，並補齊合約 §四之二的三個待確認項。
+| 編號 | 內容 |
+|---|---|
+| D6 | `1PSID` **更換後無法跨重啟存活** —— 重啟會退回 `.env` 的舊值 |
+| D16 | `WORKDIR /` 是隱性耦合；`DATABASE_PATH` 應改為環境變數 |
+| D16 | `uv.lock` 未進 build context，image 相依性非鎖定 |
+| D15 | `.env` 位於 repo 根目錄，任何展開它的工具都可能洩漏 |
+
+**D6 對維運最關鍵**：`.env` 裡的 `1PSIDTS` 會被 `auto_refresh` 淘汰，
+快取檔才是最新來源。重取 cookie 時不能只看 `.env`。
+
+---
+
+## 尚未驗證
+
+- `docker compose build` 的 DoD **未經 Commander 親自執行**（驗收時本機 Docker daemon 未運行）。
+  worker 回報成功並附具體輸出，`.dockerignore` 的安全性質已靜態驗證。
+- **實際部署到 movie-nas 尚未進行。** 所有 movie-nas 操作皆為 HUMAN gate。
+  部署前請重讀 README 的「部署」章節與 D8 的資源實測數值。
