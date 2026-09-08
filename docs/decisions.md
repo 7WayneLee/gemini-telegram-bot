@@ -555,3 +555,46 @@ GUARDIAN_APPROVAL_REQUIRED (1057)    LOCATION_REJECTED (1060)
 T2.2 的 DEGRADED 測試全部以 mock 注入 `AuthError` 進行，因此永遠是綠的；
 真實情況下該例外根本不會出現。這是 mock 測試與真實行為脫節的典型案例，
 也正是 G2 這類實機 gate 存在的理由。
+
+
+## D19 — ✅ G2 韌性演練通過（T3.13 修正後重測，2026-09-08 21:52）
+
+第一次演練失敗（D18），修正後重跑，五項驗收全數通過。
+
+| 驗收項目 | 首次（修正前） | 重測（T3.13 後） |
+|---|---|---|
+| `/setcookie` 收到後立即刪除訊息 | ✅ | ✅ |
+| `reinit` 呼叫 `clear_cookies_cache` | ✅ | ✅ |
+| **進入 `DEGRADED`** | 🔴 維持 healthy | ✅ `AccountStatusError` 拋出 |
+| **主動推播管理員** | 🔴 無 | ✅ 收到認證失效通知 |
+| **快速失敗** | 🔴 `latency_ms=91014`（91 秒） | ✅ 立即回覆，`text message` 失敗次數 0 |
+| `/setcookie` 熱恢復 | 未達此步 | ✅ 服務回復正常 |
+| **全程 process 未重啟** | ✅ | ✅ pid 28703 未變 |
+
+### 決定性證據
+
+**降級時**（21:52 前）：使用者發訊息收到
+「Gemini 服務目前處於認證失效狀態，暫時無法接受請求。」
+log 中 `operation=text message` 的失敗次數為 **0** ——
+請求在進入 Gemini client 之前就被擋下，走快速失敗路徑，
+因此既無 91 秒空轉，也無錯誤 log。修正前此處必有一次 `APIError` 與 91 秒延遲。
+
+**恢復時**：
+
+```
+21:52:59  Skipping cookie cache write: the session is not authenticated.   ← 假 session 關閉
+21:53:04  Account quota updated: 2388/2400 credits remaining               ← 新 session 認證成功
+21:53:05  Account abuse status: Clean
+21:53:05  SUCCESS  Gemini client initialized successfully.
+```
+
+`quota updated` 只有在 session 有效時才會出現，是 `AccountStatus.AVAILABLE` 的實證。
+
+### 過程中順帶驗證的項目
+
+- **D6 的快取優先序修正**：`reinit` 帶新憑證時清舊快取，使新貼上的 cookie 真正生效，
+  而非被舊快取遮蔽。若無此修正，`/setcookie` 會在第一次嘗試時看似無效。
+- **`.env` 的 `1PSIDTS` 會被輪替淘汰**：演練中確認 `.env` 內的值與快取中的已不同，
+  快取才是最新來源。這對維運有直接意義 —— **重取 cookie 時不能只看 `.env`**。
+  （見 D6 未解缺口：`1PSID` 更換後無法跨重啟存活。）
+- **`auto_refresh` 正常運作**：快取檔 mtime 在 bot 啟動後更新，證明背景輪替有在動。
