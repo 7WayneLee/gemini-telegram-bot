@@ -160,6 +160,13 @@ async def stream_response(
 
     rendered_chunks = render_markdown_chunks(latest_text)
     if not rendered_chunks:
+        images = (
+            getattr(latest_output, "images", ())
+            if latest_output is not None
+            else ()
+        )
+        if images:
+            return StreamResult(text=latest_text, output=latest_output)
         await edit_text(
             placeholder,
             EMPTY_RESPONSE_TEXT,

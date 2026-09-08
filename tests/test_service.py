@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from gemini_webapi import exceptions as gw_exc
+from gemini_webapi.constants import AccountStatus
 
 from gemini_tg_bot.config import Settings
 from gemini_tg_bot.gemini import service as service_module
-from gemini_tg_bot.gemini.errors import ErrorKind
+from gemini_tg_bot.gemini.errors import AccountStatusError, ErrorKind
 from gemini_tg_bot.gemini.service import (
     AUTH_DEGRADED_NOTIFICATION,
     BLOCKED_ESCALATION_THRESHOLD,
@@ -22,6 +23,7 @@ from gemini_tg_bot.gemini.service import (
     ServiceState,
     ServiceUnavailableError,
     SingletonViolationError,
+    account_status_guidance,
 )
 
 
@@ -35,10 +37,13 @@ def _exception_instance(exception_type: type[BaseException]) -> BaseException:
     return SyntheticError()
 
 
-def _mock_client() -> MagicMock:
+def _mock_client(
+    account_status: AccountStatus = AccountStatus.AVAILABLE,
+) -> MagicMock:
     client = MagicMock(name="GeminiClientMock")
     client.init = AsyncMock(name="init")
     client.close = AsyncMock(name="close")
+    client.account_status = account_status
     return client
 
 
@@ -96,6 +101,125 @@ async def test_init_configures_cookie_path_and_auto_refresh(
     assert service.state is ServiceState.HEALTHY
     assert service.accepting_requests is True
     assert service.client is client
+    assert service.health.account_status is AccountStatus.AVAILABLE
+
+
+async def test_new_service_does_not_trust_client_default_available_status(
+    settings: Settings,
+) -> None:
+    service = GeminiService(settings)
+
+    assert service.state is ServiceState.NEW
+    assert service.accepting_requests is False
+    assert service.health.account_status is None
+
+
+async def test_post_init_unauthenticated_status_enters_auth_degraded(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _mock_client()
+
+    async def initialize(**kwargs: object) -> None:
+        assert kwargs == {"auto_refresh": True}
+        client.account_status = AccountStatus.UNAUTHENTICATED
+
+    client.init.side_effect = initialize
+    _patch_client_factory(monkeypatch, client)
+    notifier = AsyncMock()
+    service = GeminiService(settings, notifier)
+
+    with pytest.raises(AccountStatusError) as exc_info:
+        await service.init()
+
+    assert exc_info.value.status is AccountStatus.UNAUTHENTICATED
+    assert service.state is ServiceState.DEGRADED
+    assert service.health.degraded_reason is DegradedReason.AUTH
+    assert service.health.account_status is AccountStatus.UNAUTHENTICATED
+    assert service.accepting_requests is False
+    notification = notifier.await_args.args[0]
+    assert AUTH_DEGRADED_NOTIFICATION in notification
+    assert AccountStatus.UNAUTHENTICATED.description in notification
+
+
+async def test_post_init_location_rejected_has_distinct_remediation(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _mock_client(AccountStatus.LOCATION_REJECTED)
+    _patch_client_factory(monkeypatch, client)
+    notifier = AsyncMock()
+    service = GeminiService(settings, notifier)
+
+    with pytest.raises(AccountStatusError):
+        await service.init()
+
+    assert service.state is ServiceState.DEGRADED
+    assert service.health.degraded_reason is DegradedReason.AUTH
+    notification = notifier.await_args.args[0]
+    assert AccountStatus.LOCATION_REJECTED.description in notification
+    assert "SSH SOCKS" in notification
+    assert notification != AUTH_DEGRADED_NOTIFICATION
+
+
+async def test_temporarily_unavailable_status_uses_blocked_half_open_recovery(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    client = _mock_client(AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE)
+    replacement = _mock_client()
+    _patch_client_factory(monkeypatch, client, replacement)
+    notifier = AsyncMock()
+    service = GeminiService(
+        settings,
+        notifier,
+        time_source=lambda: now[0],
+        blocked_cooldown_sec=60.0,
+    )
+
+    with pytest.raises(AccountStatusError):
+        await service.init()
+
+    assert service.state is ServiceState.DEGRADED
+    assert service.health.degraded_reason is DegradedReason.BLOCKED
+    assert service.health.blocked_until == 60.0
+    assert (
+        AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE.description
+        in notifier.await_args.args[0]
+    )
+    with pytest.raises(ServiceUnavailableError):
+        await service.execute(AsyncMock(return_value="too early"))
+
+    now[0] = 60.0
+    operation = AsyncMock(return_value="recovered")
+    assert await service.execute(operation) == "recovered"
+    operation.assert_awaited_once_with(replacement)
+    client.close.assert_awaited_once_with()
+    replacement.init.assert_awaited_once_with(auto_refresh=True)
+    assert service.state is ServiceState.HEALTHY
+    assert service.health.account_status is AccountStatus.AVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_guidance"),
+    [
+        (AccountStatus.ACCOUNT_REJECTED, "帳號層級限制"),
+        (AccountStatus.ACCOUNT_UNTRUSTED, "帳號層級限制"),
+        (AccountStatus.ACCOUNT_REJECTED_BY_GUARDIAN, "帳號層級限制"),
+        (AccountStatus.GUARDIAN_APPROVAL_REQUIRED, "帳號層級限制"),
+        (AccountStatus.TOS_PENDING, "網頁版接受最新服務條款"),
+        (AccountStatus.TOS_OUT_OF_DATE, "網頁版接受最新服務條款"),
+    ],
+)
+def test_account_status_guidance_preserves_description_and_remediation(
+    status: AccountStatus,
+    expected_guidance: str,
+) -> None:
+    guidance = account_status_guidance(status)
+
+    assert status.description in guidance
+    assert expected_guidance in guidance
 
 
 async def test_service_rejects_a_second_instance(settings: Settings) -> None:
@@ -141,6 +265,32 @@ async def test_reinit_closes_old_client_before_constructing_replacement(
     assert factory.call_count == 2
     assert service.client is second
     assert service.state is ServiceState.HEALTHY
+
+
+async def test_reinit_rejects_unauthenticated_replacement_and_notifies(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _mock_client()
+    replacement = _mock_client(AccountStatus.UNAUTHENTICATED)
+    _patch_client_factory(monkeypatch, first, replacement)
+    notifier = AsyncMock()
+    service = GeminiService(settings, notifier)
+    await service.init()
+
+    with pytest.raises(AccountStatusError) as exc_info:
+        await service.reinit(
+            secure_1psid="FAKE_REPLACEMENT_1PSID_FOR_TEST",
+            secure_1psidts="FAKE_REPLACEMENT_1PSIDTS_FOR_TEST",
+        )
+
+    assert exc_info.value.status is AccountStatus.UNAUTHENTICATED
+    first.close.assert_awaited_once_with()
+    replacement.close.assert_not_awaited()
+    assert service.state is ServiceState.DEGRADED
+    assert service.health.degraded_reason is DegradedReason.AUTH
+    assert service.health.account_status is AccountStatus.UNAUTHENTICATED
+    assert AUTH_DEGRADED_NOTIFICATION in notifier.await_args.args[0]
 
 
 async def test_reinit_waits_for_active_work_and_rejects_new_work(

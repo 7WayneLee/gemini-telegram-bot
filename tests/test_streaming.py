@@ -19,6 +19,7 @@ from gemini_tg_bot.telegram.sending import (
 from gemini_tg_bot.telegram.streaming import (
     EDIT_CHARACTER_THRESHOLD,
     EDIT_INTERVAL_SECONDS,
+    EMPTY_RESPONSE_TEXT,
     PLACEHOLDER_TEXT,
     stream_response,
 )
@@ -38,9 +39,11 @@ class FakeClient:
         chunks: Iterable[tuple[float, str]],
         *,
         clock: FakeClock,
+        images: tuple[Any, ...] = (),
     ) -> None:
         self._chunks = list(chunks)
         self._clock = clock
+        self._images = images
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _generate(self) -> AsyncIterator[SimpleNamespace]:
@@ -48,7 +51,11 @@ class FakeClient:
         for timestamp, delta in self._chunks:
             self._clock.current = timestamp
             full_text += delta
-            yield SimpleNamespace(text_delta=delta, text=full_text)
+            yield SimpleNamespace(
+                text_delta=delta,
+                text=full_text,
+                images=self._images,
+            )
 
     def generate_content_stream(
         self,
@@ -101,6 +108,36 @@ async def test_character_threshold_edits_before_interval() -> None:
         call(first + "b", parse_mode=None),
         call(first + "bc", parse_mode=ParseMode.HTML),
     ]
+
+
+async def test_artifact_only_text_with_image_does_not_write_empty_response() -> None:
+    clock = FakeClock()
+    image = SimpleNamespace(url="https://example.test/generated.png")
+    client = FakeClient(
+        [(0.1, "\n\n_543\n\n")],
+        clock=clock,
+        images=(image,),
+    )
+    message, placeholder = telegram_message()
+
+    result = await stream_response(message, client, "draw", clock=clock)
+
+    assert result.output is not None
+    assert result.output.images == (image,)
+    placeholder.edit_text.assert_not_awaited()
+
+
+async def test_artifact_only_text_without_image_writes_empty_response() -> None:
+    clock = FakeClock()
+    client = FakeClient([(0.1, "\n\n_543\n\n")], clock=clock)
+    message, placeholder = telegram_message()
+
+    await stream_response(message, client, "hello", clock=clock)
+
+    placeholder.edit_text.assert_awaited_once_with(
+        EMPTY_RESPONSE_TEXT,
+        parse_mode=None,
+    )
 
 
 async def test_retry_after_waits_then_retries_the_same_edit() -> None:

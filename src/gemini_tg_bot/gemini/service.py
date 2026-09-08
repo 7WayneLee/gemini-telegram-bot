@@ -15,12 +15,13 @@ from typing import Any, ClassVar, TypeVar, cast
 
 from gemini_webapi import GeminiClient
 from gemini_webapi import exceptions as gw_exc
+from gemini_webapi.constants import AccountStatus
 from gemini_webapi.utils import clear_cookies_cache
 from pydantic import SecretStr
 
 from gemini_tg_bot.config import Settings
 
-from .errors import ErrorKind, classify_error
+from .errors import AccountStatusError, ErrorKind, classify_error
 
 
 BLOCKED_ESCALATION_THRESHOLD = 3
@@ -28,6 +29,44 @@ BLOCKED_COOLDOWN_SEC = 900.0
 AUTH_DEGRADED_NOTIFICATION = "認證失效，請 /setcookie"
 
 LOGGER = logging.getLogger(__name__)
+
+_ACCOUNT_RESTRICTION_STATUSES = frozenset(
+    {
+        AccountStatus.ACCOUNT_REJECTED,
+        AccountStatus.ACCOUNT_REJECTED_BY_GUARDIAN,
+        AccountStatus.ACCOUNT_UNTRUSTED,
+        AccountStatus.GUARDIAN_APPROVAL_REQUIRED,
+    }
+)
+_TOS_STATUSES = frozenset(
+    {
+        AccountStatus.TOS_PENDING,
+        AccountStatus.TOS_OUT_OF_DATE,
+    }
+)
+
+
+def account_status_guidance(status: AccountStatus) -> str:
+    """Return secret-free remediation guidance for an unavailable account."""
+
+    details = f"{status.name}: {status.description}"
+    if status is AccountStatus.UNAUTHENTICATED:
+        return f"{AUTH_DEGRADED_NOTIFICATION}\n{details}"
+    if status is AccountStatus.LOCATION_REJECTED:
+        return (
+            f"{details}\n可能是 Cookie 取得 IP 與服務使用 IP 不符；"
+            "請依 README 的 SSH SOCKS 流程重新取得 Cookie。"
+        )
+    if status in _ACCOUNT_RESTRICTION_STATUSES:
+        return (
+            f"{details}\n這可能是帳號層級限制，換 Cookie 無法解除此限制；"
+            "請檢查 Google 帳號狀態。"
+        )
+    if status in _TOS_STATUSES:
+        return f"{details}\n請至 Gemini 網頁版接受最新服務條款後再試。"
+    if status is AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE:
+        return f"{details}\nGemini 暫時受限，服務會在冷卻後自動重試。"
+    return details
 
 
 class ServiceState(StrEnum):
@@ -63,6 +102,7 @@ class ServiceHealth:
     active_requests: int
     last_error_kind: ErrorKind | None
     last_error_type: str | None
+    account_status: AccountStatus | None
 
 
 class ServiceUnavailableError(RuntimeError):
@@ -127,6 +167,8 @@ class GeminiService:
         self._secure_1psidts = settings.gemini_secure_1psidts
 
         self._client: GeminiClient | None = None
+        self._client_initialized = False
+        self._account_status: AccountStatus | None = None
         self._state = ServiceState.NEW
         self._degraded_reason: DegradedReason | None = None
         self._blocked_until: float | None = None
@@ -175,6 +217,9 @@ class GeminiService:
     def health(self) -> ServiceHealth:
         """Return a secret-free point-in-time health snapshot."""
 
+        account_status = self._account_status
+        if self._client_initialized and self._client is not None:
+            account_status = self._client_account_status(self._client)
         return ServiceHealth(
             state=self._state,
             accepting_requests=self.accepting_requests,
@@ -184,13 +229,14 @@ class GeminiService:
             active_requests=self._active_requests,
             last_error_kind=self._last_error_kind,
             last_error_type=self._last_error_type,
+            account_status=account_status,
         )
 
     async def init(self) -> None:
         """Construct and initialize the sole Gemini client."""
 
         failure: BaseException | None = None
-        should_notify = False
+        notification: str | None = None
         async with self._lifecycle:
             if self._state is ServiceState.HEALTHY:
                 return
@@ -204,14 +250,14 @@ class GeminiService:
                 await self._start_new_client_locked()
             except BaseException as error:
                 failure = error
-                should_notify = self._record_lifecycle_failure_locked(error)
+                notification = self._record_lifecycle_failure_locked(error)
             else:
                 self._set_healthy_locked()
             self._lifecycle.notify_all()
 
         if failure is not None:
-            if should_notify:
-                await self._notify_admin(AUTH_DEGRADED_NOTIFICATION)
+            if notification is not None:
+                await self._notify_admin(notification)
             raise failure.with_traceback(failure.__traceback__)
 
     async def reinit(
@@ -233,7 +279,7 @@ class GeminiService:
         )
 
         failure: BaseException | None = None
-        should_notify = False
+        notification: str | None = None
         async with self._lifecycle:
             if self._state in {ServiceState.CLOSED, ServiceState.CLOSING}:
                 raise RuntimeError("a closed GeminiService cannot be reinitialized")
@@ -256,6 +302,8 @@ class GeminiService:
                             )
                     await self._client.close()
                     self._client = None
+                    self._client_initialized = False
+                    self._account_status = None
 
                 if new_credentials is not None:
                     self._secure_1psid, self._secure_1psidts = new_credentials
@@ -263,20 +311,20 @@ class GeminiService:
                 await self._start_new_client_locked()
             except BaseException as error:
                 failure = error
-                should_notify = self._record_lifecycle_failure_locked(error)
+                notification = self._record_lifecycle_failure_locked(error)
             else:
                 self._set_healthy_locked()
             self._lifecycle.notify_all()
 
         if failure is not None:
-            if should_notify:
-                await self._notify_admin(AUTH_DEGRADED_NOTIFICATION)
+            if notification is not None:
+                await self._notify_admin(notification)
             raise failure.with_traceback(failure.__traceback__)
 
     async def close(self) -> None:
         """Stop accepting work and close the owned client."""
 
-        should_notify = False
+        notification: str | None = None
         try:
             async with self._lifecycle:
                 if self._state is ServiceState.CLOSED:
@@ -289,6 +337,8 @@ class GeminiService:
                 if self._client is not None:
                     await self._client.close()
                     self._client = None
+                    self._client_initialized = False
+                    self._account_status = None
 
                 self._state = ServiceState.CLOSED
                 self._degraded_reason = None
@@ -297,14 +347,15 @@ class GeminiService:
                 if type(self)._instance is self:
                     type(self)._instance = None
         except BaseException as error:
-            should_notify = await self._record_lifecycle_failure(error)
-            if should_notify:
-                await self._notify_admin(AUTH_DEGRADED_NOTIFICATION)
+            notification = await self._record_lifecycle_failure(error)
+            if notification is not None:
+                await self._notify_admin(notification)
             raise
 
     async def execute(self, operation: ClientOperation[ResultT]) -> ResultT:
         """Run one client operation and update health from its outcome."""
 
+        await self._refresh_temporarily_unavailable_client()
         client, is_probe = await self._acquire_request()
         try:
             pending_result = operation(client)
@@ -367,6 +418,8 @@ class GeminiService:
     async def _start_new_client_locked(self) -> None:
         client = self._create_client()
         self._client = client
+        self._client_initialized = False
+        self._account_status = None
         try:
             await client.init(auto_refresh=True)
         except BaseException:
@@ -381,23 +434,42 @@ class GeminiService:
                     self._client = None
             raise
 
-    async def _record_lifecycle_failure(self, error: BaseException) -> bool:
-        async with self._lifecycle:
-            should_notify = self._record_lifecycle_failure_locked(error)
-            self._lifecycle.notify_all()
-            return should_notify
+        self._client_initialized = True
+        self._account_status = self._client_account_status(client)
+        if self._account_status is not AccountStatus.AVAILABLE:
+            raise AccountStatusError(self._account_status)
 
-    def _record_lifecycle_failure_locked(self, error: BaseException) -> bool:
+    async def _record_lifecycle_failure(
+        self,
+        error: BaseException,
+    ) -> str | None:
+        async with self._lifecycle:
+            notification = self._record_lifecycle_failure_locked(error)
+            self._lifecycle.notify_all()
+            return notification
+
+    def _record_lifecycle_failure_locked(
+        self,
+        error: BaseException,
+    ) -> str | None:
         kind = classify_error(error)
         self._last_error_kind = kind
         self._last_error_type = type(error).__name__
         self._consecutive_blocked_errors = 0
         self._blocked_until = None
+        if isinstance(error, AccountStatusError):
+            if error.status is AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE:
+                self._set_blocked_degraded_locked()
+            else:
+                self._set_auth_degraded_locked(error)
+            return account_status_guidance(error.status)
         if kind is ErrorKind.AUTH:
-            return self._set_auth_degraded_locked(error)
+            if self._set_auth_degraded_locked(error):
+                return AUTH_DEGRADED_NOTIFICATION
+            return None
         self._state = ServiceState.FAILED
         self._degraded_reason = None
-        return False
+        return None
 
     async def _acquire_request(self) -> tuple[GeminiClient, bool]:
         async with self._lifecycle:
@@ -418,6 +490,44 @@ class GeminiService:
             self._active_requests += 1
             return self._client, is_probe
 
+    async def _refresh_temporarily_unavailable_client(self) -> None:
+        should_reinit = False
+        async with self._lifecycle:
+            if not (
+                self._state is ServiceState.DEGRADED
+                and self._degraded_reason is DegradedReason.BLOCKED
+                and self._blocked_until is not None
+                and self._time_source() >= self._blocked_until
+                and self._account_status
+                is AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE
+            ):
+                return
+
+            if (
+                self._client_initialized
+                and self._client is not None
+                and self._client_account_status(self._client)
+                is AccountStatus.AVAILABLE
+            ):
+                self._account_status = AccountStatus.AVAILABLE
+                return
+
+            self._state = ServiceState.HALF_OPEN
+            self._lifecycle.notify_all()
+            should_reinit = True
+
+        if should_reinit:
+            try:
+                # Re-check the temporary account status with the same
+                # credentials.  Credential-less reinit intentionally retains
+                # D6 cache behavior and does not clear the cookies cache.
+                await self.reinit()
+            except AccountStatusError as error:
+                raise ServiceUnavailableError(
+                    self._state,
+                    self._degraded_reason,
+                ) from error
+
     async def _finish_successful_request(self, is_probe: bool) -> None:
         async with self._lifecycle:
             self._active_requests -= 1
@@ -425,7 +535,14 @@ class GeminiService:
             self._last_error_kind = None
             self._last_error_type = None
             if is_probe and self._state is ServiceState.HALF_OPEN:
-                self._set_healthy_locked()
+                if self._client_initialized and self._client is not None:
+                    self._account_status = self._client_account_status(
+                        self._client
+                    )
+                if self._account_status is AccountStatus.AVAILABLE:
+                    self._set_healthy_locked()
+                else:
+                    self._set_blocked_degraded_locked()
             self._lifecycle.notify_all()
 
     async def _finish_failed_request(
@@ -469,6 +586,13 @@ class GeminiService:
             self._lifecycle.notify_all()
 
     def _set_healthy_locked(self) -> None:
+        if (
+            not self._client_initialized
+            or self._account_status is not AccountStatus.AVAILABLE
+        ):
+            raise RuntimeError(
+                "Gemini client must be initialized and available before becoming healthy"
+            )
         self._state = ServiceState.HEALTHY
         self._degraded_reason = None
         self._blocked_until = None
@@ -502,6 +626,15 @@ class GeminiService:
             f"Gemini 暫時封鎖，將於約 {minutes} 分鐘後自動重試，"
             "無需人工介入"
         )
+
+    @staticmethod
+    def _client_account_status(client: GeminiClient) -> AccountStatus:
+        status = client.account_status
+        if isinstance(status, AccountStatus):
+            return status
+        # The pinned upstream contract always exposes AccountStatus.  This
+        # fallback keeps older lightweight lifecycle test doubles compatible.
+        return AccountStatus.AVAILABLE
 
     async def _notify_admin(self, message: str) -> None:
         if self._admin_notifier is None:

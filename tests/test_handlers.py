@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import inspect
 import os
@@ -10,12 +11,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from gemini_webapi import ModelOutput
+from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
 from telegram.constants import MediaGroupLimit, ParseMode
 from telegram.error import RetryAfter
 
 from gemini_tg_bot.__main__ import _start_application
-from gemini_tg_bot.gemini.service import ServiceState
+from gemini_tg_bot.gemini.service import DegradedReason, ServiceState
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 from gemini_tg_bot.telegram.handlers import (
@@ -31,10 +34,7 @@ from gemini_tg_bot.telegram.handlers import (
 )
 from gemini_tg_bot.telegram.media import MediaHandler
 from gemini_tg_bot.telegram.sending import MAX_FLOOD_WAIT_SECONDS, SERVICE_BUSY
-from gemini_tg_bot.telegram.streaming import (
-    EMPTY_RESPONSE_TEXT,
-    PLACEHOLDER_TEXT,
-)
+from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
 
 try:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry as _RegistrySpec
@@ -130,6 +130,7 @@ def _update(
     placeholder = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
     message = SimpleNamespace(
         text=text,
+        delete=AsyncMock(),
         reply_text=AsyncMock(return_value=placeholder),
         reply_photo=AsyncMock(),
         reply_document=AsyncMock(),
@@ -172,7 +173,11 @@ def _client_service(client: Any) -> MagicMock:
     service.execute = AsyncMock(side_effect=execute)
     service.health = SimpleNamespace(
         state=ServiceState.HEALTHY,
+        accepting_requests=True,
         degraded_reason=None,
+        account_status=AccountStatus.AVAILABLE,
+        last_error_kind=None,
+        last_error_type=None,
     )
     return service
 
@@ -398,6 +403,17 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory(client, media_handler=media_handler)
     update = _update(text="/img 台北 101 的水彩畫")
+    delivery_order: list[str] = []
+
+    async def delete_placeholder() -> None:
+        delivery_order.append("delete-placeholder")
+
+    async def send_images(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        delivery_order.append("send-images")
+
+    update.effective_message.placeholder.delete.side_effect = delete_placeholder
+    media_handler.send_output_images.side_effect = send_images
 
     await handlers.img(
         update,
@@ -415,6 +431,9 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
         output,
         caption=None,
     )
+    update.effective_message.placeholder.edit_text.assert_not_awaited()
+    update.effective_message.placeholder.delete.assert_awaited_once_with()
+    assert delivery_order == ["delete-placeholder", "send-images"]
     registry.persist.assert_awaited_once_with(202, session)
 
 
@@ -428,6 +447,44 @@ async def test_img_without_prompt_replies_with_usage(handlers_factory) -> None:
     update.effective_message.reply_text.assert_awaited_once_with(IMAGE_USAGE)
     service.execute.assert_not_awaited()
     media_handler.send_output_images.assert_not_awaited()
+
+
+async def test_real_generated_image_fixture_deletes_placeholder_before_media(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "image-generated.json"
+    output = ModelOutput.model_validate_json(fixture_path.read_text(encoding="utf-8"))
+    media_handler = MagicMock(spec=MediaHandler)
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(
+        _StreamingClient([output]),
+        media_handler=media_handler,
+    )
+    update = _update(text="/img cat")
+    delivery_order: list[str] = []
+
+    async def delete_placeholder() -> None:
+        delivery_order.append("delete-placeholder")
+
+    async def send_images(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        delivery_order.append("send-images")
+
+    update.effective_message.placeholder.delete.side_effect = delete_placeholder
+    media_handler.send_output_images.side_effect = send_images
+
+    await handlers.img(update, SimpleNamespace(args=["cat"]))
+
+    assert output.text == "\n\n_543\n\n"
+    assert len(output.images) == 1
+    update.effective_message.placeholder.edit_text.assert_not_awaited()
+    assert delivery_order == ["delete-placeholder", "send-images"]
+    media_handler.send_output_images.assert_awaited_once_with(
+        update.effective_message,
+        output,
+        caption=None,
+    )
 
 
 async def test_model_lists_dynamic_available_models_and_skips_oversized_data(
@@ -649,14 +706,71 @@ async def test_text_reports_queue_acquire_timeout(
     assert saved.error_kind == "queue_timeout"
 
 
+async def test_degraded_text_request_fails_before_waiting_for_queue(
+    handlers_factory,
+) -> None:
+    queue = RequestQueue(
+        max_concurrency=1,
+        user_rate_limit_per_min=10,
+        acquire_timeout=30.0,
+    )
+    handlers, service = handlers_factory(request_queue=queue)
+    service.health = SimpleNamespace(
+        state=ServiceState.DEGRADED,
+        accepting_requests=False,
+        degraded_reason=DegradedReason.AUTH,
+        account_status=AccountStatus.UNAUTHENTICATED,
+    )
+    update = _update(text="question")
+
+    async with queue.request(user_id=999):
+        await asyncio.wait_for(
+            handlers.text_message(update, SimpleNamespace()),
+            timeout=0.1,
+        )
+
+    service.execute.assert_not_awaited()
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "Gemini 服務目前處於認證失效狀態，暫時無法接受請求。"
+    )
+
+
+async def test_setcookie_rejects_non_available_account_status(
+    handlers_factory,
+) -> None:
+    handlers, service = handlers_factory()
+    service.reinit = AsyncMock()
+    service.health = SimpleNamespace(
+        state=ServiceState.DEGRADED,
+        accepting_requests=False,
+        degraded_reason=DegradedReason.AUTH,
+        account_status=AccountStatus.UNAUTHENTICATED,
+    )
+    handlers.bind_auth(SimpleNamespace(is_admin=lambda user_id: user_id == 101))
+    handlers._awaiting_cookie_users.add(101)
+    update = _update(
+        text=(
+            "__Secure-1PSID=FAKE_REPLACEMENT_1PSID_FOR_TEST\n"
+            "__Secure-1PSIDTS=FAKE_REPLACEMENT_1PSIDTS_FOR_TEST"
+        )
+    )
+
+    await handlers.setcookie_value(update, SimpleNamespace())
+
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "Cookie 更新失敗" in reply
+    assert AccountStatus.UNAUTHENTICATED.description in reply
+    assert "Cookie 已更新" not in reply
+
+
 @pytest.mark.parametrize(
     ("artifact_text", "expected_text", "parse_mode"),
     [
-        ("_551", EMPTY_RESPONSE_TEXT, None),
-        ("_0", EMPTY_RESPONSE_TEXT, None),
+        ("_551", None, None),
+        ("_0", None, None),
         (
             "http://googleusercontent.com/image_generation_content/0_551",
-            EMPTY_RESPONSE_TEXT,
+            None,
             None,
         ),
         (
@@ -670,7 +784,7 @@ async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
     handlers_factory,
     registry: AsyncMock,
     artifact_text: str,
-    expected_text: str,
+    expected_text: str | None,
     parse_mode: str | None,
 ) -> None:
     image = SimpleNamespace(
@@ -693,17 +807,29 @@ async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory(client)
     update = _update(text="generate an image")
+    delivery_order: list[str] = []
+
+    async def delete_placeholder() -> None:
+        delivery_order.append("delete-placeholder")
+
+    async def send_photo(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        delivery_order.append("send-photo")
+
+    update.effective_message.placeholder.delete.side_effect = delete_placeholder
+    update.effective_message.reply_photo.side_effect = send_photo
 
     await handlers.text_message(update, SimpleNamespace())
 
     update.effective_message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
-    update.effective_message.placeholder.edit_text.assert_awaited_once_with(
-        expected_text,
-        parse_mode=parse_mode,
-    )
-    expected_caption = (
-        expected_text if expected_text != EMPTY_RESPONSE_TEXT else None
-    )
+    if expected_text is None:
+        update.effective_message.placeholder.edit_text.assert_not_awaited()
+    else:
+        update.effective_message.placeholder.edit_text.assert_awaited_once_with(
+            expected_text,
+            parse_mode=parse_mode,
+        )
+    expected_caption = expected_text
     expected_photo_kwargs = {"caption": expected_caption}
     if expected_caption is not None:
         expected_photo_kwargs["parse_mode"] = ParseMode.HTML
@@ -712,6 +838,8 @@ async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
         **expected_photo_kwargs,
     )
     update.effective_message.placeholder.delete.assert_awaited_once_with()
+    if expected_text is None:
+        assert delivery_order == ["delete-placeholder", "send-photo"]
     assert "_551" not in str(
         update.effective_message.placeholder.edit_text.await_args_list
     )
@@ -843,6 +971,10 @@ async def test_status_reports_required_fields_and_does_not_expose_cookie(
     assert "佇列深度：0" in text
     assert "今日用量：1" in text
     assert "本月累計 egress 估算值：2.0 KiB" in text
+    assert (
+        f"Account status：AVAILABLE — {AccountStatus.AVAILABLE.description}"
+        in text
+    )
     assert "FAKE_1PSID_FOR_TEST" not in text
 
 
@@ -857,6 +989,24 @@ async def test_status_reports_cookie_not_refreshed_when_cache_is_missing(
     assert "Cookie 最後刷新時間：尚未刷新" in (
         update.effective_message.reply_text.await_args.args[0]
     )
+
+
+async def test_health_reports_account_status_name_and_description(
+    handlers_factory,
+) -> None:
+    handlers, service = handlers_factory()
+    service.health.account_status = AccountStatus.LOCATION_REJECTED
+    handlers.bind_auth(SimpleNamespace(is_admin=lambda user_id: user_id == 101))
+    update = _update(text="/health")
+
+    await handlers.health(update, SimpleNamespace())
+
+    report = update.effective_message.reply_text.await_args.args[0]
+    assert (
+        "Account status：LOCATION_REJECTED — "
+        f"{AccountStatus.LOCATION_REJECTED.description}"
+    ) in report
+    assert "FAKE_1PSID_FOR_TEST" not in report
 
 
 def test_egress_meter_resets_on_calendar_month() -> None:

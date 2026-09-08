@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -22,8 +23,13 @@ from telegram.ext import (
     filters,
 )
 
-from gemini_tg_bot.gemini.errors import classify_error
-from gemini_tg_bot.gemini.service import GeminiService, ServiceUnavailableError
+from gemini_tg_bot.gemini.errors import AccountStatusError, classify_error
+from gemini_tg_bot.gemini.service import (
+    DegradedReason,
+    GeminiService,
+    ServiceUnavailableError,
+    account_status_guidance,
+)
 from gemini_tg_bot.queue import QueueAcquireTimeout, RateLimitExceeded, RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 
@@ -93,6 +99,7 @@ IMAGE_GENERATION_PREFIX = (
     "Generate an original AI image based on the following request. "
     "Do not search for or return existing web images:"
 )
+_ACCOUNT_STATUS_UNSET = object()
 
 
 class _StreamingMessageProxy:
@@ -223,6 +230,7 @@ class TelegramHandlers:
         user_id, _, message = identity
 
         try:
+            self._ensure_service_accepting_requests()
             async with self._request_queue.request(user_id):
                 models = await self._service.execute(
                     lambda client: client.list_models()
@@ -233,8 +241,8 @@ class TelegramHandlers:
         except QueueAcquireTimeout:
             await send_text_or_busy(message, SERVICE_BUSY)
             return
-        except ServiceUnavailableError:
-            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
+        except ServiceUnavailableError as error:
+            await send_text_or_busy(message, _service_unavailable_message(error))
             return
         except Exception as error:
             _log_handler_error("model list", error)
@@ -281,6 +289,7 @@ class TelegramHandlers:
         user_id, _, message = identity
 
         try:
+            self._ensure_service_accepting_requests()
             async with self._request_queue.request(user_id):
                 gem_jar = await self._service.execute(
                     lambda client: client.fetch_gems(include_hidden=False)
@@ -291,8 +300,8 @@ class TelegramHandlers:
         except QueueAcquireTimeout:
             await send_text_or_busy(message, SERVICE_BUSY)
             return
-        except ServiceUnavailableError:
-            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
+        except ServiceUnavailableError as error:
+            await send_text_or_busy(message, _service_unavailable_message(error))
             return
         except Exception as error:
             _log_handler_error("gem list", error)
@@ -367,6 +376,8 @@ class TelegramHandlers:
                     f"Session CID：{state.cid or '尚未建立'}",
                     f"Temporary mode：{temporary}",
                     f"服務狀態：{health.state.value}{reason}",
+                    "Account status："
+                    f"{_account_status_label(getattr(health, 'account_status', None))}",
                     f"Cookie 最後刷新時間：{refresh_label}",
                     f"佇列深度：{self._request_queue.queue_depth}",
                     f"今日用量：{today_usage}",
@@ -520,12 +531,38 @@ class TelegramHandlers:
                 secure_1psid=secure_1psid,
                 secure_1psidts=secure_1psidts,
             )
+        except AccountStatusError as error:
+            _log_handler_error("Gemini client hot restart", error)
+            await send_text_or_busy(
+                message,
+                "Cookie 更新失敗，Gemini 服務尚未恢復。\n"
+                f"{account_status_guidance(error.status)}",
+            )
+            return
         except Exception as error:
             _log_handler_error("Gemini client hot restart", error)
             await send_text_or_busy(
                 message,
                 "Cookie 更新失敗，Gemini 服務尚未恢復。"
                 "請重新執行 /setcookie。"
+            )
+            return
+
+        account_status = getattr(
+            self._service.health,
+            "account_status",
+            _ACCOUNT_STATUS_UNSET,
+        )
+        if account_status is not _ACCOUNT_STATUS_UNSET and (
+            account_status is not AccountStatus.AVAILABLE
+        ):
+            if isinstance(account_status, AccountStatus):
+                guidance = account_status_guidance(account_status)
+            else:
+                guidance = "Gemini 帳號狀態無法確認，請稍後重試。"
+            await send_text_or_busy(
+                message,
+                f"Cookie 更新失敗，Gemini 服務尚未恢復。\n{guidance}",
             )
             return
 
@@ -604,6 +641,8 @@ class TelegramHandlers:
             "\n".join(
                 (
                     f"Client 狀態：{health.state.value}",
+                    "Account status："
+                    f"{_account_status_label(getattr(health, 'account_status', None))}",
                     f"接受請求：{accepting}",
                     f"最近錯誤：{last_error}",
                     f"DB 狀態：{database_state}",
@@ -683,6 +722,7 @@ class TelegramHandlers:
         error_kind: str | None = None
         stream_message = _StreamingMessageProxy(message)
         try:
+            self._ensure_service_accepting_requests()
             async with self._request_queue.request(user_id) as permit:
                 session = await self._sessions.get_or_create(chat_id)
                 streamed = await self._service.execute(
@@ -714,9 +754,9 @@ class TelegramHandlers:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
             await send_text_or_busy(message, SERVICE_BUSY)
-        except ServiceUnavailableError:
+        except ServiceUnavailableError as error:
             error_kind = "unavailable"
-            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
+            await send_text_or_busy(message, _service_unavailable_message(error))
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("text message", error)
@@ -764,6 +804,7 @@ class TelegramHandlers:
         error_kind: str | None = None
 
         try:
+            self._ensure_service_accepting_requests()
             async with self._media.prepare_upload(message) as upload:
                 async with self._request_queue.request(user_id):
                     session = await self._sessions.get_or_create(chat_id)
@@ -792,9 +833,9 @@ class TelegramHandlers:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
             await send_text_or_busy(message, SERVICE_BUSY)
-        except ServiceUnavailableError:
+        except ServiceUnavailableError as error:
             error_kind = "unavailable"
-            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
+            await send_text_or_busy(message, _service_unavailable_message(error))
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("media message", error)
@@ -829,6 +870,10 @@ class TelegramHandlers:
         images = getattr(output, "images", ()) if output is not None else ()
         rendered_chunks = render_markdown_chunks(markdown)
         caption = _caption_from_chunks(rendered_chunks) if images else None
+        if images and not rendered_chunks:
+            await _delete_placeholder(placeholder)
+            await self._reply_output_images(message, output, caption=None)
+            return
         await self._reply_output_images(message, output, caption=caption)
         if images and (caption is not None or not rendered_chunks):
             await _delete_placeholder(placeholder)
@@ -887,6 +932,7 @@ class TelegramHandlers:
             return client.resolve_model(model_name)
 
         try:
+            self._ensure_service_accepting_requests()
             async with self._request_queue.request(user_id):
                 selected = await self._service.execute(resolve)
         except RateLimitExceeded as error:
@@ -895,8 +941,11 @@ class TelegramHandlers:
         except QueueAcquireTimeout:
             await edit_message_text_or_busy(query, SERVICE_BUSY)
             return
-        except ServiceUnavailableError:
-            await edit_message_text_or_busy(query, SERVICE_UNAVAILABLE)
+        except ServiceUnavailableError as error:
+            await edit_message_text_or_busy(
+                query,
+                _service_unavailable_message(error),
+            )
             return
         except Exception as error:
             _log_handler_error("model selection", error)
@@ -931,6 +980,7 @@ class TelegramHandlers:
             return
 
         try:
+            self._ensure_service_accepting_requests()
             async with self._request_queue.request(user_id):
                 gem_jar = await self._service.execute(
                     lambda client: client.fetch_gems(include_hidden=False)
@@ -941,8 +991,11 @@ class TelegramHandlers:
         except QueueAcquireTimeout:
             await edit_message_text_or_busy(query, SERVICE_BUSY)
             return
-        except ServiceUnavailableError:
-            await edit_message_text_or_busy(query, SERVICE_UNAVAILABLE)
+        except ServiceUnavailableError as error:
+            await edit_message_text_or_busy(
+                query,
+                _service_unavailable_message(error),
+            )
             return
         except Exception as error:
             _log_handler_error("gem selection", error)
@@ -969,6 +1022,14 @@ class TelegramHandlers:
         except OSError:
             return None
         return datetime.fromtimestamp(modified_at, tz=UTC)
+
+    def _ensure_service_accepting_requests(self) -> None:
+        health = self._service.health
+        if getattr(health, "accepting_requests", True) is False:
+            raise ServiceUnavailableError(
+                health.state,
+                getattr(health, "degraded_reason", None),
+            )
 
     async def _today_usage(self, chat_id: int) -> int:
         if self._usage_dao is None:
@@ -1190,6 +1251,20 @@ async def _delete_placeholder(placeholder: Any | None) -> None:
         await delete_message(placeholder)
     except Exception as error:
         _log_handler_error("stream placeholder deletion", error)
+
+
+def _account_status_label(status: Any) -> str:
+    if isinstance(status, AccountStatus):
+        return f"{status.name} — {status.description}"
+    return "尚未完成初始化"
+
+
+def _service_unavailable_message(error: ServiceUnavailableError) -> str:
+    if error.degraded_reason is DegradedReason.AUTH:
+        return "Gemini 服務目前處於認證失效狀態，暫時無法接受請求。"
+    if error.degraded_reason is DegradedReason.BLOCKED:
+        return "Gemini 服務目前處於暫時受限狀態，將在冷卻後自動重試。"
+    return SERVICE_UNAVAILABLE
 
 
 def _rate_limit_message(error: RateLimitExceeded) -> str:

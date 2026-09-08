@@ -26,7 +26,7 @@ from gemini_tg_bot.telegram.media import (
     UploadSizeUnknownError,
     UploadTooLargeError,
 )
-from gemini_tg_bot.telegram.streaming import EMPTY_RESPONSE_TEXT, PLACEHOLDER_TEXT
+from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
 from scripts.dump_response import serialize_output
 
 
@@ -625,16 +625,25 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
         cookie_path=Path("unused"),
         secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
     )
+    delivery_order: list[str] = []
+
+    async def delete_placeholder() -> None:
+        delivery_order.append("delete-placeholder")
+
+    async def send_photo(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        delivery_order.append("send-photo")
+
+    placeholder.delete.side_effect = delete_placeholder
+    message.reply_photo.side_effect = send_photo
 
     with caplog.at_level(logging.DEBUG, logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(update, SimpleNamespace())
 
     message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
-    placeholder.edit_text.assert_awaited_once_with(
-        EMPTY_RESPONSE_TEXT,
-        parse_mode=None,
-    )
+    placeholder.edit_text.assert_not_awaited()
     placeholder.delete.assert_awaited_once_with()
+    assert delivery_order == ["delete-placeholder", "send-photo"]
     assert "_551" not in str(placeholder.edit_text.await_args_list)
     message.reply_photo.assert_awaited_once_with(image.url, caption=None)
     assert "text='_551' image_count=1" in caplog.text

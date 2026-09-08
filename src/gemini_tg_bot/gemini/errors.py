@@ -6,6 +6,7 @@ from enum import StrEnum
 from curl_cffi.curl import CurlError
 from curl_cffi.requests import exceptions as cc_exc
 from gemini_webapi import exceptions as gw_exc
+from gemini_webapi.constants import AccountStatus
 
 
 class ErrorKind(StrEnum):
@@ -15,6 +16,14 @@ class ErrorKind(StrEnum):
     RATE_LIMIT = "rate_limit"
     TRANSIENT = "transient"
     FATAL = "fatal"
+
+
+class AccountStatusError(RuntimeError):
+    """Report a non-available status observed after client initialization."""
+
+    def __init__(self, status: AccountStatus) -> None:
+        self.status = status
+        super().__init__(f"{status.name}: {status.description}")
 
 
 _AUTH_ERRORS = (gw_exc.AuthError,)
@@ -61,6 +70,10 @@ def classify_error(error: BaseException) -> ErrorKind:
     unclassified programming or configuration error.
     """
 
+    if isinstance(error, AccountStatusError):
+        if error.status is AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE:
+            return ErrorKind.RATE_LIMIT
+        return ErrorKind.AUTH
     if isinstance(error, _AUTH_ERRORS):
         return ErrorKind.AUTH
     if isinstance(error, _RATE_LIMIT_ERRORS):

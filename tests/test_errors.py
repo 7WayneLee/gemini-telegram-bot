@@ -7,8 +7,13 @@ import pytest
 from curl_cffi.curl import CurlError
 from curl_cffi.requests import exceptions as cc_exc
 from gemini_webapi import exceptions as gw_exc
+from gemini_webapi.constants import AccountStatus
 
-from gemini_tg_bot.gemini.errors import ErrorKind, classify_error
+from gemini_tg_bot.gemini.errors import (
+    AccountStatusError,
+    ErrorKind,
+    classify_error,
+)
 
 
 def _exception_instance(exception_type: type[BaseException]) -> BaseException:
@@ -71,6 +76,31 @@ def fatal_error(request: pytest.FixtureRequest) -> Iterator[BaseException]:
 
 def test_classifies_auth_errors(auth_error: BaseException) -> None:
     assert classify_error(auth_error) is ErrorKind.AUTH
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        AccountStatus.UNAUTHENTICATED,
+        AccountStatus.LOCATION_REJECTED,
+        AccountStatus.ACCOUNT_REJECTED,
+        AccountStatus.ACCOUNT_UNTRUSTED,
+        AccountStatus.TOS_PENDING,
+        AccountStatus.TOS_OUT_OF_DATE,
+        AccountStatus.ACCOUNT_REJECTED_BY_GUARDIAN,
+        AccountStatus.GUARDIAN_APPROVAL_REQUIRED,
+    ],
+)
+def test_classifies_non_available_account_statuses_as_auth(
+    status: AccountStatus,
+) -> None:
+    assert classify_error(AccountStatusError(status)) is ErrorKind.AUTH
+
+
+def test_classifies_temporarily_unavailable_account_status_as_rate_limit() -> None:
+    error = AccountStatusError(AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE)
+
+    assert classify_error(error) is ErrorKind.RATE_LIMIT
 
 
 def test_classifies_rate_limit_errors(rate_limit_error: BaseException) -> None:
