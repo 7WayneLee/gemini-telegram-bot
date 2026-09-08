@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -34,6 +34,7 @@ from .sending import (
     FloodControlExceeded,
     SERVICE_BUSY,
     answer_callback,
+    call_telegram,
     delete_message,
     edit_message_text_or_busy,
     send_text_or_busy,
@@ -52,16 +53,26 @@ CALLBACK_DATA_LIMIT = 64
 MODEL_CALLBACK_PREFIX = "model:"
 GEM_CALLBACK_PREFIX = "gem:"
 
-HELP_TEXT = """可用指令：
-/new — 開始新的對話
-/model — 選擇 Gemini 模型
-/gem — 選擇 Gem
-/temp — 切換 temporary mode
-/status — 查看目前狀態
-/research <topic> — 提交 Deep Research 任務
-/research_status — 查看 Deep Research 任務狀態
+PUBLIC_BOT_COMMANDS = (
+    BotCommand("start", "顯示使用說明"),
+    BotCommand("help", "顯示使用說明"),
+    BotCommand("new", "開始新的對話"),
+    BotCommand("model", "選擇 Gemini 模型"),
+    BotCommand("gem", "選擇 Gem"),
+    BotCommand("temp", "切換暫時對話模式"),
+    BotCommand("research", "提交 Deep Research 任務"),
+    BotCommand("research_status", "查看 Deep Research 任務狀態"),
+    BotCommand("status", "查看目前狀態"),
+)
 
-直接傳送文字即可延續目前對話。"""
+HELP_TEXT = "\n".join(
+    (
+        "可用指令：",
+        *(f"/{item.command} — {item.description}" for item in PUBLIC_BOT_COMMANDS),
+        "",
+        "直接傳送文字即可延續目前對話。",
+    )
+)
 
 MODEL_LIST_UNAVAILABLE = "模型清單暫時無法取得，請稍後再試。"
 GEM_LIST_UNAVAILABLE = "Gem 清單暫時無法取得，請稍後再試。"
@@ -1033,6 +1044,20 @@ def register_handlers(
         (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.ALL
     )
     application.add_handler(MessageHandler(user_messages, handlers.user_message))
+
+
+async def register_command_menu(
+    application: Application[Any, Any, Any, Any, Any, Any],
+) -> None:
+    """Publish user commands without making menu availability startup-critical."""
+
+    try:
+        await call_telegram(application.bot.set_my_commands, PUBLIC_BOT_COMMANDS)
+    except Exception as error:
+        LOGGER.warning(
+            "Unable to register Telegram command menu (%s)",
+            type(error).__name__,
+        )
 
 
 def _message_identity(update: Update) -> tuple[int, int, Any] | None:

@@ -14,6 +14,7 @@ from pydantic import SecretStr
 from telegram.constants import MediaGroupLimit, ParseMode
 from telegram.error import RetryAfter
 
+from gemini_tg_bot.__main__ import _start_application
 from gemini_tg_bot.gemini.service import ServiceState
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
@@ -21,6 +22,7 @@ from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
     GEM_LIST_UNAVAILABLE,
     MODEL_LIST_UNAVAILABLE,
+    PUBLIC_BOT_COMMANDS,
     EgressMeter,
     TelegramHandlers,
     register_handlers,
@@ -233,9 +235,9 @@ async def test_help_and_new_commands(
     update = _update()
 
     await handlers.start(update, SimpleNamespace())
-    assert "/model" in update.effective_message.reply_text.await_args.args[0]
-    assert "/status" in update.effective_message.reply_text.await_args.args[0]
-    assert "/research" in update.effective_message.reply_text.await_args.args[0]
+    help_text = update.effective_message.reply_text.await_args.args[0]
+    for item in PUBLIC_BOT_COMMANDS:
+        assert f"/{item.command} — {item.description}" in help_text
 
     await handlers.new(update, SimpleNamespace())
     registry.reset.assert_awaited_once_with(202)
@@ -824,3 +826,45 @@ def test_registration_places_auth_in_first_group(
         for command in getattr(registered.args[0], "commands", ())
     }
     assert {"research", "research_status"} <= registered_commands
+
+
+async def test_startup_registers_public_command_menu() -> None:
+    application = SimpleNamespace(
+        bot=SimpleNamespace(set_my_commands=AsyncMock()),
+        start=AsyncMock(),
+    )
+
+    await _start_application(application)
+
+    application.bot.set_my_commands.assert_awaited_once_with(PUBLIC_BOT_COMMANDS)
+    registered_commands = {item.command for item in PUBLIC_BOT_COMMANDS}
+    assert registered_commands == {
+        "start",
+        "help",
+        "new",
+        "model",
+        "gem",
+        "temp",
+        "research",
+        "research_status",
+        "status",
+    }
+    assert registered_commands.isdisjoint(
+        {"setcookie", "allow", "deny", "health"}
+    )
+    application.start.assert_awaited_once_with()
+
+
+async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
+    application = SimpleNamespace(
+        bot=SimpleNamespace(
+            set_my_commands=AsyncMock(side_effect=RuntimeError("offline"))
+        ),
+        start=AsyncMock(),
+    )
+
+    with caplog.at_level("WARNING"):
+        await _start_application(application)
+
+    application.start.assert_awaited_once_with()
+    assert "Unable to register Telegram command menu (RuntimeError)" in caplog.text

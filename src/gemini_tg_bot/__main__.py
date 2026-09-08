@@ -25,6 +25,7 @@ from gemini_tg_bot.telegram.auth import AuthMiddleware, SQLiteAccessOverrides
 from gemini_tg_bot.telegram.handlers import (
     EgressMeter,
     TelegramHandlers,
+    register_command_menu,
     register_handlers,
 )
 from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
@@ -113,7 +114,7 @@ async def _run_polling(settings: Settings) -> None:
                 await research.restore_running()
                 await updater.start_polling(allowed_updates=Update.ALL_TYPES)
                 try:
-                    await application.start()
+                    await _start_application(application)
                     await stop_event.wait()
                 finally:
                     if updater.running:
@@ -134,6 +135,15 @@ async def _run_polling(settings: Settings) -> None:
                 await service.close()
             finally:
                 await database.close()
+
+
+async def _start_application(
+    application: Application[Any, Any, Any, Any, Any, Any],
+) -> None:
+    """Register the optional command menu, then start update processing."""
+
+    await register_command_menu(application)
+    await application.start()
 
 
 class _DryRunMessage:
