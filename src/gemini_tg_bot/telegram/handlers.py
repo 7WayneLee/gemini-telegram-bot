@@ -60,6 +60,7 @@ PUBLIC_BOT_COMMANDS = (
     BotCommand("model", "選擇 Gemini 模型"),
     BotCommand("gem", "選擇 Gem"),
     BotCommand("temp", "切換暫時對話模式"),
+    BotCommand("img", "生成圖片"),
     BotCommand("research", "提交 Deep Research 任務"),
     BotCommand("research_status", "查看 Deep Research 任務狀態"),
     BotCommand("status", "查看目前狀態"),
@@ -87,6 +88,11 @@ COOKIE_PROMPT = (
 COOKIE_INPUT_INVALID = "Cookie 格式無效，請重新執行 /setcookie。"
 RESEARCH_USAGE = "用法：/research <topic>"
 RESEARCH_UNAVAILABLE = "Deep Research 服務目前無法使用，請稍後再試。"
+IMAGE_USAGE = "用法：/img <prompt>"
+IMAGE_GENERATION_PREFIX = (
+    "Generate an original AI image based on the following request. "
+    "Do not search for or return existing web images:"
+)
 
 
 class _StreamingMessageProxy:
@@ -396,6 +402,23 @@ class TelegramHandlers:
             return
         await send_text_or_busy(message, f"Deep Research 任務已提交：{task_id}")
 
+    async def img(self, update: Update, context: CallbackContext) -> None:
+        """Generate an image through the existing streaming media path."""
+
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        prompt = _command_prompt(context)
+        message = identity[2]
+        if prompt is None:
+            await send_text_or_busy(message, IMAGE_USAGE)
+            return
+
+        await self._stream_prompt(
+            identity,
+            f"{IMAGE_GENERATION_PREFIX}\n\n{prompt}",
+        )
+
     async def research_status(
         self,
         update: Update,
@@ -644,6 +667,16 @@ class TelegramHandlers:
         if not prompt:
             return
 
+        await self._stream_prompt(identity, prompt)
+
+    async def _stream_prompt(
+        self,
+        identity: tuple[int, int, Any],
+        prompt: str,
+    ) -> None:
+        """Stream one prompt and deliver its images through ``MediaHandler``."""
+
+        user_id, chat_id, message = identity
         started = time.monotonic()
         state = await self._sessions.get_state(chat_id)
         ok = False
@@ -1024,6 +1057,7 @@ def register_handlers(
     application.add_handler(CommandHandler("gem", handlers.gem))
     application.add_handler(CommandHandler("temp", handlers.temp))
     application.add_handler(CommandHandler("status", handlers.status))
+    application.add_handler(CommandHandler("img", handlers.img))
     application.add_handler(CommandHandler("research", handlers.research))
     application.add_handler(
         CommandHandler("research_status", handlers.research_status)

@@ -21,12 +21,15 @@ from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
     GEM_LIST_UNAVAILABLE,
+    IMAGE_GENERATION_PREFIX,
+    IMAGE_USAGE,
     MODEL_LIST_UNAVAILABLE,
     PUBLIC_BOT_COMMANDS,
     EgressMeter,
     TelegramHandlers,
     register_handlers,
 )
+from gemini_tg_bot.telegram.media import MediaHandler
 from gemini_tg_bot.telegram.sending import MAX_FLOOD_WAIT_SECONDS, SERVICE_BUSY
 from gemini_tg_bot.telegram.streaming import (
     EMPTY_RESPONSE_TEXT,
@@ -205,6 +208,7 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
         cookie_path: Path | None = None,
         research: AsyncMock | None = None,
         request_queue: RequestQueue | None = None,
+        media_handler: MediaHandler | None = None,
     ) -> tuple[TelegramHandlers, MagicMock]:
         service = _client_service(client or MagicMock())
         handlers = TelegramHandlers(
@@ -220,6 +224,7 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
             cookie_path=cookie_path or tmp_path,
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
             research=research,  # type: ignore[arg-type]
+            media_handler=media_handler,
             now=lambda: NOW,
         )
         return handlers, service
@@ -367,6 +372,62 @@ async def test_research_status_lists_only_manager_results_for_chat(
         "research-task-123：running\n"
         "research-task-456：done"
     )
+
+
+async def test_img_explicitly_requests_generation_and_uses_media_handler(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    image = SimpleNamespace(
+        url="https://example.test/generated.png",
+        title="Generated",
+        alt="Generated image",
+    )
+    output = SimpleNamespace(
+        text="",
+        text_delta="",
+        images=[image],
+        candidates=[
+            SimpleNamespace(web_images=[], generated_images=[image]),
+        ],
+        chosen=0,
+    )
+    client = _StreamingClient([output])
+    media_handler = MagicMock(spec=MediaHandler)
+    session = SimpleNamespace()
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory(client, media_handler=media_handler)
+    update = _update(text="/img 台北 101 的水彩畫")
+
+    await handlers.img(
+        update,
+        SimpleNamespace(args=["台北", "101", "的水彩畫"]),
+    )
+
+    assert client.calls == [
+        (
+            f"{IMAGE_GENERATION_PREFIX}\n\n台北 101 的水彩畫",
+            {"chat": session, "temporary": False},
+        )
+    ]
+    media_handler.send_output_images.assert_awaited_once_with(
+        update.effective_message,
+        output,
+        caption=None,
+    )
+    registry.persist.assert_awaited_once_with(202, session)
+
+
+async def test_img_without_prompt_replies_with_usage(handlers_factory) -> None:
+    media_handler = MagicMock(spec=MediaHandler)
+    handlers, service = handlers_factory(media_handler=media_handler)
+    update = _update(text="/img")
+
+    await handlers.img(update, SimpleNamespace(args=[]))
+
+    update.effective_message.reply_text.assert_awaited_once_with(IMAGE_USAGE)
+    service.execute.assert_not_awaited()
+    media_handler.send_output_images.assert_not_awaited()
 
 
 async def test_model_lists_dynamic_available_models_and_skips_oversized_data(
@@ -819,13 +880,13 @@ def test_registration_places_auth_in_first_group(
 
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
-    assert len(calls) == 12
+    assert len(calls) == 13
     registered_commands = {
         command
         for registered in calls
         for command in getattr(registered.args[0], "commands", ())
     }
-    assert {"research", "research_status"} <= registered_commands
+    assert {"img", "research", "research_status"} <= registered_commands
 
 
 async def test_startup_registers_public_command_menu() -> None:
@@ -845,6 +906,7 @@ async def test_startup_registers_public_command_menu() -> None:
         "model",
         "gem",
         "temp",
+        "img",
         "research",
         "research_status",
         "status",
