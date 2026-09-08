@@ -52,7 +52,51 @@ web → URL 直傳（零 egress），generated → 視實測結果決定。
 
 `GeneratedImage` 的可抓取性仍需實測 —— 需要一次成功的圖片生成回應送達 Telegram。
 
-## 待填：實機觀察結果
+## ✅ 已結案：WebImage 走 URL 直傳，零 egress 成立（2026-09-08 實機驗證）
+
+**狀態：T3.2a 完成。** 由使用者實機執行，Commander 同步比對 bot log。
+
+### 證據一：`/status` 回報
+
+```
+本月累計 egress 估算值：0 B
+今日用量：10
+服務狀態：healthy
+```
+
+### 證據二：bot log 中無任何退回紀錄
+
+四張圖全部經 `sendMediaGroup` 送出，log 中**沒有出現**
+`Telegram rejected media group URLs; falling back to VM relay`。
+Telegram API 呼叫統計：
+
+```
+sendMediaGroup   × 1     ← 相簿，非個別送出
+sendPhoto        × 0
+sendMessage      × 1     ← placeholder
+editMessageText  × 4     ← 串流節流
+deleteMessage    × 1     ← placeholder 清除
+```
+
+### 實測到的 WebImage URL 網域
+
+```
+images.unsplash.com
+c8.alamy.com
+media.gettyimages.com
+```
+
+皆為第三方公開網址，Telegram 伺服器可直接抓取，與 fixture 的推論一致。
+
+### 結論
+
+- **`WebImage` → URL 直傳可行，VM egress 為零。** 預設路徑 A 正確，維持不變。
+- **`GeneratedImage` 仍未驗證。** 其 URL 為 `lh3.googleusercontent.com/gg-dl/...`
+  帶長 token，可能有時效簽章。需要一次成功的 `/img` 回應才能確認。
+  這正是 `web_image_mode` 與 `generated_image_mode` 必須維持獨立開關的理由 ——
+  兩者已證實網域性質不同，不可假設行為相同。
+
+## 待填：`GeneratedImage` 的可抓取性
 
 使用者跑過含圖片的請求後，回填：
 
