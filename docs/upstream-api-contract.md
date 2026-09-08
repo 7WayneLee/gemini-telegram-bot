@@ -10,6 +10,36 @@
 
 ---
 
+## 零、import 路徑約定
+
+**一律使用 top-level 匯入**，不要用內部模組路徑：
+
+```python
+from gemini_webapi import GeminiClient, ChatSession          # 客戶端
+from gemini_webapi import ModelOutput, Candidate, Image      # 型別
+from gemini_webapi import DeepResearchPlan, DeepResearchResult
+from gemini_webapi import exceptions as gw_exc               # 例外
+from gemini_webapi.utils import clear_cookies_cache, save_cookies
+```
+
+`gemini_webapi` 與 `gemini_webapi.types` 皆匯出下列型別（實測確認，兩者為同一物件）：
+
+```
+AvailableModel, Candidate, ChatHistory, ChatInfo, ChatTurn, Citation,
+DeepResearchDocument, DeepResearchPlan, DeepResearchResult, Gem, GemJar,
+GeneratedImage, GeneratedMedia, GeneratedVideo, Image, ModelOutput,
+RPCData, Video, WebImage
+```
+
+`docs/upstream-api.json` 記錄的 `qualified_name`（如
+`gemini_webapi.types.research.DeepResearchPlan`）是**反射得到的真實位置，供辨識用**，
+不是建議的 import 路徑 —— 內部模組路徑屬實作細節，升級時較可能搬動。
+
+pydantic 型別一律用其自身的序列化（`model_dump_json` / `model_validate_json`），
+**不要手刻解碼**：手刻會在上游新增欄位時靜默丟失資料。
+
+---
+
 ## 一、例外階層（T2.1 錯誤分類的依據）
 
 ### ⚠️ 最重要的陷阱：兩個互不相干的根
