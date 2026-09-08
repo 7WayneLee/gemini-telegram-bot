@@ -1,15 +1,15 @@
 """Telegram media upload preparation and egress-aware image delivery.
 
 The default outbound route is optimistic URL delivery: Telegram fetches the
-image itself and the VM sends no media bytes.  In automatic mode only the
-individual image rejected by Telegram falls back to a temporary download and
-metered upload; a failure never disables URL delivery for later images.
+image itself and the VM sends no media bytes. In automatic mode a rejected
+single image falls back individually, while a rejected media group falls back
+atomically by relaying every image in that group.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from html.parser import HTMLParser
@@ -18,10 +18,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
-from telegram.constants import MessageLimit, ParseMode
+from telegram import InputMediaPhoto
+from telegram.constants import MediaGroupLimit, MessageLimit, ParseMode
 from telegram.error import BadRequest
 
-from .sending import send_document, send_photo
+from .sending import send_document, send_media_group, send_photo
 
 
 LOGGER = logging.getLogger(__name__)
@@ -179,12 +180,12 @@ class MediaHandler:
         *,
         source: ImageSource = ImageSource.GENERIC,
     ) -> list[DeliveryResult]:
-        """Send images independently so one fallback does not affect the next."""
+        """Send one photo or one or more Telegram media groups."""
 
-        return [
-            await self.send_image(message, image, source=source)
-            for image in images
-        ]
+        return await self._send_grouped_images(
+            message,
+            [(image, source) for image in images],
+        )
 
     async def send_output_images(
         self,
@@ -201,22 +202,18 @@ class MediaHandler:
         """
 
         candidate = output.candidates[output.chosen]
-        images = [
+        images: list[tuple[GeminiImage, ImageSource]] = [
             (image, ImageSource.WEB) for image in candidate.web_images
         ] + [
             (image, ImageSource.GENERATED)
             for image in candidate.generated_images
         ]
         safe_caption = caption if caption_is_eligible(caption) else None
-        return [
-            await self.send_image(
-                message,
-                image,
-                caption=safe_caption if index == 0 else None,
-                source=source,
-            )
-            for index, (image, source) in enumerate(images)
-        ]
+        return await self._send_grouped_images(
+            message,
+            images,
+            caption=safe_caption,
+        )
 
     async def send_image(
         self,
@@ -270,6 +267,114 @@ class MediaHandler:
         self._egress_meter.record(num_bytes)
         return DeliveryResult(DeliveryMode.RELAY, relayed_bytes=num_bytes)
 
+    async def _send_grouped_images(
+        self,
+        message: Any,
+        images: Sequence[tuple[GeminiImage, ImageSource]],
+        *,
+        caption: str | None = None,
+    ) -> list[DeliveryResult]:
+        """Send ordered images in mode-homogeneous, size-limited batches."""
+
+        results: list[DeliveryResult] = []
+        pending_caption = caption
+        for batch_index, batch in enumerate(self._image_batches(images), start=1):
+            if len(batch) < MediaGroupLimit.MIN_MEDIA_LENGTH:
+                image, source = batch[0]
+                result = await self.send_image(
+                    message,
+                    image,
+                    caption=pending_caption,
+                    source=source,
+                )
+                results.append(result)
+            else:
+                results.extend(
+                    await self._send_image_group(
+                        message,
+                        batch,
+                        caption=pending_caption,
+                        batch_index=batch_index,
+                    )
+                )
+            pending_caption = None
+        return results
+
+    async def _send_image_group(
+        self,
+        message: Any,
+        images: Sequence[tuple[GeminiImage, ImageSource]],
+        *,
+        caption: str | None,
+        batch_index: int,
+    ) -> list[DeliveryResult]:
+        """Deliver one atomic Telegram media group by URL or measured relay."""
+
+        mode = self._mode_for(images[0][1])
+        if any(self._mode_for(source) is not mode for _, source in images):
+            raise ValueError("media group contains mixed delivery modes")
+
+        if mode is not DeliveryMode.RELAY:
+            url_media = _input_media_photos(
+                [image.url for image, _ in images],
+                caption=caption,
+            )
+            try:
+                await send_media_group(message, url_media)
+            except BadRequest:
+                if mode is DeliveryMode.URL:
+                    raise
+                LOGGER.warning(
+                    "Telegram rejected media group URLs; falling back to VM "
+                    "relay batch=%d image_count=%d",
+                    batch_index,
+                    len(images),
+                )
+            else:
+                return [DeliveryResult(DeliveryMode.URL) for _ in images]
+
+        return await self._relay_image_group(
+            message,
+            images,
+            caption=caption,
+        )
+
+    async def _relay_image_group(
+        self,
+        message: Any,
+        images: Sequence[tuple[GeminiImage, ImageSource]],
+        *,
+        caption: str | None,
+    ) -> list[DeliveryResult]:
+        """Download every image in a group, then upload the group atomically."""
+
+        with TemporaryDirectory(
+            prefix="gemini-tg-relay-",
+            dir=self._temp_root,
+        ) as temp_directory:
+            saved_paths: list[Path] = []
+            relayed_bytes: list[int] = []
+            for index, (image, _) in enumerate(images):
+                image_directory = Path(temp_directory) / str(index)
+                image_directory.mkdir()
+                saved_path = Path(await image.save(path=str(image_directory)))
+                saved_paths.append(saved_path)
+                relayed_bytes.append(saved_path.stat().st_size)
+
+            with ExitStack() as stack:
+                media_files = [
+                    stack.enter_context(saved_path.open("rb"))
+                    for saved_path in saved_paths
+                ]
+                relay_media = _input_media_photos(media_files, caption=caption)
+                await send_media_group(message, relay_media)
+
+        self._egress_meter.record(sum(relayed_bytes))
+        return [
+            DeliveryResult(DeliveryMode.RELAY, relayed_bytes=num_bytes)
+            for num_bytes in relayed_bytes
+        ]
+
     @asynccontextmanager
     async def prepare_upload(self, message: Any) -> AsyncIterator[PreparedUpload]:
         """Download one checked Telegram photo/document and always remove it.
@@ -311,6 +416,24 @@ class MediaHandler:
         specific = self._source_modes.get(source)
         return specific if specific is not None else self._delivery_mode
 
+    def _image_batches(
+        self,
+        images: Sequence[tuple[GeminiImage, ImageSource]],
+    ) -> list[list[tuple[GeminiImage, ImageSource]]]:
+        """Split images by effective delivery mode and Telegram group limits."""
+
+        mode_runs: list[list[tuple[GeminiImage, ImageSource]]] = []
+        for image in images:
+            mode = self._mode_for(image[1])
+            if not mode_runs or self._mode_for(mode_runs[-1][0][1]) is not mode:
+                mode_runs.append([])
+            mode_runs[-1].append(image)
+
+        batches: list[list[tuple[GeminiImage, ImageSource]]] = []
+        for mode_run in mode_runs:
+            batches.extend(_split_media_groups(mode_run))
+        return batches
+
 
 def _select_upload(message: Any) -> tuple[Any, str]:
     photos = getattr(message, "photo", None)
@@ -337,6 +460,43 @@ async def _send_image_reply(
     if as_document:
         return await send_document(message, media, **kwargs)
     return await send_photo(message, media, **kwargs)
+
+
+def _input_media_photos(
+    media: Sequence[Any],
+    *,
+    caption: str | None,
+) -> list[InputMediaPhoto]:
+    """Build a media group with an optional caption on its first item only."""
+
+    return [
+        InputMediaPhoto(
+            item,
+            caption=caption if index == 0 else None,
+            parse_mode=ParseMode.HTML if index == 0 and caption is not None else None,
+        )
+        for index, item in enumerate(media)
+    ]
+
+
+def _split_media_groups(
+    images: Sequence[tuple[GeminiImage, ImageSource]],
+) -> list[list[tuple[GeminiImage, ImageSource]]]:
+    """Chunk one mode run without leaving an invalid one-item media group."""
+
+    minimum = int(MediaGroupLimit.MIN_MEDIA_LENGTH)
+    maximum = int(MediaGroupLimit.MAX_MEDIA_LENGTH)
+    batches: list[list[tuple[GeminiImage, ImageSource]]] = []
+    start = 0
+    while start < len(images):
+        remaining = len(images) - start
+        batch_size = min(maximum, remaining)
+        trailing = remaining - batch_size
+        if trailing and trailing < minimum:
+            batch_size -= minimum - trailing
+        batches.append(list(images[start : start + batch_size]))
+        start += batch_size
+    return batches
 
 
 def _safe_filename(filename: str) -> str:

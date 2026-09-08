@@ -10,7 +10,7 @@ import pytest
 from curl_cffi.requests import AsyncSession
 from gemini_webapi import Candidate, ModelOutput, WebImage
 from pydantic import SecretStr
-from telegram.constants import MessageLimit, ParseMode
+from telegram.constants import MediaGroupLimit, MessageLimit, ParseMode
 from telegram.error import BadRequest, RetryAfter
 
 from gemini_tg_bot.queue import RequestQueue
@@ -52,6 +52,7 @@ def _message() -> SimpleNamespace:
         reply_text=AsyncMock(),
         reply_photo=AsyncMock(),
         reply_document=AsyncMock(),
+        reply_media_group=AsyncMock(),
     )
 
 
@@ -160,23 +161,36 @@ async def test_flood_control_retries_both_image_delivery_paths(
         assert meter.month_to_date_bytes == len(image.payload)
 
 
-async def test_fallback_is_per_image_and_does_not_disable_next_url() -> None:
+async def test_media_group_url_failure_relays_entire_group_and_meters_bytes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     meter = EgressMeter()
-    media = MediaHandler(egress_meter=meter)
+    media = MediaHandler(egress_meter=meter, temp_root=tmp_path)
     message = _message()
-    message.reply_photo.side_effect = [BadRequest("first URL rejected"), None, None]
+    message.reply_media_group.side_effect = [BadRequest("URL rejected"), None]
     first = FakeImage("https://example.test/first.png", b"first")
     second = FakeImage("https://example.test/second.png", b"second")
 
-    results = await media.send_images(message, [first, second])
+    with caplog.at_level(logging.WARNING, logger="gemini_tg_bot.telegram.media"):
+        results = await media.send_images(message, [first, second])
 
-    assert [result.mode for result in results] == [
-        DeliveryMode.RELAY,
-        DeliveryMode.URL,
+    assert results == [
+        DeliveryResult(DeliveryMode.RELAY, relayed_bytes=len(first.payload)),
+        DeliveryResult(DeliveryMode.RELAY, relayed_bytes=len(second.payload)),
     ]
-    assert meter.month_to_date_bytes == len(first.payload)
-    assert message.reply_photo.await_args_list[-1] == call(second.url, caption=None)
-    assert second.save_calls == []
+    assert meter.month_to_date_bytes == len(first.payload) + len(second.payload)
+    assert message.reply_media_group.await_count == 2
+    url_group = message.reply_media_group.await_args_list[0].args[0]
+    assert [item.media for item in url_group] == [first.url, second.url]
+    relay_group = message.reply_media_group.await_args_list[1].args[0]
+    assert [item.media.input_file_content for item in relay_group] == [
+        first.payload,
+        second.payload,
+    ]
+    assert "batch=1 image_count=2" in caplog.text
+    assert first.saved_path is not None and not first.saved_path.exists()
+    assert second.saved_path is not None and not second.saved_path.exists()
 
 
 async def test_forced_modes_and_document_url_delivery() -> None:
@@ -294,19 +308,169 @@ async def test_output_caption_over_telegram_limit_is_omitted() -> None:
 async def test_output_caption_is_attached_only_to_first_image() -> None:
     media = MediaHandler(egress_meter=EgressMeter())
     message = _message()
-    web_image = FakeImage("https://example.test/web.png")
-    generated_image = FakeImage("https://example.test/generated.png")
+    web_images = [
+        FakeImage("https://example.test/web-1.png"),
+        FakeImage("https://example.test/web-2.png"),
+    ]
+    generated_image = FakeImage("https://example.test/generated-1.png")
     output = _simple_output(
-        web_images=[web_image],
+        web_images=web_images,
         generated_images=[generated_image],
     )
 
     await media.send_output_images(message, output, caption="answer")
 
-    assert message.reply_photo.await_args_list == [
-        call(web_image.url, caption="answer", parse_mode=ParseMode.HTML),
-        call(generated_image.url, caption=None),
+    message.reply_photo.assert_not_awaited()
+    message.reply_media_group.assert_awaited_once()
+    group = message.reply_media_group.await_args.args[0]
+    assert [item.media for item in group] == [
+        web_images[0].url,
+        web_images[1].url,
+        generated_image.url,
     ]
+    assert group[0].caption == "answer"
+    assert group[0].parse_mode is ParseMode.HTML
+    assert all(item.caption is None for item in group[1:])
+
+
+async def test_twelve_images_are_split_into_ten_and_two_with_one_caption() -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    image_count = int(MediaGroupLimit.MAX_MEDIA_LENGTH) + int(
+        MediaGroupLimit.MIN_MEDIA_LENGTH
+    )
+    images = [
+        FakeImage(f"https://example.test/image-{index}.png")
+        for index in range(image_count)
+    ]
+    output = _simple_output(web_images=images)
+
+    await media.send_output_images(message, output, caption="album answer")
+
+    assert message.reply_media_group.await_count == 2
+    first_group, second_group = [
+        group_call.args[0]
+        for group_call in message.reply_media_group.await_args_list
+    ]
+    assert len(first_group) == MediaGroupLimit.MAX_MEDIA_LENGTH
+    assert len(second_group) == MediaGroupLimit.MIN_MEDIA_LENGTH
+    assert [item.media for item in first_group + second_group] == [
+        image.url for image in images
+    ]
+    assert first_group[0].caption == "album answer"
+    assert first_group[0].parse_mode is ParseMode.HTML
+    assert all(item.caption is None for item in first_group[1:])
+    assert all(item.caption is None for item in second_group)
+
+
+async def test_media_group_chunking_never_leaves_a_single_image_group() -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    image_count = int(MediaGroupLimit.MAX_MEDIA_LENGTH) + int(
+        MediaGroupLimit.MIN_MEDIA_LENGTH
+    ) - 1
+    images = [
+        FakeImage(f"https://example.test/image-{index}.png")
+        for index in range(image_count)
+    ]
+
+    await media.send_images(message, images)
+
+    group_sizes = [
+        len(group_call.args[0])
+        for group_call in message.reply_media_group.await_args_list
+    ]
+    assert group_sizes == [
+        MediaGroupLimit.MAX_MEDIA_LENGTH - 1,
+        MediaGroupLimit.MIN_MEDIA_LENGTH,
+    ]
+    message.reply_photo.assert_not_awaited()
+
+
+async def test_media_group_fallback_does_not_change_the_next_group_route(
+    tmp_path: Path,
+) -> None:
+    meter = EgressMeter()
+    media = MediaHandler(egress_meter=meter, temp_root=tmp_path)
+    message = _message()
+    message.reply_media_group.side_effect = [BadRequest("URL rejected"), None, None]
+    image_count = int(MediaGroupLimit.MAX_MEDIA_LENGTH) + int(
+        MediaGroupLimit.MIN_MEDIA_LENGTH
+    )
+    images = [
+        FakeImage(f"https://example.test/image-{index}.png", b"x")
+        for index in range(image_count)
+    ]
+
+    results = await media.send_images(message, images)
+
+    maximum = int(MediaGroupLimit.MAX_MEDIA_LENGTH)
+    assert [result.mode for result in results[:maximum]] == [
+        DeliveryMode.RELAY
+    ] * maximum
+    assert [result.mode for result in results[maximum:]] == [
+        DeliveryMode.URL
+    ] * int(MediaGroupLimit.MIN_MEDIA_LENGTH)
+    assert meter.month_to_date_bytes == maximum
+    assert all(image.save_calls for image in images[:maximum])
+    assert all(not image.save_calls for image in images[maximum:])
+    final_url_group = message.reply_media_group.await_args_list[-1].args[0]
+    assert [item.media for item in final_url_group] == [
+        image.url for image in images[maximum:]
+    ]
+
+
+async def test_single_image_still_uses_send_photo() -> None:
+    media = MediaHandler(egress_meter=EgressMeter())
+    message = _message()
+    image = FakeImage("https://example.test/only.png")
+
+    await media.send_images(message, [image])
+
+    message.reply_photo.assert_awaited_once_with(image.url, caption=None)
+    message.reply_media_group.assert_not_awaited()
+
+
+async def test_different_source_delivery_modes_do_not_mix_media_groups(
+    tmp_path: Path,
+) -> None:
+    meter = EgressMeter()
+    media = MediaHandler(
+        egress_meter=meter,
+        web_image_mode=DeliveryMode.URL,
+        generated_image_mode=DeliveryMode.RELAY,
+        temp_root=tmp_path,
+    )
+    message = _message()
+    web_images = [
+        FakeImage("https://example.test/web-1.png"),
+        FakeImage("https://example.test/web-2.png"),
+    ]
+    generated_images = [
+        FakeImage("https://example.test/generated-1.png", b"generated-one"),
+        FakeImage("https://example.test/generated-2.png", b"generated-two"),
+    ]
+    output = _simple_output(
+        web_images=web_images,
+        generated_images=generated_images,
+    )
+
+    await media.send_output_images(message, output, caption="answer")
+
+    assert message.reply_media_group.await_count == 2
+    web_group, generated_group = [
+        group_call.args[0]
+        for group_call in message.reply_media_group.await_args_list
+    ]
+    assert [item.media for item in web_group] == [image.url for image in web_images]
+    assert web_group[0].caption == "answer"
+    assert [item.media.input_file_content for item in generated_group] == [
+        image.payload for image in generated_images
+    ]
+    assert all(item.caption is None for item in generated_group)
+    assert meter.month_to_date_bytes == sum(
+        len(image.payload) for image in generated_images
+    )
 
 
 def test_video_and_audio_generation_are_disabled_unless_explicitly_enabled() -> None:

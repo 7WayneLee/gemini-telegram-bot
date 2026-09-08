@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from pydantic import SecretStr
-from telegram.constants import ParseMode
+from telegram.constants import MediaGroupLimit, ParseMode
 from telegram.error import RetryAfter
 
 from gemini_tg_bot.gemini.service import ServiceState
@@ -128,6 +128,7 @@ def _update(
         reply_text=AsyncMock(return_value=placeholder),
         reply_photo=AsyncMock(),
         reply_document=AsyncMock(),
+        reply_media_group=AsyncMock(),
         placeholder=placeholder,
     )
     return SimpleNamespace(
@@ -695,17 +696,20 @@ async def test_text_stream_over_caption_limit_keeps_separate_text_message(
     registry: AsyncMock,
 ) -> None:
     text = "x" * 1025
-    image = SimpleNamespace(
-        url="https://example.test/generated.png",
-        title="Generated",
-        alt="Generated image",
-    )
+    images = [
+        SimpleNamespace(
+            url=f"https://example.test/generated-{index}.png",
+            title="Generated",
+            alt="Generated image",
+        )
+        for index in range(int(MediaGroupLimit.MIN_MEDIA_LENGTH) + 1)
+    ]
     output = SimpleNamespace(
         text=text,
         text_delta=text,
-        images=[image],
+        images=images,
         candidates=[
-            SimpleNamespace(web_images=[image], generated_images=[]),
+            SimpleNamespace(web_images=images, generated_images=[]),
         ],
         chosen=0,
     )
@@ -719,10 +723,11 @@ async def test_text_stream_over_caption_limit_keeps_separate_text_message(
         text,
         parse_mode=ParseMode.HTML,
     )
-    update.effective_message.reply_photo.assert_awaited_once_with(
-        image.url,
-        caption=None,
-    )
+    update.effective_message.reply_photo.assert_not_awaited()
+    update.effective_message.reply_media_group.assert_awaited_once()
+    media_group = update.effective_message.reply_media_group.await_args.args[0]
+    assert [item.media for item in media_group] == [image.url for image in images]
+    assert all(item.caption is None for item in media_group)
     update.effective_message.placeholder.delete.assert_not_awaited()
 
 
