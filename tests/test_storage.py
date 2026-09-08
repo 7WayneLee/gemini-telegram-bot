@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
-from gemini_tg_bot.storage.db import Database
+from gemini_tg_bot.storage.db import LATEST_SCHEMA_VERSION, Database
 from gemini_tg_bot.storage.models import (
+    SCHEMA_SQL,
     ChatSession,
     ChatSessionDAO,
     ResearchTask,
@@ -37,6 +39,7 @@ EXPECTED_SCHEMA = {
         ("result_path", "TEXT", 0, None, 0),
         ("created_at", "TEXT", 1, None, 0),
         ("updated_at", "TEXT", 1, None, 0),
+        ("plan_json", "TEXT", 0, None, 0),
     ],
     "usage_log": [
         ("id", "INTEGER", 0, None, 1),
@@ -48,6 +51,10 @@ EXPECTED_SCHEMA = {
         ("error_kind", "TEXT", 0, None, 0),
         ("latency_ms", "INTEGER", 0, None, 0),
         ("created_at", "TEXT", 1, None, 0),
+    ],
+    "telegram_user_access": [
+        ("user_id", "INTEGER", 0, None, 1),
+        ("allowed", "INTEGER", 1, None, 0),
     ],
 }
 
@@ -65,15 +72,24 @@ async def _schema_snapshot(database: Database) -> list[tuple[str, str, str, str]
     return [tuple(row) for row in rows]
 
 
+async def _user_version(database: Database) -> int:
+    async with database.connection.execute("PRAGMA user_version") as cursor:
+        row = await cursor.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 @pytest.mark.asyncio
 async def test_migration_is_automatic_complete_and_idempotent(tmp_path) -> None:
     async with Database(tmp_path / "bot.sqlite3") as database:
         first = await _schema_snapshot(database)
+        assert await _user_version(database) == LATEST_SCHEMA_VERSION
 
         await database.migrate()
         await database.migrate()
 
         assert await _schema_snapshot(database) == first
+        assert await _user_version(database) == LATEST_SCHEMA_VERSION
         assert {row[1] for row in first if row[0] == "table"} == set(
             EXPECTED_SCHEMA
         )
@@ -92,6 +108,106 @@ async def test_migration_is_automatic_complete_and_idempotent(tmp_path) -> None:
                 )
                 for column in columns
             ] == expected
+
+
+@pytest.mark.asyncio
+async def test_migration_preserves_rows_from_version_1_database(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(SCHEMA_SQL)
+        connection.execute(
+            """
+            INSERT INTO chat_sessions (
+                chat_id, cid, metadata_json, model, gem_id, temporary, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                101,
+                "legacy-cid",
+                '["first", null, "third"]',
+                "legacy-model",
+                "legacy-gem",
+                1,
+                "2026-09-07T01:02:03+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO research_tasks (
+                task_id, chat_id, cid, research_id, prompt, status,
+                result_path, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-task",
+                101,
+                "legacy-research-cid",
+                "legacy-research-id",
+                "preserve this prompt",
+                "running",
+                None,
+                "2026-09-07T02:00:00+00:00",
+                "2026-09-07T02:01:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO usage_log (
+                user_id, chat_id, command, model, ok, error_kind, latency_ms,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                303,
+                101,
+                "research",
+                "legacy-model",
+                1,
+                None,
+                125,
+                "2026-09-07T02:04:00+00:00",
+            ),
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+    async with Database(database_path) as database:
+        assert await _user_version(database) == LATEST_SCHEMA_VERSION
+        async with database.connection.execute(
+            "SELECT prompt, status, plan_json FROM research_tasks"
+        ) as cursor:
+            research_row = await cursor.fetchone()
+        assert research_row is not None
+        assert tuple(research_row) == ("preserve this prompt", "running", None)
+
+        async with database.connection.execute(
+            "SELECT cid, metadata_json, temporary FROM chat_sessions"
+        ) as cursor:
+            chat_row = await cursor.fetchone()
+        assert chat_row is not None
+        assert tuple(chat_row) == (
+            "legacy-cid",
+            '["first", null, "third"]',
+            1,
+        )
+
+        async with database.connection.execute(
+            "SELECT user_id, chat_id, command, ok FROM usage_log"
+        ) as cursor:
+            usage_row = await cursor.fetchone()
+        assert usage_row is not None
+        assert tuple(usage_row) == (303, 101, "research", 1)
+
+        first = await _schema_snapshot(database)
+        await database.migrate()
+        await database.migrate()
+        assert await _schema_snapshot(database) == first
+        assert await _user_version(database) == LATEST_SCHEMA_VERSION
 
 
 def test_metadata_json_preserves_order_and_none_slots() -> None:

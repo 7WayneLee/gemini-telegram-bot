@@ -146,6 +146,7 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
         usage_dao: UsageLogDAO | AsyncMock | None = None,
         egress_meter: EgressMeter | None = None,
         cookie_path: Path | None = None,
+        research: AsyncMock | None = None,
     ) -> tuple[TelegramHandlers, MagicMock]:
         service = _client_service(client or MagicMock())
         handlers = TelegramHandlers(
@@ -159,6 +160,7 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
             egress_meter=egress_meter or EgressMeter(now=lambda: NOW),
             cookie_path=cookie_path or tmp_path,
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
+            research=research,  # type: ignore[arg-type]
             now=lambda: NOW,
         )
         return handlers, service
@@ -176,6 +178,7 @@ async def test_help_and_new_commands(
     await handlers.start(update, SimpleNamespace())
     assert "/model" in update.effective_message.reply_text.await_args.args[0]
     assert "/status" in update.effective_message.reply_text.await_args.args[0]
+    assert "/research" in update.effective_message.reply_text.await_args.args[0]
 
     await handlers.new(update, SimpleNamespace())
     registry.reset.assert_awaited_once_with(202)
@@ -200,6 +203,65 @@ async def test_temp_toggles_from_registry_state(
         call(202, True),
         call(202, False),
     ]
+
+
+async def test_research_submits_topic_and_immediately_replies_with_task_id(
+    handlers_factory,
+) -> None:
+    research = AsyncMock()
+    research.submit.return_value = "research-task-123"
+    handlers, _ = handlers_factory(research=research)
+    update = _update(text="/research orbital solar power")
+
+    await handlers.research(
+        update,
+        SimpleNamespace(args=["orbital", "solar", "power"]),
+    )
+
+    research.submit.assert_awaited_once_with(202, "orbital solar power")
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "Deep Research 任務已提交：research-task-123"
+    )
+
+
+async def test_research_rejects_an_empty_topic(handlers_factory) -> None:
+    research = AsyncMock()
+    handlers, _ = handlers_factory(research=research)
+    update = _update(text="/research")
+
+    await handlers.research(update, SimpleNamespace(args=[]))
+
+    research.submit.assert_not_awaited()
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "用法：/research <topic>"
+    )
+
+
+async def test_research_status_lists_only_manager_results_for_chat(
+    handlers_factory,
+) -> None:
+    research = AsyncMock()
+    research.status.return_value = [
+        SimpleNamespace(
+            task_id="research-task-123",
+            status=SimpleNamespace(value="running"),
+        ),
+        SimpleNamespace(
+            task_id="research-task-456",
+            status=SimpleNamespace(value="done"),
+        ),
+    ]
+    handlers, _ = handlers_factory(research=research)
+    update = _update(text="/research_status")
+
+    await handlers.research_status(update, SimpleNamespace())
+
+    research.status.assert_awaited_once_with(202)
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "Deep Research 任務狀態：\n"
+        "research-task-123：running\n"
+        "research-task-456：done"
+    )
 
 
 async def test_model_lists_dynamic_available_models_and_skips_oversized_data(
@@ -515,4 +577,10 @@ def test_registration_places_auth_in_first_group(
 
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
-    assert len(calls) == 10
+    assert len(calls) == 12
+    registered_commands = {
+        command
+        for registered in calls
+        for command in getattr(registered.args[0], "commands", ())
+    }
+    assert {"research", "research_status"} <= registered_commands

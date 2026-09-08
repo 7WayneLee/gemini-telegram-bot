@@ -33,6 +33,7 @@ from .rendering import render_markdown_chunks
 from .streaming import stream_response
 
 if TYPE_CHECKING:
+    from gemini_tg_bot.gemini.research import ResearchManager
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
     from gemini_tg_bot.storage.db import Database
 
@@ -49,6 +50,8 @@ HELP_TEXT = """可用指令：
 /gem — 選擇 Gem
 /temp — 切換 temporary mode
 /status — 查看目前狀態
+/research <topic> — 提交 Deep Research 任務
+/research_status — 查看 Deep Research 任務狀態
 
 直接傳送文字即可延續目前對話。"""
 
@@ -63,6 +66,8 @@ COOKIE_PROMPT = (
     "第二行 __Secure-1PSIDTS。該訊息收到後會立即刪除。"
 )
 COOKIE_INPUT_INVALID = "Cookie 格式無效，請重新執行 /setcookie。"
+RESEARCH_USAGE = "用法：/research <topic>"
+RESEARCH_UNAVAILABLE = "Deep Research 服務目前無法使用，請稍後再試。"
 
 
 class EgressMeter:
@@ -113,6 +118,7 @@ class TelegramHandlers:
         cookie_path: Path,
         secure_1psid: SecretStr,
         database: Database | None = None,
+        research: ResearchManager | None = None,
         media_handler: MediaHandler | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -124,6 +130,7 @@ class TelegramHandlers:
         self._cookie_path = cookie_path
         self._secure_1psid = secure_1psid
         self._database = database
+        self._research = research
         self._media = media_handler or MediaHandler(egress_meter=egress_meter)
         self._auth: AuthMiddleware | None = None
         self._awaiting_cookie_users: set[int] = set()
@@ -311,6 +318,62 @@ class TelegramHandlers:
                 )
             )
         )
+
+    async def research(self, update: Update, context: CallbackContext) -> None:
+        """Submit Deep Research work and return its task id immediately."""
+
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        prompt = _command_prompt(context)
+        if prompt is None:
+            await message.reply_text(RESEARCH_USAGE)
+            return
+        if self._research is None:
+            await message.reply_text(RESEARCH_UNAVAILABLE)
+            return
+
+        try:
+            task_id = await self._research.submit(chat_id, prompt)
+        except ValueError:
+            await message.reply_text(RESEARCH_USAGE)
+            return
+        except Exception as error:
+            _log_handler_error("research submission", error)
+            await message.reply_text(RESEARCH_UNAVAILABLE)
+            return
+        await message.reply_text(f"Deep Research 任務已提交：{task_id}")
+
+    async def research_status(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """List persisted Deep Research task states for the current chat."""
+
+        del context
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        if self._research is None:
+            await message.reply_text(RESEARCH_UNAVAILABLE)
+            return
+
+        try:
+            tasks = await self._research.status(chat_id)
+        except Exception as error:
+            _log_handler_error("research status", error)
+            await message.reply_text(RESEARCH_UNAVAILABLE)
+            return
+        if not tasks:
+            await message.reply_text("目前沒有 Deep Research 任務。")
+            return
+
+        lines = ["Deep Research 任務狀態："]
+        lines.extend(f"{task.task_id}：{task.status.value}" for task in tasks)
+        await message.reply_text("\n".join(lines))
 
     async def admin_command(
         self,
@@ -821,6 +884,10 @@ def register_handlers(
     application.add_handler(CommandHandler("gem", handlers.gem))
     application.add_handler(CommandHandler("temp", handlers.temp))
     application.add_handler(CommandHandler("status", handlers.status))
+    application.add_handler(CommandHandler("research", handlers.research))
+    application.add_handler(
+        CommandHandler("research_status", handlers.research_status)
+    )
     application.add_handler(
         CommandHandler(
             ["setcookie", "allow", "deny", "health"],
@@ -866,6 +933,16 @@ def _command_user_id(context: CallbackContext) -> int | None:
     except (TypeError, ValueError):
         return None
     return user_id if user_id > 0 else None
+
+
+def _command_prompt(context: CallbackContext) -> str | None:
+    args = getattr(context, "args", None)
+    if not isinstance(args, (list, tuple)) or not all(
+        isinstance(arg, str) for arg in args
+    ):
+        return None
+    prompt = " ".join(args).strip()
+    return prompt or None
 
 
 def _parse_cookie_credentials(text: str | None) -> tuple[str, str] | None:
