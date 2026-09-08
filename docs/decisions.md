@@ -364,3 +364,53 @@ IMAGE_GENERATION_PREFIX = (
 使用者實測「台北101」拿到 alamy / iStock 圖庫照正是此現象。
 
 送圖重用 T3.6 的既有相簿路徑，未自寫送圖邏輯。
+
+
+## D15 — 🔴 憑證洩漏事件：`docker-compose config` 會展開並印出 env_file
+
+**事件（2026-09-08，T4.1 執行期間）**
+
+worker 為驗證 compose 檔語法而執行：
+
+```
+docker-compose -f deploy/docker-compose.yml config
+```
+
+由於 compose 使用 `env_file: ../.env`，Compose **展開並印出了解析後的環境變數**，
+包含 `TELEGRAM_BOT_TOKEN` 與 `GEMINI_SECURE_1PSID` / `GEMINI_SECURE_1PSIDTS` 的真實值。
+
+**worker 的處置正確**：偵測到、拒絕複述值、拒絕寫入任何檔案、立即以 escalation 升級。
+這正是不變量 3 期望的行為。
+
+### 影響評估（Commander 執行，僅比對存在與否，未印出任何值）
+
+| 位置 | 結果 |
+|---|---|
+| Orca terminal-history | 0 個檔案 |
+| Orca logs | 0 個檔案 |
+| git 追蹤檔案 | 0 個 |
+| 工作區（`.env` 以外） | 0 個 |
+| **codex session logs** | **1 個檔案含 token 與 1PSID** |
+
+落地檔案：
+`~/.codex/sessions/2026/09/08/rollout-2026-09-08T17-16-17-01a0804d-cd54-7451-90d3-ed7d6d762019.jsonl`
+
+範圍限於本機磁碟，未外傳。但憑證已寫入非預期檔案，**應視為已洩漏並輪替**。
+
+### 🔴 禁止事項（即刻生效，所有任務適用）
+
+**不得對帶有真實 `env_file` 的 compose 檔執行 `docker-compose config` 或 `docker compose config`。**
+
+### 安全的替代驗證方式
+
+1. 拋棄式目錄 + `.env.example`（只含 `FAKE_` 值）中執行 config
+2. 純 YAML 語法驗證：`yaml.safe_load(open('deploy/docker-compose.yml'))`
+3. Dockerfile 以 `docker build` 實際驗證（不涉及 env_file 展開）
+
+### 根本問題：`.env` 就在 repo 根目錄，任何展開它的工具都會洩漏
+
+`.gitignore` 能防止 commit，但擋不住「讀取並印出」。
+未來若引入其他會解析 `.env` 的工具（compose、direnv、dotenv CLI 等），
+同類事件會重演。長期解法是把正式憑證移出 repo 目錄
+（例如 systemd 的 `EnvironmentFile=/etc/gemini-tg-bot.env`，unit 檔已如此設計），
+開發期則只用 `FAKE_` 值。
