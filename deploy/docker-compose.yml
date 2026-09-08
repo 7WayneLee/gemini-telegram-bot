@@ -1,0 +1,39 @@
+name: gemini-bot
+
+services:
+  bot:
+    image: gemini-tg-bot:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      GEMINI_COOKIE_PATH: /data/cookies
+      TMPDIR: /data/tmp
+    volumes:
+      - cookies:/data/cookies
+      - db:/data/db
+      # HUMAN gate: provision/monitor a 256 MiB disk quota for temporary media.
+      # Do not replace this with tmpfs: RAM, not disk, is scarce on the host.
+      - tmp:/data/tmp
+
+    # HUMAN gate measured on 2026-09-08: 969 MiB total RAM, 441 MiB available,
+    # and 234 MiB swap already used. A 400m limit would consume 91% of the
+    # available RAM, so the measured safe limits are intentionally lower.
+    mem_limit: 256m
+    memswap_limit: 512m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# Named volumes inherit the image's ownership on first use, keeping all three
+# paths writable by UID/GID 10001 without starting the bot as root.
+volumes:
+  cookies:
+  db:
+  tmp:

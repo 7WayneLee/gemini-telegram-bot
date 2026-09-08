@@ -1,0 +1,51 @@
+[Unit]
+Description=Gemini Telegram Bot (long polling)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=gemini-tg-bot
+Group=gemini-tg-bot
+WorkingDirectory=/var/lib/gemini-tg-bot
+EnvironmentFile=/etc/gemini-tg-bot.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=GEMINI_COOKIE_PATH=/var/lib/gemini-tg-bot/cookies
+Environment=TMPDIR=/var/lib/gemini-tg-bot/tmp
+
+# Install the project into this venv before enabling the unit:
+#   /opt/gemini-tg-bot/.venv/bin/python -m pip install /opt/gemini-tg-bot
+ExecStartPre=/usr/bin/mkdir -p /var/lib/gemini-tg-bot/cookies /var/lib/gemini-tg-bot/data/db /var/lib/gemini-tg-bot/tmp
+ExecStart=/opt/gemini-tg-bot/.venv/bin/python -m gemini_tg_bot
+
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+# HUMAN gate measured these limits on 2026-09-08. Re-test them after any host
+# size or workload change; 400M was rejected because it was 91% of available RAM.
+MemoryMax=256M
+MemorySwapMax=512M
+CPUQuota=50%
+
+# StateDirectory creates /var/lib/gemini-tg-bot owned by the service account.
+# Temporary media stays on disk and must have a 256 MiB quota; do not use tmpfs.
+StateDirectory=gemini-tg-bot
+StateDirectoryMode=0750
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

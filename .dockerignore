@@ -1,0 +1,8 @@
+# Keep the build context limited to the files copied by deploy/Dockerfile.
+# In particular, never send .env, cookie state, databases, or media to Docker.
+**
+!pyproject.toml
+!src/
+!src/**
+!deploy/
+!deploy/Dockerfile
