@@ -168,6 +168,40 @@ return Path(_path) if _path else Path(tempfile.gettempdir()) / "gemini_webapi"
 - 錯誤作法：當成參數傳給 `GeminiClient(...)` — 會被 `**kwargs` 吞掉而**靜默失效**。
 - 未設定時落在 `tempdir`，容器重建即失效 → 這是 spec 要求掛 volume 的直接原因。
 
+#### ⚠️ 快取 cookie 的優先序高於呼叫端提供的憑證
+
+`init()` 會先載入快取檔（`utils/get_access_token.py` 的 `_load_cached_jar`），
+**順序在建構子傳入的憑證之前**。上游原始碼註解：
+
+> Cached cookies are tried ahead of the ones the caller supplies…
+> or create the very entry that shadows real credentials on the next run.
+
+**對 `/setcookie` 的直接後果**：管理員換上新的 `1PSIDTS`（`1PSID` 不變）時，
+舊快取檔會**遮蔽新值**，新 client 仍拿到過期憑證，服務續留 `DEGRADED`，
+看起來像 `/setcookie` 沒有作用。
+
+上游確有自癒：偵測到 `_cookie_source` 來自 Cache 且 `AccountStatus.UNAUTHENTICATED`
+時會呼叫 `clear_cookies_cache()`。但那需要**先失敗一輪**，對 G2 演練而言即為失敗。
+
+**因此 `reinit()` 在帶入新憑證時，必須先清舊快取：**
+
+```python
+from gemini_webapi.utils import clear_cookies_cache
+
+if new_credentials is not None and self._client is not None:
+    try:
+        clear_cookies_cache(self._client.cookies)  # 需舊 client 的 jar → 必須在 close() 前
+    except Exception:
+        logger.warning("failed to clear cookie cache during reinit")  # 不得中斷 reinit
+await self._client.close()
+```
+
+- `clear_cookies_cache(cookies: Cookies, verbose: bool = False)` 取的是 curl_cffi 的
+  `Cookies` jar，可由 `client.cookies` 取得。
+- **不帶新憑證的 reinit（單純重啟）不可清快取** —— 快取內常是最新鮮的輪替值。
+- `save_cookies(cookies: Cookies, verbose: bool = False)` 同樣吃 jar，
+  格式為 `{name, value, domain, path, expires}` 的 JSON list。**不要手刻此格式。**
+
 #### 快取檔路徑含有 cookie 明文
 
 ```

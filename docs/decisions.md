@@ -66,3 +66,25 @@ T2.4 的 `auth.py` 自帶 `CREATE TABLE IF NOT EXISTS telegram_user_access` 的 
 一併把 `telegram_user_access` 收進中央 `SCHEMA_SQL`，讓所有資料表由單一處遷移。
 
 判定：**不退回 T2.4**。其 DoD 通過且行為正確，屬架構整併議題而非缺陷。
+
+## D6 — cookie 持久化由上游擁有；/setcookie 必須先清快取
+
+否決「bot 自建 admin-cookies.json」的提案。cookie 持久化由 `gemini_webapi` 自己擁有
+（`{GEMINI_COOKIE_PATH}/.cached_cookies_{1PSID}.json`），bot 另寫一份檔案上游不會讀，
+重啟後不生效，只會多一個假的事實來源。
+
+**關鍵上游行為**：`init()` 載入快取的順序**優先於**呼叫端提供的憑證（見合約 §2）。
+因此 `/setcookie` 換上新 `1PSIDTS` 時，舊快取會遮蔽新值，`/setcookie` 看起來會失效。
+修正：`reinit()` 帶新憑證時，於 `close()` **之前**呼叫 `clear_cookies_cache(client.cookies)`。
+此修正授權 T3.4 一併於 `service.py` 完成（跨越 T2.2 原檔案範圍，已核可）。
+
+### 未解決的缺口：`1PSID` 更換後無法跨重啟存活
+
+`/setcookie` 熱更新在 process 存活期間完全有效（G2 要驗的正是這點）。
+但若管理員更換的是**整組新 session（`1PSID` 也變了）**，重啟後 bot 仍從 `.env` / Settings
+讀取舊的 `1PSID`，而新快取檔以新 `1PSID` 為鍵、不會被命中 → 服務退回舊憑證而失效。
+
+`1PSID` 不變、只輪替 `1PSIDTS` 的情況則安全：快取以 `1PSID` 為鍵且優先載入。
+
+此缺口屬 config / `__main__` 接線層，不在 T3.4 範圍。由 Commander 於 Phase 4 整合時處理
+（可能作法：`/setcookie` 後將新憑證寫回受權限保護的 runtime 覆寫檔，並讓 Settings 優先讀它）。
