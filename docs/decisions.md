@@ -303,3 +303,26 @@ Gemini client」只保證**單一 process 內**唯一，未涵蓋與運行中 bo
 
 腳本應自行偵測並拒絕在 bot 運行時執行，例如以 `GEMINI_COOKIE_PATH` 下的 lock file
 或檢查既有 process。目前僅以文件約束，屬於可被誤觸的設計。
+
+## D12 — T3.10 的預期輸出已用真實 fixture 示範並確認
+
+派工前以 `tests/fixtures/image-web.json` 實測示範，八個情境全部符合預期
+（`<Image/>` 移除、`<FollowUp/>` 保留 label 為斜體、標題轉粗體、`---` 移除、
+code fence 內原樣保留、未知大寫 tag 清除、小寫 HTML 不受影響、清空後走
+`EMPTY_RESPONSE_TEXT`、U+2007 縮排維持）。
+
+### 示範過程發現的踩坑點：渲染器只支援 `*italic*`，不支援 `_italic_`
+
+```
+*星號*  -> '<i>斜體</i>'
+_底線_  -> '_斜體_'      ← 原樣輸出
+```
+
+`<FollowUp>` 的 label 若用 `_label_` 包裹會產生字面底線。**必須用 `*label*`。**
+真實 fixture 未暴露此問題（Gemini 輸出用星號），但憑直覺實作極易踩到。
+
+### 裁定：不補 `_italic_` 支援
+
+`_italic_` 雖是標準 Markdown 語法，但補上會使 `some_var_name` 這類
+snake_case 識別字被誤判為斜體。Gemini 實際輸出一律使用星號，
+補此語法弊大於利。**維持只支援 `*italic*`。**
