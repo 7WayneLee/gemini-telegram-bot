@@ -711,3 +711,56 @@ sudo systemctl restart gemini-tg-bot
 ```
 
 刪快取那步不可省 —— 上游快取優先序高於 `.env`（合約 §2 / D6）。
+
+
+## D22 — ✅ D21 與 D6 均已修復（T3.15），cookie 維護流程大幅簡化
+
+### D21：啟動時認證失敗不再致命
+
+```
+UNAUTHENTICATED     state=degraded  拋例外=無  推播=有
+LOCATION_REJECTED   state=degraded  拋例外=無  推播=有（文案不同）
+AVAILABLE           state=healthy   拋例外=無  推播=無
+```
+
+啟動 log 明確指示：
+`Gemini startup is DEGRADED ... Telegram polling will continue; use /setcookie to restore service`
+
+**結果：cookie 過期不再造成 crash loop，`/setcookie` 隨時可用，不必 SSH 進主機。**
+
+僅設定錯誤（缺 token 等執行期無法修復者）仍會終止啟動。
+
+### D6：`/setcookie` 現在跨重啟持久
+
+`/setcookie` 成功後寫入 `{GEMINI_COOKIE_PATH}/runtime-credentials.json`，
+啟動時**優先於 `.env`**。實測確認：
+
+| 項目 | 結果 |
+|---|---|
+| 檔案權限 | `0600` |
+| override 優先於 `.env` | ✅ |
+| 回傳型別 | `SecretStr`（repr 自動遮蔽，降低誤印風險） |
+| 檔內是否明文 | 否（編碼存放） |
+| 檔案損毀 | 記 warning、回退 `.env`、**不中斷啟動** |
+| 檔案不存在 | 回退 `.env`，不報錯 |
+| cookie 是否進 log | 否（測試以 `FAKE_` 值斷言） |
+
+**結果：換整組新 session 後重啟不再退回舊憑證。**
+
+### 附帶：`scripts/grab_cookies.sh` 省去 F12
+
+直接讀 Firefox profile 的 `cookies.sqlite`，把兩個值送進剪貼簿，
+終端機只顯示長度不顯示值。實測 153 / 78 字元正確取出。
+
+### cookie 維護流程的前後對比
+
+| | 修復前 | 修復後 |
+|---|---|---|
+| 取得 cookie | 開 tunnel → Firefox → F12 → 手動複製兩個值 | 開 tunnel → 登入 → `sh scripts/grab_cookies.sh` |
+| 套用 | SSH 進 VM → nano env → **刪快取** → restart | Telegram 傳 `/setcookie` → 貼上 |
+| 重啟後 | 退回 `.env` 舊值，可能再次失效 | override 生效，維持可用 |
+| cookie 過期時 | **crash loop**，`/setcookie` 無法使用 | DEGRADED 但存活，`/setcookie` 可救 |
+
+**穩態下仍不需要常換 cookie** —— `auto_refresh` 每 600 秒輪替並寫入快取，
+只要服務持續運行，session 可無限延續。手動介入只在 VM 重開機、
+服務停機過久、或 Google 主動作廢時才需要。
