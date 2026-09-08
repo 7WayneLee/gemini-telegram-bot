@@ -183,6 +183,7 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `/model` | 呼叫 `client.list_models()` **動態**列出，inline keyboard 選擇 |
 | `/gem` | 列出可用 gem，選定後套用於後續對話 |
 | `/temp` | 切換 temporary mode（不寫入 Gemini 歷史） |
+| `/img <prompt>` | **明確要求生成**圖片。未明示 generate 時 Gemini 傾向回傳網路搜尋來的圖 |
 | `/research <topic>` | 送出 Deep Research 背景任務，**立即回傳 task id** |
 | `/research_status` | 列出該 chat 的研究任務狀態 |
 | `/status` | 目前模型、session cid、cookie 最後刷新時間、佇列深度、今日用量、本月 egress 估算 |
