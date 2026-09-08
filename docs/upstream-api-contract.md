@@ -531,11 +531,79 @@ Telegram `callback_data` 上限 **64 bytes**。因此：
 
 ---
 
+## 七之二、`Candidate` 與 fixture 序列化（T3.2b 依據）
+
+`Candidate` 為 pydantic `BaseModel`：
+
+```python
+class Candidate:
+    rcid: str
+    text: str
+    text_delta: str | None = None
+    thoughts: str | None = None
+    thoughts_delta: str | None = None
+    web_images: list[WebImage] = []
+    generated_images: list[GeneratedImage] = []
+    generated_videos: list[GeneratedVideo] = []
+    generated_media: list[GeneratedMedia] = []
+    citations: list[Citation] = []
+    deep_research_plan: DeepResearchPlan | None = None
+    deep_research_document: DeepResearchDocument | None = None
+
+    @property
+    def images(self) -> list[Image]:      # web_images + generated_images，順序固定
+        ...
+```
+
+`ModelOutput(*, metadata: list[str], candidates: list[Candidate], chosen: int = 0)`。
+
+`Candidate.text` / `thoughts` 有 `field_validator` 會做 `html.unescape()`，
+因此拿到的已是解碼後的文字。
+
+### ⚠️ 直接 `model_dump_json()` 在真實回應上會失敗
+
+`Image.client` 的型別是 `curl_cffi.requests.session.AsyncSession`，
+真實回應中它是**活的 session 物件**，不可序列化：
+
+```
+PydanticSerializationError: Unable to serialize unknown type:
+<class 'curl_cffi.requests.session.AsyncSession'>
+```
+
+`GeneratedImage` 另有 `client_ref`（指向 `GeminiClient` 本身），同樣不可序列化。
+
+### fixture 的正確作法（實測可行）
+
+**不要**降級成 `SimpleNamespace` 手刻假物件 —— 用 pydantic 原生序列化並排除那兩個欄位，
+fixture 就能還原成**真正的 `ModelOutput`**：
+
+```python
+EXCLUDE = {
+    "candidates": {
+        "__all__": {
+            "web_images": {"__all__": {"client"}},
+            "generated_images": {"__all__": {"client", "client_ref"}},
+        }
+    }
+}
+
+# dump（由使用者實機執行）
+payload = output.model_dump_json(exclude=EXCLUDE, indent=2)
+
+# load（測試中）
+output = ModelOutput.model_validate_json(payload)   # client 還原為 None，其餘完整
+```
+
+已實測：排除後 round-trip 完整，`images`、`url`、`title`、`alt`、`text` 皆正確還原，
+`client` 還原為 `None`（不影響 URL 直傳路徑；走下載路徑時 `save()` 可自帶 client）。
+
+---
+
 ## 八、合約未涵蓋範圍
 
 以下尚未反射確認，需要時**必須回報 Commander 補做偵察，不得猜測**：
 
-- `Candidate`、`Citation`、`ChatHistory` 的欄位結構
+- `Citation`、`ChatHistory` 的欄位結構
 - `GeneratedVideo` / `GeneratedMedia` 的屬性與 `save()` 簽章（T3.2b 若處理影音需補）
 - `Image.url` 的對外可存取性 → **由 T3.2a HUMAN gate 實測回答**
 - 各例外的實際觸發條件與 HTTP 狀態碼對應 → 需 live 觀察，屬 G1/G2 範圍
