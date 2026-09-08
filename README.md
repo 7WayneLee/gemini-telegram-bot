@@ -3,275 +3,298 @@
 [![CI](https://github.com/7WayneLee/gemini-telegram-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/7WayneLee/gemini-telegram-bot/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-透過 [`gemini-webapi`](https://github.com/HanaokaYuzu/Gemini-API) 提供 Gemini 對話能力的
-Telegram bot。設計取向是**在資源受限、且與其他服務共用的小型 VM 上長期穩定運行** ——
-記憶體上限、零 egress 的圖片路徑、cookie 生命週期管理都是照這個前提做的。
+**English** · [正體中文](README.zh-TW.md)
 
-**這不是官方 Gemini API。** 認證方式是瀏覽器 cookie，不是 API key。
+A Telegram bot that talks to Google Gemini through
+[`gemini-webapi`](https://github.com/HanaokaYuzu/Gemini-API). It is built to **run
+unattended for long stretches on a small VM you share with other services** — the
+memory ceiling, the zero-egress image path, and the cookie lifecycle handling all
+follow from that premise.
 
----
-
-## ⚠️ 動手前必讀：安全前提
-
-這一節不是免責聲明，是實際的操作風險。
-
-### bot 持有的是一個真實 Google 帳號的完整 web session
-
-不是受限的 API token，是**完整的登入態**。這代表：
-
-- 若該帳號啟用了 Gemini extensions，**任何能與這個 bot 對話的人，都能透過
-  `@Gmail` 讀取該帳號的信箱內容**，`@Google Drive` 同理。
-- 因此白名單是 P0 功能而非後續迭代項目。`ALLOWED_USER_IDS` **未設定時 bot 拒絕所有訊息**，
-  只回覆一則說明並將未授權嘗試寫入 log。這個預設值不要改。
-
-### 請使用獨立的次要 Google 帳號
-
-**不要綁定你的主帳號。** 這是逆向工程的 API，違反 Google ToS，有封號風險
-（詳見下方「已知風險」）。
-
-### cookie 絕不可進入版本控制或 image
-
-- `.env` 權限設為 `600`
-- `.gitignore` 已涵蓋 `.env`、`data/`、`cookies/`
-- `Dockerfile` 只 `COPY pyproject.toml` 與 `src/`，密鑰不會進入任何 image layer
-- cookie 快取檔名本身**含有 `__Secure-1PSID` 明文**
-  （`.cached_cookies_{1PSID}.json`），因此該路徑不會被寫進 log，
-  `/status` 只回報刷新時間、不回報路徑
+**This is not the official Gemini API.** Authentication is a browser cookie, not an
+API key.
 
 ---
 
-## 快速開始
+## ⚠️ Read this before you start
 
-需要 **Python 3.12+** 與 [uv](https://docs.astral.sh/uv/)。
+This section is about real operational risk, not legal boilerplate.
+
+### The bot holds a full web session for a real Google account
+
+Not a scoped API token — a complete logged-in session. That means:
+
+- If the account has Gemini extensions enabled, **anyone who can talk to the bot can
+  read that account's mailbox via `@Gmail`**, and the same applies to `@Google Drive`.
+- That is why the allowlist is a P0 feature rather than a later refinement. When
+  `ALLOWED_USER_IDS` is unset the bot **rejects every message**, replies once with an
+  explanation, and logs the attempt. Do not change that default.
+
+### Use a separate, secondary Google account
+
+**Do not use your primary account.** This is a reverse-engineered API, it violates
+Google's Terms of Service, and the account can be restricted (see
+[Known risks](#known-risks)).
+
+### Cookies must never reach version control or an image
+
+- `.env` is `chmod 600`
+- `.gitignore` covers `.env`, `data/`, and `cookies/`
+- The `Dockerfile` copies only `pyproject.toml` and `src/`, so no secret enters an
+  image layer
+- The cookie cache **filename itself contains the `__Secure-1PSID` value**
+  (`.cached_cookies_{1PSID}.json`), so that path is never logged and `/status`
+  reports only the refresh time, never the path
+
+---
+
+## Quick start
+
+Requires **Python 3.12+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# 1. 取得程式碼並安裝相依
+# 1. Get the code and install dependencies
 git clone https://github.com/7WayneLee/gemini-telegram-bot.git
 cd gemini-telegram-bot
 uv sync
 
-# 2. 建立設定檔
+# 2. Create the config file
 cp .env.example .env && chmod 600 .env
 
-# 3. 填入五個必要值（見下方「設定」）
+# 3. Fill in the five required values (see Configuration below)
 #    TELEGRAM_BOT_TOKEN / ADMIN_USER_ID / ALLOWED_USER_IDS
 #    GEMINI_SECURE_1PSID / GEMINI_SECURE_1PSIDTS
-#    cookie 的取得方式見下一節 —— 那是本專案最關鍵的步驟
+#    How to obtain the cookies is the next section — it is the step that matters most
 
-# 4. 起飛前檢查（不會發出任何 Gemini 請求，也不會印出任何祕密值）
+# 4. Preflight (makes no Gemini request and prints no secret value)
 uv run python scripts/preflight.py
 
-# 5. 不需憑證的全鏈路煙霧測試
+# 5. Credential-free end-to-end smoke test
 uv run python -m gemini_tg_bot --dry-run
 
-# 6. 啟動
+# 6. Run
 uv run python -m gemini_tg_bot
 ```
 
-`preflight.py` 會檢查 `.env` 完整性與權限、cookie 目錄可寫性、以及
-**proxy 後的對外 IP** —— 最後一項是 cookie 壽命的關鍵，見下一節。
+`preflight.py` checks that `.env` is complete and correctly permissioned, that the
+cookie directory is writable, and — with `--check-ip` — **what your egress IP
+actually is**. That last one governs how long your cookies survive; see below.
 
 ---
 
-## Cookie 取得流程（本專案最關鍵的操作步驟）
+## Getting the cookies
 
-### 為什麼不能直接在瀏覽器複製 cookie
+### Why you cannot just copy them from your browser
 
-cookie 的「**出生 IP**」必須與「**使用 IP**」一致。
+The cookie's **birth IP** must match its **use IP**.
 
-若你在台灣的瀏覽器取得 cookie、卻拿到美國區 VM 上使用，Google 會偵測到 session
-地理位置大幅跳動，觸發安全驗證並**頻繁作廢 cookie**。你會陷入「每隔幾小時就要重新登入」
-的迴圈，而且找不出原因。
+If you obtain a cookie from a browser in one country and then use it on a VM in
+another, Google sees the session jump geographically, triggers a security check, and
+**invalidates the cookie repeatedly**. You end up re-authenticating every few hours
+without understanding why.
 
-解法是讓瀏覽器**透過 VM 的出口登入**，使 session 從誕生到使用都在同一個 IP。
+The fix is to make the browser log in **through the VM's egress**, so the session is
+born and used at the same IP.
 
-### 步驟
+### Steps
 
-1. **建立到 VM 的 SOCKS 通道**（把 `your-vm` 換成你的 SSH alias）：
+1. **Open a SOCKS tunnel to the VM** (replace `your-vm` with your SSH alias):
 
    ```bash
    ssh -D 1080 -C -q -N your-vm
    ```
 
-   這個 terminal 要保持開著。
+   Leave this running.
 
-2. **建立獨立的 Firefox profile**，並以與 VM 區域相符的時區啟動
-   （降低指紋不一致訊號）：
+2. **Create a dedicated Firefox profile**, launched with a timezone matching the VM's
+   region to reduce fingerprint mismatch:
 
    ```bash
    TZ=America/Chicago /Applications/Firefox.app/Contents/MacOS/firefox -P gemini-us
    ```
 
-   **務必使用 Firefox。** 上游 README 指出 Chromium 系瀏覽器的
-   Device Bound Session Credentials (DBSC) 會讓 cookie 只維持數小時且無法更新。
+   **Use Firefox.** Upstream notes that Chromium's Device Bound Session Credentials
+   make the cookie last only hours and prevent refresh.
 
-3. **Firefox 設定 → Network Settings → Manual proxy**：
-   - SOCKS Host `127.0.0.1`，Port `1080`，**SOCKS v5**
-   - **勾選 "Proxy DNS when using SOCKS v5"** —— 沒勾的話 DNS 會走本地，洩漏真實位置
+3. **Firefox Settings → Network Settings → Manual proxy**:
+   - SOCKS Host `127.0.0.1`, Port `1080`, **SOCKS v5**
+   - **Tick "Proxy DNS when using SOCKS v5"** — without it DNS goes out locally and
+     leaks your real location
 
-4. **先確認對外 IP 已是 VM 的位址**，再開私密視窗登入 `gemini.google.com`：
+4. **Confirm your egress IP is the VM's** before logging in to `gemini.google.com`:
 
    ```bash
    curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
    ```
 
-5. **F12 → Network → 複製 `__Secure-1PSID` 與 `__Secure-1PSIDTS`**，
-   然後**立即關閉私密視窗**（見上游 issue #6）。
+5. **F12 → Network → copy `__Secure-1PSID` and `__Secure-1PSIDTS`**, then close the
+   private window immediately (see upstream issue #6).
 
-6. 填入 `.env`，或透過 bot 的 `/setcookie` 指令注入（不需重啟 process）。
+6. Put them in `.env`, or inject them with the bot's `/setcookie` command — no process
+   restart needed.
 
-### 更快的作法：`scripts/grab_cookies.sh`
+### Faster: `scripts/grab_cookies.sh`
 
-步驟 5 的 F12 手動複製可以省略。保持 tunnel 開著並登入後，在 Mac 上執行：
+Step 5's manual copying can be skipped. With the tunnel up and the session logged in:
 
 ```bash
 sh scripts/grab_cookies.sh
 ```
 
-它會直接從 Firefox profile 的 `cookies.sqlite` 讀出兩個 cookie 並**送進剪貼簿**，
-接著在 Telegram 傳 `/setcookie` 貼上即可。終端機只顯示長度，不顯示任何值。
+It reads `cookies.sqlite` from the Firefox profile directly and puts both values **on
+the clipboard**, ready to paste into `/setcookie`. The terminal prints only their
+lengths, never the values.
 
-指定其他 profile：`sh scripts/grab_cookies.sh <profile-name>`（預設 `gemini-us`）。
+Use a different profile with `sh scripts/grab_cookies.sh <profile-name>` (default
+`gemini-us`).
 
-**前提仍然是 tunnel 必須開著** —— cookie 的出生 IP 必須是 VM 的 IP，
-這一點不會因為取得方式變方便而改變。取之前先確認：
+**The tunnel is still required.** A more convenient way to fetch the cookie does not
+change the fact that its birth IP must be the VM's. Verify first:
 
 ```bash
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 ```
 
-> **預期行為**：台灣帳號首次從美國 IP 登入時，Google 大機率要求二階段驗證並寄送
-> 新裝置通知。這是正常的，通過後即穩定。
+> **Expected**: the first login from a new country will very likely trigger 2FA and a
+> new-device notification. That is normal, and it settles down afterwards.
 
-### 在本機測試（不必動正式主機）
+### Testing locally without touching the server
 
-`GEMINI_PROXY` 支援 SOCKS。掛著上面的 tunnel 就能在本機以 VM 的出口 IP 執行：
+`GEMINI_PROXY` accepts SOCKS. With the tunnel up you can run the bot on your own
+machine while still presenting the VM's egress IP:
 
 ```
 GEMINI_PROXY=socks5h://127.0.0.1:1080
 ```
 
-用 `socks5h` 而非 `socks5` —— `h` 代表 DNS 也走 tunnel，對應步驟 3 勾選的
-「Proxy DNS」。DNS 走本地會洩漏真實位置。
+Use `socks5h`, not `socks5` — the `h` sends DNS through the tunnel too, matching the
+"Proxy DNS" box in step 3. Local DNS resolution leaks your real location.
 
-### cookie 會自動輪替
+### Cookies rotate on their own
 
-啟動後 `auto_refresh` 會在背景輪替 `__Secure-1PSIDTS`（預設每 600 秒），
-並寫入 `GEMINI_COOKIE_PATH`。因此：
+Once running, `auto_refresh` rotates `__Secure-1PSIDTS` in the background (every 600
+seconds by default) and writes it to `GEMINI_COOKIE_PATH`. So:
 
-- **`.env` 裡那份在啟動後就過時了**，實際生效的是快取檔
-- 重啟不需要重新取得 cookie；只有整個 session 被 Google 作廢時才需要
-- 這也是 `GEMINI_COOKIE_PATH` 必須掛在 volume 的原因 —— 沒掛的話容器重建即失效
+- **The copy in `.env` goes stale as soon as the bot starts.** The cache is what is
+  actually in use.
+- Restarting does not require re-fetching cookies; only a session Google has
+  invalidated does.
+- This is why `GEMINI_COOKIE_PATH` must live on a mounted volume — without one, a
+  container rebuild loses the session.
+- `/setcookie` writes its credentials to a `0600` runtime override that **takes
+  precedence over `.env` on the next start**, so a hot update survives a restart.
 
 ---
 
-## 設定
+## Configuration
 
-`.env.example` 內含完整註解。必填五項：
+`.env.example` is fully commented. Five values are required:
 
-| 變數 | 說明 |
+| Variable | Meaning |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | BotFather 發的 token |
-| `ADMIN_USER_ID` | 可執行管理員指令的 Telegram user ID |
-| `ALLOWED_USER_IDS` | 逗號分隔的白名單。**留空 = 拒絕所有人** |
+| `TELEGRAM_BOT_TOKEN` | Token from BotFather |
+| `ADMIN_USER_ID` | Telegram user ID allowed to run admin commands |
+| `ALLOWED_USER_IDS` | Comma-separated allowlist. **Empty means nobody is allowed** |
 | `GEMINI_SECURE_1PSID` | Gemini cookie |
 | `GEMINI_SECURE_1PSIDTS` | Gemini cookie |
 
-其餘皆有安全預設值，其中三個特別值得注意：
+Everything else has a safe default. Three are worth knowing about:
 
-| 變數 | 預設 | 為什麼是這個值 |
+| Variable | Default | Why |
 |---|---|---|
-| `MAX_CONCURRENCY` | `1` | 記憶體受限，且單一 Gemini 帳號本有配額上限，併發無實益 |
-| `ENABLE_VIDEO_GENERATION` | `false` | 單支可達數十 MB，會直接吃掉整月免費 egress |
-| `ENABLE_AUDIO_GENERATION` | `false` | 同上 |
+| `MAX_CONCURRENCY` | `1` | Memory is the constraint, and a single Gemini account has its own quota ceiling, so concurrency buys nothing |
+| `ENABLE_VIDEO_GENERATION` | `false` | A single clip can be tens of MB and eat a month's free egress |
+| `ENABLE_AUDIO_GENERATION` | `false` | Same |
 
 ---
 
-## 指令
+## Commands
 
-### 一般使用者
+### Everyone on the allowlist
 
-| 指令 | 行為 |
+| Command | Behaviour |
 |---|---|
-| `/start`、`/help` | 說明可用指令 |
-| `/new` | 結束目前對話，開新的 `ChatSession` |
-| `/model` | 呼叫 `client.list_models()` **動態**列出，inline keyboard 選擇 |
-| `/gem` | 列出可用 gem，選定後套用於後續對話 |
-| `/temp` | 切換 temporary mode（不寫入 Gemini 歷史） |
-| `/img <prompt>` | **明確要求生成**圖片。未明示 generate 時 Gemini 傾向回傳網路搜尋來的圖 |
-| `/research <topic>` | 送出 Deep Research 背景任務，**立即回傳 task id** |
-| `/research_status` | 列出該 chat 的研究任務狀態 |
-| `/status` | 目前模型、session cid、cookie 最後刷新時間、佇列深度、今日用量、本月 egress 估算 |
-| 純文字訊息 | 送入目前 `ChatSession`，**streaming 回覆** |
-| 圖片 / 文件 | 作為 `files=[...]` 送給 Gemini，caption 作為 prompt |
+| `/start`, `/help` | Show available commands |
+| `/new` | End the current conversation and start a fresh `ChatSession` |
+| `/model` | List models **dynamically** via `client.list_models()`, pick from an inline keyboard |
+| `/gem` | List available gems and apply one to the conversation |
+| `/temp` | Toggle temporary mode (nothing written to Gemini history) |
+| `/img <prompt>` | **Explicitly ask for generation.** Without that wording Gemini tends to return web search results rather than an AI-generated image |
+| `/research <topic>` | Submit a Deep Research task and **return a task id immediately** |
+| `/research_status` | Status of this chat's research tasks |
+| `/status` | Current model, session cid, last cookie refresh, queue depth, today's usage, month-to-date egress estimate |
+| Plain text | Sent to the current `ChatSession`, answered with **streaming** |
+| Photo / document | Passed as `files=[...]`; the caption becomes the prompt |
 
-模型清單一律動態取得，**不硬編碼** —— 上游已棄用 `Model` enum 並移除
-`Model.from_name` / `Model.from_dict`。
+Model lists are always fetched at runtime and **never hard-coded** — upstream has
+deprecated the `Model` enum and removed `Model.from_name` / `Model.from_dict`.
 
-### 管理員（限 `ADMIN_USER_ID`）
+### Admin only (`ADMIN_USER_ID`)
 
-| 指令 | 行為 |
+| Command | Behaviour |
 |---|---|
-| `/setcookie` | 互動流程接收新 cookie，**熱重啟 client 不重啟 process**；訊息收到後立即刪除 |
-| `/allow <user_id>` | 加入白名單（寫入 DB，即時生效） |
-| `/deny <user_id>` | 移出白名單。**deny 優先於靜態白名單** |
-| `/health` | client 健康狀態、最近錯誤、DB 狀態 |
+| `/setcookie` | Accept new cookies interactively, **hot-restart the client without restarting the process**, and delete the message on receipt |
+| `/allow <user_id>` | Add to the allowlist (persisted, effective immediately) |
+| `/deny <user_id>` | Remove from the allowlist. **Deny beats the static allowlist** |
+| `/health` | Client health, recent errors, database status |
 
 ---
 
-## 部署
+## Deployment
 
-> **本專案設計為與其他服務共用一台小型 VM。** 下列建議假設你的主機上還跑著別的東西
-> （媒體伺服器、下載工具之類）。若是專用主機，資源限制可以放寬。
+> This project assumes your host is **shared with other services** (a media server, a
+> download client, that sort of thing). On a dedicated host you can relax the limits.
 
-### 先實測你自己的主機
+### Measure your own host first
 
-**不要沿用任何範例數值。** 部署前在目標主機執行：
+**Do not copy any example numbers.** On the target host:
 
 ```bash
 nproc && free -h && df -h / && swapon --show
-docker stats --no-stream    # 若既有服務是容器
+docker stats --no-stream    # if the existing services are containers
 ```
 
-### 資源限制怎麼推導
+### How to derive the resource limits
 
-限制的目的**不是**讓 bot 跑得順，而是**讓 bot 先被 OOM killer 終結，
-而不是波及同機的其他服務**。因此應該設在「夠 bot 正常運作」而非「盡可能多」。
+The point of the limits is **not** to make the bot fast. It is to make the bot the
+thing the OOM killer takes, rather than the services around it. So set them
+"comfortably enough for the bot", not "as much as available".
 
-參考點：本專案在 Python 3.12 下的常駐 RSS 約 **120–180 MiB**
-（`MAX_CONCURRENCY=1`、走 URL 直傳時）。
+For reference, this project's resident set is roughly **120–180 MiB** on Python 3.12
+with `MAX_CONCURRENCY=1` and the URL-direct image path.
 
-實際部署過的一組數值，供對照 —— 主機為 2 vCPU / 969 MiB RAM / 2 GB swap，
-且已有其他服務佔用，可用記憶體僅 441 MiB：
+A worked example from a real deployment — 2 vCPU, 969 MiB RAM, 2 GB swap, already
+running other services, with only 441 MiB available:
 
-| 項目 | 該例採用值 | 推導方式 |
+| Setting | Value used | Reasoning |
 |---|---|---|
-| `mem_limit` / `MemoryMax` | `256m` | 高於典型 RSS 上限，遠低於可用量；觸限時死的是 bot |
-| `memswap_limit` / `MemorySwapMax` | `512m` | mem_limit 兩倍 |
-| `cpus` / `CPUQuota` | `0.5` / `50%` | 2 核取 25% 總算力；bot 以 I/O 為主 |
-| 媒體暫存上限 | `256m` | 單檔上限 20 MB 且併發 1，用量遠低於此 |
+| `mem_limit` / `MemoryMax` | `256m` | Above the typical RSS ceiling, well under what is available; when it trips, the bot is what dies |
+| `memswap_limit` / `MemorySwapMax` | `512m` | Twice `mem_limit` |
+| `cpus` / `CPUQuota` | `0.5` / `50%` | A quarter of a 2-core box; the bot is I/O-bound anyway |
+| Media scratch cap | `256m` | Uploads cap at 20 MB and concurrency is 1, so real usage is far lower |
 
-若你的主機記憶體充裕，`mem_limit` 仍不建議設得太高 —— 沒有意義，
-反而讓 OOM 時的犧牲對象變得不確定。
+Even on a roomy host, a high `mem_limit` is not useful — it just makes the OOM
+victim less predictable.
 
-**媒體暫存必須落在磁碟，不得使用 tmpfs。** tmpfs 會吃 RAM，
-等同繞過 `mem_limit` 去搶其他服務的記憶體。
+**Media scratch space must be on disk, never tmpfs.** tmpfs consumes RAM, which is
+exactly the resource the limit exists to protect.
 
-### systemd 或 Docker？
+### systemd or Docker?
 
-若主機記憶體吃緊、且既有服務不是容器，**建議 systemd**
-（`deploy/gemini-tg-bot.service`）—— 為單一 bot 引入 Docker daemon 的常駐開銷
-在小機器上不划算。反之若你已經在用 Docker，compose 方案更省事。
+If memory is tight and the existing services are not containers, **prefer systemd**
+(`deploy/gemini-tg-bot.service`) — running a Docker daemon for one bot is a poor
+trade on a small box. If you already run Docker, Compose is less work.
 
-兩者資源限制等價：
+The limits are equivalent either way:
 
 | | Docker Compose | systemd |
 |---|---|---|
-| 記憶體 | `mem_limit` | `MemoryMax` |
-| swap | `memswap_limit` | `MemorySwapMax` |
+| Memory | `mem_limit` | `MemoryMax` |
+| Swap | `memswap_limit` | `MemorySwapMax` |
 | CPU | `cpus` | `CPUQuota` |
 
-詳細步驟見 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
+Step-by-step instructions, including the traps hit during a real deployment, are in
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ### Docker Compose
 
@@ -279,190 +302,229 @@ docker stats --no-stream    # 若既有服務是容器
 docker compose -p gemini-bot -f deploy/docker-compose.yml up -d
 ```
 
-- **用獨立的 project 名**（`-p gemini-bot`），不要併進既有 stack 的 compose 檔
-- **與其他服務共用主機時，避免 `docker compose down`** —— 容易誤停到別的東西。
-  重啟用 `docker compose -p gemini-bot restart bot`
-- **不設定任何 `ports`** —— long polling 不需要 inbound port
+- **Use a separate project name** (`-p gemini-bot`); do not fold this into an existing
+  stack's compose file
+- **Avoid `docker compose down` on a shared host** — it is easy to stop more than you
+  meant to. Restart with `docker compose -p gemini-bot restart bot`
+- **Do not set any `ports`** — long polling needs no inbound port
 
-### 防火牆
+### Firewall
 
-**不需開啟任何 inbound port。** 這是採用 long polling 而非 webhook 的主要安全收益，
-既有服務的埠不受影響。
+**No inbound port is required.** That is the main security benefit of long polling
+over webhooks, and it leaves your existing services' ports untouched.
 
 ---
 
-## 成本與 egress
+## Cost and egress
 
-VM 位於美國區，月預算上限 US$10。**egress 是主要成本來源**：
-以 GCP 為例，免費層每月僅 1GB 北美對外流量，超出約 US$0.12/GB —— 而且這個額度是**整台機器共用的**，若主機上還跑著媒體串流之類的服務，留給 bot 的餘裕會比想像中少。
+**Egress is the dominant cost.** On GCP's free tier, for example, you get 1 GB of
+North America egress per month and pay about US$0.12/GB beyond it — and that
+allowance is **shared across the whole machine**, so a media server on the same host
+leaves less headroom than you would expect.
 
-### 零 egress 的圖片路徑
+### The zero-egress image path
 
-天真的作法會讓同一份資料走兩次網路：Gemini 回傳圖片 → VM 下載 → VM 上傳給 Telegram。
+The naive approach sends the same bytes over the network twice: Gemini returns an
+image → the VM downloads it → the VM uploads it to Telegram.
 
-Telegram 的 `sendPhoto` / `sendMediaGroup` 接受 **URL 字串**，由 Telegram 伺服器
-自行抓取來源，完全不經過 VM。本專案兩條路徑都實作：
+Telegram's `sendPhoto` / `sendMediaGroup` accept a **URL string** and fetch the
+source themselves, bypassing the VM entirely. Both paths are implemented:
 
-| 路徑 | egress | 何時採用 |
+| Path | Egress | When |
 |---|---|---|
-| **A. URL 直傳** | **0** | 預設樂觀嘗試 |
-| **B. 下載後上傳** | 計量 | Telegram 回 `BadRequest` 時自動退回 |
+| **A. URL passthrough** | **0** | Tried first |
+| **B. Download and relay** | Metered | Automatically, when Telegram returns `BadRequest` |
 
-退回是**逐張**判斷的，一張失敗不影響其他張。`/status` 會回報本月累計 egress 估算值，
-讓流量消耗可見，而不是事後從帳單發現。
+Measured behaviour differs sharply by image source:
 
-若 `/status` 的 egress 維持 0，代表路徑 A 正常運作。
+| Source | URL | Telegram can fetch it | Egress |
+|---|---|---|---|
+| `WebImage` (search results) | Ordinary third-party URLs | ✅ | **0** |
+| `GeneratedImage` (`/img`) | Signed `lh3.googleusercontent.com` URL | ❌ (400) | Metered per image |
 
-### 其他成本控制
+This is why the two delivery modes are independent switches — a single global toggle
+would force you to either relay everything (wasting the free path) or pass through
+everything (breaking generated images).
 
-- 影片／音訊生成**預設停用**，需明確開啟環境變數
-- 使用者上傳上限 20MB（Telegram Bot API 限制），**提前拒絕**而非下載到一半才失敗
-- 媒體暫存用完即刪
-- 日誌輪替 `max-size: 5m`、`max-file: 2`
+Fallback is decided **per image**, so one failure does not affect the rest. `/status`
+reports the month-to-date estimate so the cost stays visible rather than arriving on
+a bill.
+
+### Other cost controls
+
+- Video and audio generation are **off by default** behind explicit env vars
+- Uploads are capped at 20 MB (Telegram's limit) and **rejected up front** rather
+  than failing halfway through a download
+- Media scratch files are deleted after use
+- Log rotation at `max-size: 5m`, `max-file: 2`
 
 ---
 
-## 架構
+## Architecture
 
 ```
-Telegram Long Polling
+Telegram long polling
         │
    ┌────▼──────────────────────────┐
-   │ Auth Middleware（預設拒絕）      │
+   │ Auth middleware (deny by default)
    └────┬──────────────────────────┘
    ┌────▼──────────────────────────┐
-   │ Command Router / Handlers     │
+   │ Command router / handlers     │
    └────┬──────────────────────────┘
    ┌────▼──────────────────────────┐
    │ RequestQueue                  │
-   │  Semaphore + per-user bucket  │
+   │  semaphore + per-user bucket  │
    └────┬──────────────────────────┘
    ┌────▼──────────────────────────┐
-   │ GeminiService（singleton）      │
-   │  生命週期 / DEGRADED 狀態機      │
+   │ GeminiService (singleton)     │
+   │  lifecycle / DEGRADED machine │
    └────┬──────────────────────────┘
    ┌────▼──────────────────────────┐
    │ gemini_webapi.GeminiClient    │
    └───────────────────────────────┘
 
-旁路：SQLite (aiosqlite)、Cookie Store、Admin Notifier
+Alongside: SQLite (aiosqlite), cookie store, admin notifier
 ```
 
-### 為什麼必須是單例
+### Why it must be a singleton
 
-`auto_refresh=True` 會在背景輪替 `__Secure-1PSIDTS`。**多個 process 共用同一組 cookie
-會互相作廢**，導致帳號反覆登出。因此：單一 process、單一 event loop、
-不得開多 worker 或多 replica。
+`auto_refresh=True` rotates `__Secure-1PSIDTS` in the background. **Two processes
+sharing one cookie invalidate each other**, logging the account out repeatedly. Hence:
+one process, one event loop, no extra workers or replicas.
 
-程式碼中只有一處 `GeminiClient(...)` 建構點（`gemini/service.py`），這是刻意的架構約束。
+There is exactly one `GeminiClient(...)` construction site in the codebase
+(`gemini/service.py`), enforced deliberately.
 
-### DEGRADED 狀態機
+### The DEGRADED state machine
 
-服務降級有兩種成因，恢復路徑完全不同：
+Degradation has two causes with completely different recovery paths:
 
-| 成因 | 觸發 | 恢復 |
+| Cause | Trigger | Recovery |
 |---|---|---|
-| `AUTH` | `AuthError`，**立即** | **僅能**由 `/setcookie` 恢復，不會隨時間自癒 |
-| `BLOCKED` | 連續 3 次 `TemporarilyBlockedError` | 15 分鐘後 half-open 探測，成功即自動恢復 |
+| `AUTH` | `AuthError`, or a non-`AVAILABLE` account status, **immediately** | **Only** `/setcookie`; it never heals with time |
+| `BLOCKED` | Three consecutive `TemporarilyBlockedError` | Half-open probe after 15 minutes, recovers on its own |
 
-分開處理的理由：AUTH 是憑證問題，等待無意義，必須人工換 cookie；
-BLOCKED 是上游節流，會自行恢復，若也要求人工介入只會製造無謂的管理員噪音。
+They are separated because auth problems never fix themselves and need a human,
+while upstream throttling does — paging an admin for the latter is pure noise.
+
+Authentication failure **at startup does not kill the process**. The bot enters
+DEGRADED, notifies the admin, and still starts polling, so `/setcookie` can rescue it
+without SSH access.
 
 ### Rendering
 
-Gemini 輸出標準 Markdown，與 Telegram 的 MarkdownV2 跳脫規則不相容，直接送出必然失敗。
-本專案轉為 Telegram HTML（僅支援 `b/i/u/s/code/pre/a/blockquote`），不支援的結構降級為純文字。
+Gemini emits standard Markdown, which is incompatible with Telegram's MarkdownV2
+escaping rules — sending it directly always fails. This project converts to Telegram
+HTML (only `b/i/u/s/code/pre/a/blockquote` are supported) and degrades anything else.
 
-- **LaTeX**：Telegram 無法排版 LaTeX。本專案選擇**以 `<code>` 包裹原式**保留原文，
-  而非轉 Unicode 近似 —— 近似轉換在複雜公式上會失真且不可逆，保留原文至少可讀可複製。
-- **切段**：4000 字元安全上限，優先在 `\n\n` 切、其次 `\n`、最後硬切。
-  切點不會落在 code fence 內部，跨段的 code block 會在每段補上開闔標記。
-- **巢狀清單**：Telegram HTML 無 `<ul>`/`<li>`，以符號與縮排模擬。
-  第一層 `• `、第二層 `◦ `、第三層 `▪ `，縮排使用 **U+2007 FIGURE SPACE**
-  （一般空白會被 Telegram 摺疊）。最多三層，更深者併入第三層。
-- **Streaming**：每 1.5 秒或每累積 200 字元才 edit（取先到者）。
-  **串流期間一律純文字，只有最後一次 edit 才套用 HTML** —— 這避免中途出現
-  未閉合標籤導致 `can't parse entities`。
-
----
-
-## 已知風險
-
-### 1. 違反 Google ToS，有封號風險
-
-`gemini-webapi` 是**逆向工程**的 web app wrapper，不是官方 API。使用它違反 Google 的
-服務條款。帳號可能被限制或停權，而且不會有事先通知。
-
-**請務必使用獨立的次要帳號，不要綁定主帳號。**
-
-### 2. cookie 會過期，且過期頻率不可預測
-
-Google 會主動作廢 session。實務上影響最大的因素是 **IP 一致性** ——
-出生 IP 與使用 IP 不同會顯著提高作廢頻率（見上方 cookie 取得流程）。
-
-即使一切正確，仍應預期**定期需要人工重新取得 cookie**。
-bot 會在偵測到 `AuthError` 時進入 DEGRADED 並主動推播管理員，
-你不需要盯著 log，但需要在收到推播時處理。
-
-### 3. AGPL-3.0 授權影響
-
-`gemini-webapi` 採用 **AGPL-3.0**。這是 copyleft 授權，且**涵蓋網路服務**：
-若你把基於它的服務提供給第三方使用，AGPL 要求你也必須提供對應的原始碼。
-
-自用不受影響。但若你打算對外提供服務，請先確認你能接受這個義務。
-
-### 4. singleton 架構的擴展限制
-
-單例約束（見上方「為什麼必須是單例」）意味著**這個架構無法水平擴展**。
-不能開多 replica、不能用 Kubernetes 做多副本部署、不能靠加機器提高吞吐。
-
-若未來需要更高吞吐，唯一的路是**多帳號 cookie 池與輪替**，那需要重新設計
-cookie 生命週期管理，不是調整設定就能達成。本專案明確不做這件事。
-
-### 5. 上游 API 可能無預警變動
-
-`gemini_webapi` 追隨 Google 的內部介面，更新頻繁。本專案的所有上游 API 事實記錄在
-`docs/upstream-api-contract.md`（由反射實測產生，非依據 README 撰寫），
-**升級 `gemini-webapi` 版本時必須重跑 `scripts/probe_upstream.py` 並逐項比對**。
-
-已知的上游缺陷可見合約 §四之二：`ARTIFACTS_RE` 對 `<數字>_<數字>` 形式的
-圖片佔位符清理不完全，本專案自行補了一層清理。
+- **LaTeX**: Telegram cannot typeset it. The original expression is wrapped in
+  `<code>` rather than approximated in Unicode, because approximation loses
+  information irreversibly on non-trivial formulas.
+- **Splitting**: 4000-character safety limit, preferring `\n\n`, then `\n`, then a
+  hard cut. Splits never land inside a code fence, and a block spanning segments gets
+  its markers reopened in each one.
+- **Nested lists**: Telegram HTML has no `<ul>`/`<li>`, so they are simulated with
+  `• `, `◦ `, and `▪ ` plus **U+2007 FIGURE SPACE** indentation — ordinary spaces are
+  collapsed by Telegram. Three levels; deeper items fold into the third.
+- **Streaming**: edits are throttled to every 1.5 seconds or 200 accumulated
+  characters, whichever comes first. **Intermediate edits are plain text, and only the
+  final edit applies HTML** — otherwise a half-written tag mid-stream causes
+  `can't parse entities`.
+- **Upstream artifacts**: Gemini leaves placeholders in `text` that upstream does not
+  fully strip. Both known formats are cleaned; see
+  [`docs/upstream-api-contract.md`](docs/upstream-api-contract.md).
 
 ---
 
-## 開發
+## Known risks
+
+### 1. It violates Google's ToS and the account can be banned
+
+`gemini-webapi` is a **reverse-engineered** wrapper around the web app, not an
+official API. Using it breaks Google's terms. The account may be restricted or
+suspended, without warning.
+
+**Use a secondary account. Do not use your primary one.**
+
+### 2. Cookies expire, and not on a predictable schedule
+
+Google invalidates sessions on its own. In practice the biggest factor is **IP
+consistency** — a mismatch between the cookie's birth IP and its use IP raises the
+invalidation rate sharply (see [Getting the cookies](#getting-the-cookies)).
+
+Even with everything right, expect to re-authenticate periodically. The bot enters
+DEGRADED on `AuthError` and notifies the admin, so you do not need to watch logs — but
+you do need to act when the notification arrives.
+
+In steady state this is rarer than it sounds: `auto_refresh` keeps rotating the
+session for as long as the bot keeps running. Manual intervention is mostly needed
+after a reboot, a long outage, or an invalidation by Google.
+
+### 3. AGPL-3.0 obligations
+
+`gemini-webapi` is **AGPL-3.0**, this project imports it directly, and so this project
+is AGPL-3.0 too. That is a consequence of the dependency, not a preference.
+
+AGPL is copyleft that **extends to network use**:
+
+- **Running it for yourself** — no additional obligation
+- **Offering it to anyone else over a network**, even just friends — §13 requires you
+  to offer those users the complete corresponding source, including your changes
+
+If you fork and modify, the obligation comes with it.
+
+### 4. The singleton design does not scale horizontally
+
+The singleton constraint (see [above](#why-it-must-be-a-singleton)) means this
+architecture **cannot be scaled out**. No replicas, no Kubernetes multi-pod
+deployment, no throughput gained by adding machines.
+
+Higher throughput would require **a pool of accounts with cookie rotation**, which is
+a redesign of the cookie lifecycle rather than a configuration change. This project
+deliberately does not attempt it.
+
+### 5. The upstream API can change without warning
+
+`gemini_webapi` tracks Google's internal interfaces and updates frequently. Every
+upstream fact this project relies on is recorded in
+[`docs/upstream-api-contract.md`](docs/upstream-api-contract.md), produced by
+reflection against the installed package rather than from documentation.
+
+**When upgrading `gemini-webapi`, re-run `scripts/probe_upstream.py` and diff it
+against the contract.** That document also records upstream defects found in
+practice — an incomplete artifact-stripping regex, a cache that silently takes
+precedence over supplied credentials, and an `init()` that reports success on an
+unauthenticated session.
+
+---
+
+## Development
 
 ```bash
 uv sync
-uv run pytest -q                        # 全套測試
-uv run python -m gemini_tg_bot --dry-run   # 不需憑證的全鏈路煙霧測試
+uv run pytest -q                            # full suite
+uv run python -m gemini_tg_bot --dry-run    # credential-free end-to-end smoke test
 ```
 
-`--dry-run` 以假 client 與假 transport 完整跑一次
-`收訊息 → 白名單 → 佇列 → service → streaming → 渲染 → 送出 → research → DB`，
-退出碼 0 表示整合層健康。**開發期所有測試一律 mock，不對真實 cookie 發 live 請求。**
+`--dry-run` walks the whole chain with a fake client and fake transport —
+`receive → allowlist → queue → service → streaming → render → send → research → DB` —
+and exits 0 when the integration layer is healthy. **All development tests are
+mocked; none of them make a live request with real cookies.**
 
-### 文件
+A test in `tests/test_handlers.py` walks the AST to ensure every Telegram send goes
+through the shared flood-control transport in `telegram/sending.py`. If you add a
+send site, route it through there rather than removing the guard.
 
-| 檔案 | 內容 |
+### Documentation
+
+| File | Contents |
 |---|---|
-| `CLAUDE.md` | 專案不變量（安全禁令、實作紀律） |
-| `docs/upstream-api-contract.md` | 上游 API 事實來源，由反射實測產出 |
-| `docs/egress-findings.md` | egress 路徑實測與裁定 |
-| `docs/DEPLOY.md` | 部署步驟與實際踩過的坑 |
+| `CLAUDE.md` | Project invariants (security prohibitions, implementation discipline) |
+| [`docs/upstream-api-contract.md`](docs/upstream-api-contract.md) | Source of truth for upstream API facts, produced by reflection |
+| [`docs/egress-findings.md`](docs/egress-findings.md) | Egress path measurements and the resulting decisions |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Deployment steps and the traps hit in practice |
 
-### 授權
+### Licence
 
-本專案採用 **AGPL-3.0-or-later**，全文見 [`LICENSE`](LICENSE)。
-
-這不是自由選擇的結果 —— 相依的 `gemini-webapi` 是 AGPL-3.0，
-而本專案直接 import 它，構成衍生作品，因此必須採用相容授權。
-
-**對你的實際意義**：
-
-- **自用**（自己跑一個 bot 給自己用）→ 不受任何額外義務約束
-- **提供給第三方使用**（哪怕只是朋友，只要是透過網路提供服務）
-  → AGPL 第 13 條要求你必須向使用者提供對應的完整原始碼，
-    包含你所做的任何修改
-
-若你 fork 並修改，這個義務會一併繼承。請先確認你能接受，再決定要不要對外提供服務。
+This project is licensed under **AGPL-3.0-or-later**; see [`LICENSE`](LICENSE) and
+[Known risks §3](#3-agpl-30-obligations).
