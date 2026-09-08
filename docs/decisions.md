@@ -240,3 +240,41 @@ Telegram 回 429, retry_after=120s
 - 429 且 `retry_after` 超過上限 → 放棄等待、回報使用者、**釋放 slot**
 - 一個請求被 flood control 時，**其他使用者的請求仍能取得 slot**（本缺陷的核心）
 - `semaphore.acquire()` 逾時的行為
+
+### D10 補充（2026-09-08，追查 `/new` 無回應時發現）：缺陷範圍比原判斷大得多
+
+原本判定為「streaming × semaphore 的組合缺陷」。追查使用者回報的
+「`/new` 也沒有反應」時發現**第二個獨立缺陷**：
+
+```
+handlers.py 中無 RetryAfter 保護的 reply_text / reply_photo：43 處
+handlers.py 的 RetryAfter 處理：完全沒有
+media.py  的 RetryAfter 處理：完全沒有
+唯一有保護的模組：streaming.py
+```
+
+因此 flood control 期間有**兩種不同的失效模式**：
+
+| 路徑 | 失效方式 |
+|---|---|
+| 純文字訊息（streaming） | `_call_with_retry_after` 無上限等待 → 持有 semaphore → **整個 bot 凍結** |
+| **所有指令**（`/new` `/status` `/model` `/gem` `/temp` …） | `reply_text` 直接拋 `RetryAfter` → handler 中斷 → **靜默無回應** |
+| 圖片送出（media） | 同上，直接拋出 → 圖片送不出去 |
+
+`/new` 不經過 `request_queue`（它只做 `sessions.reset()` 後 `reply_text`），
+所以它**不是被死鎖擋住的**，而是自己那行未保護的 `reply_text` 拋了 `RetryAfter`。
+兩個 bug 症狀相同（無回應）但成因完全不同，修一個不會修好另一個。
+
+### 因此 T3.8 的範圍擴大
+
+除原本三項外，追加第四項：
+
+4. **Telegram 送出必須統一經過受保護的路徑。**
+   把 `_call_with_retry_after`（修正為有上限的版本）抽成共用工具，
+   讓 `handlers.py`（43 處）與 `media.py` 全部改用它。
+   不得留下任何裸露的 `reply_text` / `reply_photo` / `edit_text` / `reply_media_group`。
+   驗收方式：`grep` 不應在 `handlers.py` / `media.py` 找到未經包裝的直接呼叫。
+
+**根本教訓**：RetryAfter 是**傳輸層**關注點，不該由各個 handler 各自處理。
+當初 spec 的錯誤矩陣把它列為一列，我卻只在 T3.1（streaming）指定實作，
+沒有把它當成橫切關注點統一處理 —— 這是切分任務時的結構性錯誤。
