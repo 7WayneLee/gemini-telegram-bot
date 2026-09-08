@@ -30,7 +30,15 @@ from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 from .auth import AuthMiddleware
 from .media import MediaHandler, MediaUploadError, caption_is_eligible
 from .rendering import render_markdown_chunks
-from .streaming import FloodControlExceeded, stream_response
+from .sending import (
+    FloodControlExceeded,
+    SERVICE_BUSY,
+    answer_callback,
+    delete_message,
+    edit_message_text_or_busy,
+    send_text_or_busy,
+)
+from .streaming import stream_response
 
 if TYPE_CHECKING:
     from gemini_tg_bot.gemini.research import ResearchManager
@@ -59,7 +67,6 @@ MODEL_LIST_UNAVAILABLE = "模型清單暫時無法取得，請稍後再試。"
 GEM_LIST_UNAVAILABLE = "Gem 清單暫時無法取得，請稍後再試。"
 SERVICE_UNAVAILABLE = "Gemini 服務目前無法接受請求，請稍後再試。"
 GENERIC_FAILURE = "處理請求時發生錯誤，請稍後再試。"
-SERVICE_BUSY = "服務忙碌，請稍後再試。"
 ADMIN_ONLY = "此指令僅限管理員使用。"
 ADMIN_NOT_CONFIGURED = "管理員功能尚未設定。"
 COOKIE_PROMPT = (
@@ -78,8 +85,17 @@ class _StreamingMessageProxy:
         self._message = message
         self.placeholder: Any | None = None
 
-    async def reply_text(self, *args: Any, **kwargs: Any) -> Any:
-        reply = await self._message.reply_text(*args, **kwargs)
+    def reply_text(self, *args: Any, **kwargs: Any) -> Any:
+        operation = self._message.reply_text
+        return self._capture_reply(operation, *args, **kwargs)
+
+    async def _capture_reply(
+        self,
+        operation: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        reply = await operation(*args, **kwargs)
         if self.placeholder is None:
             self.placeholder = reply
         return reply
@@ -162,7 +178,7 @@ class TelegramHandlers:
         del context
         message = update.effective_message
         if message is not None:
-            await message.reply_text(HELP_TEXT)
+            await send_text_or_busy(message, HELP_TEXT)
 
     async def help(self, update: Update, context: CallbackContext) -> None:
         """Alias for :meth:`start`."""
@@ -178,7 +194,7 @@ class TelegramHandlers:
             return
         _, chat_id, message = identity
         await self._sessions.reset(chat_id)
-        await message.reply_text("已開始新的對話。")
+        await send_text_or_busy(message, "已開始新的對話。")
 
     async def model(self, update: Update, context: CallbackContext) -> None:
         """Dynamically list currently available upstream models."""
@@ -198,14 +214,14 @@ class TelegramHandlers:
             await _reply_rate_limited(message, error)
             return
         except QueueAcquireTimeout:
-            await message.reply_text(SERVICE_BUSY)
+            await send_text_or_busy(message, SERVICE_BUSY)
             return
         except ServiceUnavailableError:
-            await message.reply_text(SERVICE_UNAVAILABLE)
+            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
             return
         except Exception as error:
             _log_handler_error("model list", error)
-            await message.reply_text(MODEL_LIST_UNAVAILABLE)
+            await send_text_or_busy(message, MODEL_LIST_UNAVAILABLE)
             return
 
         buttons: list[list[InlineKeyboardButton]] = []
@@ -230,9 +246,10 @@ class TelegramHandlers:
                 )
 
         if not buttons:
-            await message.reply_text(MODEL_LIST_UNAVAILABLE)
+            await send_text_or_busy(message, MODEL_LIST_UNAVAILABLE)
             return
-        await message.reply_text(
+        await send_text_or_busy(
+            message,
             "請選擇模型：",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -255,14 +272,14 @@ class TelegramHandlers:
             await _reply_rate_limited(message, error)
             return
         except QueueAcquireTimeout:
-            await message.reply_text(SERVICE_BUSY)
+            await send_text_or_busy(message, SERVICE_BUSY)
             return
         except ServiceUnavailableError:
-            await message.reply_text(SERVICE_UNAVAILABLE)
+            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
             return
         except Exception as error:
             _log_handler_error("gem list", error)
-            await message.reply_text(GEM_LIST_UNAVAILABLE)
+            await send_text_or_busy(message, GEM_LIST_UNAVAILABLE)
             return
 
         buttons: list[list[InlineKeyboardButton]] = []
@@ -280,9 +297,10 @@ class TelegramHandlers:
                 )
 
         if not buttons:
-            await message.reply_text(GEM_LIST_UNAVAILABLE)
+            await send_text_or_busy(message, GEM_LIST_UNAVAILABLE)
             return
-        await message.reply_text(
+        await send_text_or_busy(
+            message,
             "請選擇 Gem：",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -299,7 +317,7 @@ class TelegramHandlers:
         enabled = not state.temporary
         await self._sessions.set_temporary(chat_id, enabled)
         label = "開啟" if enabled else "關閉"
-        await message.reply_text(f"Temporary mode 已{label}。")
+        await send_text_or_busy(message, f"Temporary mode 已{label}。")
 
     async def status(self, update: Update, context: CallbackContext) -> None:
         """Report session, queue, refresh, usage, and egress state."""
@@ -324,7 +342,8 @@ class TelegramHandlers:
             else f" ({health.degraded_reason.value})"
         )
         temporary = "開啟" if state.temporary else "關閉"
-        await message.reply_text(
+        await send_text_or_busy(
+            message,
             "\n".join(
                 (
                     f"目前模型：{state.model or '帳號預設'}",
@@ -349,22 +368,22 @@ class TelegramHandlers:
         _, chat_id, message = identity
         prompt = _command_prompt(context)
         if prompt is None:
-            await message.reply_text(RESEARCH_USAGE)
+            await send_text_or_busy(message, RESEARCH_USAGE)
             return
         if self._research is None:
-            await message.reply_text(RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
             return
 
         try:
             task_id = await self._research.submit(chat_id, prompt)
         except ValueError:
-            await message.reply_text(RESEARCH_USAGE)
+            await send_text_or_busy(message, RESEARCH_USAGE)
             return
         except Exception as error:
             _log_handler_error("research submission", error)
-            await message.reply_text(RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
             return
-        await message.reply_text(f"Deep Research 任務已提交：{task_id}")
+        await send_text_or_busy(message, f"Deep Research 任務已提交：{task_id}")
 
     async def research_status(
         self,
@@ -379,22 +398,22 @@ class TelegramHandlers:
             return
         _, chat_id, message = identity
         if self._research is None:
-            await message.reply_text(RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
             return
 
         try:
             tasks = await self._research.status(chat_id)
         except Exception as error:
             _log_handler_error("research status", error)
-            await message.reply_text(RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
             return
         if not tasks:
-            await message.reply_text("目前沒有 Deep Research 任務。")
+            await send_text_or_busy(message, "目前沒有 Deep Research 任務。")
             return
 
         lines = ["Deep Research 任務狀態："]
         lines.extend(f"{task.task_id}：{task.status.value}" for task in tasks)
-        await message.reply_text("\n".join(lines))
+        await send_text_or_busy(message, "\n".join(lines))
 
     async def admin_command(
         self,
@@ -427,7 +446,7 @@ class TelegramHandlers:
             return
         user_id, _, message = identity
         self._awaiting_cookie_users.add(user_id)
-        await message.reply_text(COOKIE_PROMPT)
+        await send_text_or_busy(message, COOKIE_PROMPT)
 
     async def setcookie_value(
         self,
@@ -445,11 +464,12 @@ class TelegramHandlers:
             return
 
         try:
-            await message.delete()
+            await delete_message(message)
         except Exception as error:
             self._awaiting_cookie_users.discard(user_id)
             _log_handler_error("credential message deletion", error)
-            await message.reply_text(
+            await send_text_or_busy(
+                message,
                 "無法刪除含憑證的訊息；未套用 Cookie，請稍後再試。"
             )
             return
@@ -457,7 +477,7 @@ class TelegramHandlers:
         self._awaiting_cookie_users.discard(user_id)
         credentials = _parse_cookie_credentials(message.text)
         if credentials is None:
-            await message.reply_text(COOKIE_INPUT_INVALID)
+            await send_text_or_busy(message, COOKIE_INPUT_INVALID)
             return
 
         secure_1psid, secure_1psidts = credentials
@@ -468,14 +488,18 @@ class TelegramHandlers:
             )
         except Exception as error:
             _log_handler_error("Gemini client hot restart", error)
-            await message.reply_text(
+            await send_text_or_busy(
+                message,
                 "Cookie 更新失敗，Gemini 服務尚未恢復。"
                 "請重新執行 /setcookie。"
             )
             return
 
         self._secure_1psid = SecretStr(secure_1psid)
-        await message.reply_text("Cookie 已更新，Gemini 服務已熱重啟。")
+        await send_text_or_busy(
+            message,
+            "Cookie 已更新，Gemini 服務已熱重啟。",
+        )
 
     async def allow(self, update: Update, context: CallbackContext) -> None:
         """Persist an allow decision that takes effect immediately."""
@@ -486,16 +510,19 @@ class TelegramHandlers:
         target_user_id = _command_user_id(context)
         message = identity[2]
         if target_user_id is None:
-            await message.reply_text("用法：/allow <user_id>")
+            await send_text_or_busy(message, "用法：/allow <user_id>")
             return
         assert self._auth is not None
         try:
             await self._auth.allow(target_user_id)
         except Exception as error:
             _log_handler_error("allowlist write", error)
-            await message.reply_text("白名單更新失敗，請稍後再試。")
+            await send_text_or_busy(
+                message,
+                "白名單更新失敗，請稍後再試。",
+            )
             return
-        await message.reply_text(f"已允許使用者 {target_user_id}。")
+        await send_text_or_busy(message, f"已允許使用者 {target_user_id}。")
 
     async def deny(self, update: Update, context: CallbackContext) -> None:
         """Persist a deny decision that takes effect immediately."""
@@ -506,16 +533,19 @@ class TelegramHandlers:
         target_user_id = _command_user_id(context)
         message = identity[2]
         if target_user_id is None:
-            await message.reply_text("用法：/deny <user_id>")
+            await send_text_or_busy(message, "用法：/deny <user_id>")
             return
         assert self._auth is not None
         try:
             await self._auth.deny(target_user_id)
         except Exception as error:
             _log_handler_error("denylist write", error)
-            await message.reply_text("白名單更新失敗，請稍後再試。")
+            await send_text_or_busy(
+                message,
+                "白名單更新失敗，請稍後再試。",
+            )
             return
-        await message.reply_text(f"已拒絕使用者 {target_user_id}。")
+        await send_text_or_busy(message, f"已拒絕使用者 {target_user_id}。")
 
     async def health(self, update: Update, context: CallbackContext) -> None:
         """Report secret-free client, recent-error, and database health."""
@@ -535,7 +565,8 @@ class TelegramHandlers:
             last_error = f"{kind or 'unknown'} ({last_error_type or 'unknown'})"
         database_state = "healthy" if await self._database_healthy() else "unavailable"
         accepting = "是" if health.accepting_requests else "否"
-        await message.reply_text(
+        await send_text_or_busy(
+            message,
             "\n".join(
                 (
                     f"Client 狀態：{health.state.value}",
@@ -555,10 +586,17 @@ class TelegramHandlers:
         chat = update.effective_chat
         if query is None or user is None or chat is None:
             return
-        await query.answer()
+        try:
+            await answer_callback(query)
+        except FloodControlExceeded:
+            await edit_message_text_or_busy(query, SERVICE_BUSY)
+            return
         data = query.data
         if not isinstance(data, str) or not _valid_callback_data(data):
-            await query.edit_message_text("無效的選項，請重新執行指令。")
+            await edit_message_text_or_busy(
+                query,
+                "無效的選項，請重新執行指令。",
+            )
             return
 
         if data.startswith(MODEL_CALLBACK_PREFIX):
@@ -627,18 +665,18 @@ class TelegramHandlers:
         except FloodControlExceeded as error:
             error_kind = "flood_control"
             _log_handler_error("Telegram flood control", error)
-            await message.reply_text(SERVICE_BUSY)
+            await send_text_or_busy(message, SERVICE_BUSY)
         except QueueAcquireTimeout as error:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
-            await message.reply_text(SERVICE_BUSY)
+            await send_text_or_busy(message, SERVICE_BUSY)
         except ServiceUnavailableError:
             error_kind = "unavailable"
-            await message.reply_text(SERVICE_UNAVAILABLE)
+            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("text message", error)
-            await message.reply_text(GENERIC_FAILURE)
+            await send_text_or_busy(message, GENERIC_FAILURE)
         finally:
             await self._record_usage(
                 user_id=user_id,
@@ -698,21 +736,25 @@ class TelegramHandlers:
             ok = True
         except MediaUploadError as error:
             error_kind = "media_rejected"
-            await message.reply_text(str(error))
+            await send_text_or_busy(message, str(error))
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
             await _reply_rate_limited(message, error)
+        except FloodControlExceeded as error:
+            error_kind = "flood_control"
+            _log_handler_error("Telegram flood control", error)
+            await send_text_or_busy(message, SERVICE_BUSY)
         except QueueAcquireTimeout as error:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
-            await message.reply_text(SERVICE_BUSY)
+            await send_text_or_busy(message, SERVICE_BUSY)
         except ServiceUnavailableError:
             error_kind = "unavailable"
-            await message.reply_text(SERVICE_UNAVAILABLE)
+            await send_text_or_busy(message, SERVICE_UNAVAILABLE)
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("media message", error)
-            await message.reply_text(GENERIC_FAILURE)
+            await send_text_or_busy(message, GENERIC_FAILURE)
         finally:
             await self._record_usage(
                 user_id=user_id,
@@ -785,7 +827,10 @@ class TelegramHandlers:
         model_name: str,
     ) -> None:
         if not model_name:
-            await query.edit_message_text("無效的模型，請重新執行 /model。")
+            await edit_message_text_or_busy(
+                query,
+                "無效的模型，請重新執行 /model。",
+            )
             return
 
         def resolve(client: Any) -> Any | None:
@@ -801,24 +846,30 @@ class TelegramHandlers:
             async with self._request_queue.request(user_id):
                 selected = await self._service.execute(resolve)
         except RateLimitExceeded as error:
-            await query.edit_message_text(_rate_limit_message(error))
+            await edit_message_text_or_busy(query, _rate_limit_message(error))
             return
         except QueueAcquireTimeout:
-            await query.edit_message_text(SERVICE_BUSY)
+            await edit_message_text_or_busy(query, SERVICE_BUSY)
             return
         except ServiceUnavailableError:
-            await query.edit_message_text(SERVICE_UNAVAILABLE)
+            await edit_message_text_or_busy(query, SERVICE_UNAVAILABLE)
             return
         except Exception as error:
             _log_handler_error("model selection", error)
-            await query.edit_message_text(MODEL_LIST_UNAVAILABLE)
+            await edit_message_text_or_busy(query, MODEL_LIST_UNAVAILABLE)
             return
 
         if selected is None:
-            await query.edit_message_text("此模型已無法使用，請重新執行 /model。")
+            await edit_message_text_or_busy(
+                query,
+                "此模型已無法使用，請重新執行 /model。",
+            )
             return
         await self._sessions.set_model(chat_id, selected.model_name)
-        await query.edit_message_text(f"已選擇模型：{selected.display_name}")
+        await edit_message_text_or_busy(
+            query,
+            f"已選擇模型：{selected.display_name}",
+        )
 
     async def _select_gem(
         self,
@@ -829,7 +880,10 @@ class TelegramHandlers:
         gem_id: str,
     ) -> None:
         if not gem_id:
-            await query.edit_message_text("無效的 Gem，請重新執行 /gem。")
+            await edit_message_text_or_busy(
+                query,
+                "無效的 Gem，請重新執行 /gem。",
+            )
             return
 
         try:
@@ -838,25 +892,28 @@ class TelegramHandlers:
                     lambda client: client.fetch_gems(include_hidden=False)
                 )
         except RateLimitExceeded as error:
-            await query.edit_message_text(_rate_limit_message(error))
+            await edit_message_text_or_busy(query, _rate_limit_message(error))
             return
         except QueueAcquireTimeout:
-            await query.edit_message_text(SERVICE_BUSY)
+            await edit_message_text_or_busy(query, SERVICE_BUSY)
             return
         except ServiceUnavailableError:
-            await query.edit_message_text(SERVICE_UNAVAILABLE)
+            await edit_message_text_or_busy(query, SERVICE_UNAVAILABLE)
             return
         except Exception as error:
             _log_handler_error("gem selection", error)
-            await query.edit_message_text(GEM_LIST_UNAVAILABLE)
+            await edit_message_text_or_busy(query, GEM_LIST_UNAVAILABLE)
             return
 
         selected = None if gem_jar is None else gem_jar.get(id=gem_id)
         if selected is None:
-            await query.edit_message_text("此 Gem 已無法使用，請重新執行 /gem。")
+            await edit_message_text_or_busy(
+                query,
+                "此 Gem 已無法使用，請重新執行 /gem。",
+            )
             return
         await self._sessions.set_gem(chat_id, selected.id)
-        await query.edit_message_text(f"已選擇 Gem：{selected.name}")
+        await edit_message_text_or_busy(query, f"已選擇 Gem：{selected.name}")
 
     def _cookie_last_refresh(self) -> datetime | None:
         cache_file = self._cookie_path / (
@@ -918,14 +975,14 @@ class TelegramHandlers:
             return None
         user_id, _, message = identity
         if self._auth is None:
-            await message.reply_text(ADMIN_NOT_CONFIGURED)
+            await send_text_or_busy(message, ADMIN_NOT_CONFIGURED)
             return None
         try:
             is_admin = self._auth.is_admin(user_id)
         except ValueError:
             is_admin = False
         if not is_admin:
-            await message.reply_text(ADMIN_ONLY)
+            await send_text_or_busy(message, ADMIN_ONLY)
             return None
         return identity
 
@@ -1054,10 +1111,10 @@ async def _reply_rendered(message: Any, markdown: str) -> None:
 
 async def _reply_rendered_chunks(message: Any, chunks: list[str]) -> None:
     if not chunks:
-        await message.reply_text("Gemini 未回傳文字。")
+        await send_text_or_busy(message, "Gemini 未回傳文字。")
         return
     for chunk in chunks:
-        await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await send_text_or_busy(message, chunk, parse_mode=ParseMode.HTML)
 
 
 def _caption_from_chunks(chunks: list[str]) -> str | None:
@@ -1071,7 +1128,7 @@ async def _delete_placeholder(placeholder: Any | None) -> None:
     if placeholder is None:
         return
     try:
-        await placeholder.delete()
+        await delete_message(placeholder)
     except Exception as error:
         _log_handler_error("stream placeholder deletion", error)
 
@@ -1082,7 +1139,7 @@ def _rate_limit_message(error: RateLimitExceeded) -> str:
 
 
 async def _reply_rate_limited(message: Any, error: RateLimitExceeded) -> None:
-    await message.reply_text(_rate_limit_message(error))
+    await send_text_or_busy(message, _rate_limit_message(error))
 
 
 def _created_on(value: str, expected: date) -> bool:

@@ -11,24 +11,26 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import timedelta
 import time
-from typing import Any, TypeVar
+from typing import Any
 
 from telegram.constants import ParseMode
-from telegram.error import RetryAfter
 
 from .rendering import MAX_MESSAGE_LENGTH, render_markdown_chunks
+from .sending import (
+    FloodControlExceeded,
+    MAX_FLOOD_RETRIES,
+    MAX_FLOOD_WAIT_SECONDS,
+    edit_text,
+    send_text,
+)
 
 
 PLACEHOLDER_TEXT = "思考中…"
 EMPTY_RESPONSE_TEXT = "Gemini 未回傳文字。"
 EDIT_INTERVAL_SECONDS = 1.5
 EDIT_CHARACTER_THRESHOLD = 200
-MAX_FLOOD_WAIT_SECONDS = 30.0
-MAX_FLOOD_RETRIES = 3
 
-_ResultT = TypeVar("_ResultT")
 _Sleep = Callable[[float], Awaitable[None]]
 _Clock = Callable[[], float]
 
@@ -39,49 +41,6 @@ class StreamResult:
 
     text: str
     output: Any | None
-
-
-class FloodControlExceeded(RuntimeError):
-    """Raised when a Telegram flood-control wait exceeds the bounded budget."""
-
-    def __init__(self, retry_after: float, waited_seconds: float) -> None:
-        self.retry_after = retry_after
-        self.waited_seconds = waited_seconds
-        super().__init__(
-            "Telegram flood-control retry budget exceeded "
-            f"after waiting {waited_seconds:.2f} seconds"
-        )
-
-
-def _retry_delay(error: RetryAfter) -> float:
-    retry_after = error.retry_after
-    if isinstance(retry_after, timedelta):
-        return retry_after.total_seconds()
-    return float(retry_after)
-
-
-async def _call_with_retry_after(
-    operation: Callable[[], Awaitable[_ResultT]],
-    *,
-    sleep: _Sleep,
-    flood_wait: _Sleep | None = None,
-) -> _ResultT:
-    """Run a Telegram operation with bounded flood-control retries."""
-
-    waited_seconds = 0.0
-    wait = flood_wait or sleep
-    for attempt in range(MAX_FLOOD_RETRIES + 1):
-        try:
-            return await operation()
-        except RetryAfter as error:
-            delay = max(0.0, _retry_delay(error))
-            remaining = MAX_FLOOD_WAIT_SECONDS - waited_seconds
-            if attempt == MAX_FLOOD_RETRIES or delay > remaining:
-                raise FloodControlExceeded(delay, waited_seconds) from error
-            await wait(delay)
-            waited_seconds += delay
-
-    raise AssertionError("unreachable")
 
 
 async def _cancel(task: asyncio.Future[Any] | None) -> None:
@@ -128,8 +87,9 @@ async def stream_response(
     if edit_character_threshold <= 0:
         raise ValueError("edit_character_threshold must be positive")
 
-    placeholder = await _call_with_retry_after(
-        lambda: message.reply_text(placeholder_text),
+    placeholder = await send_text(
+        message,
+        placeholder_text,
         sleep=sleep,
         flood_wait=flood_wait,
     )
@@ -145,8 +105,10 @@ async def stream_response(
 
     async def edit_plain_text() -> None:
         nonlocal last_edit_at, pending_characters
-        await _call_with_retry_after(
-            lambda: placeholder.edit_text(latest_text, parse_mode=None),
+        await edit_text(
+            placeholder,
+            latest_text,
+            parse_mode=None,
             sleep=sleep,
             flood_wait=flood_wait,
         )
@@ -198,24 +160,27 @@ async def stream_response(
 
     rendered_chunks = render_markdown_chunks(latest_text)
     if not rendered_chunks:
-        await _call_with_retry_after(
-            lambda: placeholder.edit_text(EMPTY_RESPONSE_TEXT, parse_mode=None),
+        await edit_text(
+            placeholder,
+            EMPTY_RESPONSE_TEXT,
+            parse_mode=None,
             sleep=sleep,
             flood_wait=flood_wait,
         )
         return StreamResult(text=latest_text, output=latest_output)
 
-    await _call_with_retry_after(
-        lambda: placeholder.edit_text(rendered_chunks[0], parse_mode=ParseMode.HTML),
+    await edit_text(
+        placeholder,
+        rendered_chunks[0],
+        parse_mode=ParseMode.HTML,
         sleep=sleep,
         flood_wait=flood_wait,
     )
     for rendered_chunk in rendered_chunks[1:]:
-        await _call_with_retry_after(
-            lambda rendered_chunk=rendered_chunk: message.reply_text(
-                rendered_chunk,
-                parse_mode=ParseMode.HTML,
-            ),
+        await send_text(
+            message,
+            rendered_chunk,
+            parse_mode=ParseMode.HTML,
             sleep=sleep,
             flood_wait=flood_wait,
         )

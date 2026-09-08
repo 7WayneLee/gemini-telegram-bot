@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from pydantic import SecretStr
@@ -20,14 +21,13 @@ from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
     GEM_LIST_UNAVAILABLE,
     MODEL_LIST_UNAVAILABLE,
-    SERVICE_BUSY,
     EgressMeter,
     TelegramHandlers,
     register_handlers,
 )
+from gemini_tg_bot.telegram.sending import MAX_FLOOD_WAIT_SECONDS, SERVICE_BUSY
 from gemini_tg_bot.telegram.streaming import (
     EMPTY_RESPONSE_TEXT,
-    MAX_FLOOD_WAIT_SECONDS,
     PLACEHOLDER_TEXT,
 )
 
@@ -50,6 +50,17 @@ except ModuleNotFoundError:
 
 NOW = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
 
+_TELEGRAM_SEND_METHODS = {
+    "answer",
+    "delete",
+    "edit_message_text",
+    "edit_text",
+    "reply_document",
+    "reply_media_group",
+    "reply_photo",
+    "reply_text",
+}
+
 
 def _state(
     *,
@@ -66,6 +77,43 @@ def _state(
         temporary=temporary,
         updated_at=NOW.isoformat(),
     )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "handlers.py",
+        "media.py",
+        "streaming.py",
+    ],
+)
+def test_telegram_send_sites_use_common_transport(relative_path: str) -> None:
+    source_path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "gemini_tg_bot"
+        / "telegram"
+        / relative_path
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    direct_send_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and (
+            (
+                isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr in _TELEGRAM_SEND_METHODS
+            )
+            or (
+                isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "sender"
+            )
+        )
+    ]
+
+    assert direct_send_lines == []
 
 
 def _update(
@@ -191,6 +239,52 @@ async def test_help_and_new_commands(
     await handlers.new(update, SimpleNamespace())
     registry.reset.assert_awaited_once_with(202)
     assert "新的對話" in update.effective_message.reply_text.await_args.args[0]
+
+
+async def test_new_retries_bounded_flood_control_and_succeeds(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    handlers, _ = handlers_factory()
+    update = _update(text="/new")
+    update.effective_message.reply_text.side_effect = [
+        RetryAfter(3),
+        update.effective_message.placeholder,
+    ]
+    sleep = AsyncMock()
+
+    with patch("gemini_tg_bot.telegram.sending.asyncio.sleep", sleep):
+        await handlers.new(update, SimpleNamespace())
+
+    registry.reset.assert_awaited_once_with(202)
+    assert update.effective_message.reply_text.await_args_list == [
+        call("已開始新的對話。"),
+        call("已開始新的對話。"),
+    ]
+    sleep.assert_awaited_once_with(3.0)
+
+
+async def test_new_reports_busy_when_flood_wait_exceeds_limit(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    handlers, _ = handlers_factory()
+    update = _update(text="/new")
+    update.effective_message.reply_text.side_effect = [
+        RetryAfter(MAX_FLOOD_WAIT_SECONDS + 1),
+        update.effective_message.placeholder,
+    ]
+    sleep = AsyncMock()
+
+    with patch("gemini_tg_bot.telegram.sending.asyncio.sleep", sleep):
+        await handlers.new(update, SimpleNamespace())
+
+    registry.reset.assert_awaited_once_with(202)
+    assert update.effective_message.reply_text.await_args_list == [
+        call("已開始新的對話。"),
+        call(SERVICE_BUSY),
+    ]
+    sleep.assert_not_awaited()
 
 
 async def test_temp_toggles_from_registry_state(

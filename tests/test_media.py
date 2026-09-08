@@ -4,20 +4,21 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from curl_cffi.requests import AsyncSession
 from gemini_webapi import Candidate, ModelOutput, WebImage
 from pydantic import SecretStr
 from telegram.constants import MessageLimit, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.telegram.handlers import EgressMeter, TelegramHandlers
 from gemini_tg_bot.telegram.media import (
     DEFAULT_MEDIA_PROMPT,
     DeliveryMode,
+    DeliveryResult,
     ImageSource,
     MAX_CAPTION_VISIBLE_LENGTH,
     MAX_UPLOAD_BYTES,
@@ -119,6 +120,44 @@ async def test_bad_request_falls_back_to_temporary_relay_and_meters_bytes(
     assert message.reply_photo.await_args_list[0] == call(image.url, caption=None)
     assert image.saved_path is not None
     assert not image.saved_path.exists()
+
+
+@pytest.mark.parametrize("mode", [DeliveryMode.URL, DeliveryMode.RELAY])
+async def test_flood_control_retries_both_image_delivery_paths(
+    mode: DeliveryMode,
+    tmp_path: Path,
+) -> None:
+    meter = EgressMeter()
+    media = MediaHandler(
+        egress_meter=meter,
+        delivery_mode=mode,
+        temp_root=tmp_path,
+    )
+    message = _message()
+    message.reply_photo.side_effect = [RetryAfter(2), None]
+    image = FakeImage("https://example.test/retry.png", b"retry-image")
+    sleep = AsyncMock()
+
+    with patch("gemini_tg_bot.telegram.sending.asyncio.sleep", sleep):
+        result = await media.send_image(message, image)
+
+    sleep.assert_awaited_once_with(2.0)
+    assert message.reply_photo.await_count == 2
+    first_media = message.reply_photo.await_args_list[0].args[0]
+    second_media = message.reply_photo.await_args_list[1].args[0]
+    if mode is DeliveryMode.URL:
+        assert result == DeliveryResult(DeliveryMode.URL)
+        assert first_media == image.url
+        assert second_media == image.url
+        assert meter.month_to_date_bytes == 0
+        assert image.save_calls == []
+    else:
+        assert result == DeliveryResult(
+            DeliveryMode.RELAY,
+            relayed_bytes=len(image.payload),
+        )
+        assert first_media is second_media
+        assert meter.month_to_date_bytes == len(image.payload)
 
 
 async def test_fallback_is_per_image_and_does_not_disable_next_url() -> None:

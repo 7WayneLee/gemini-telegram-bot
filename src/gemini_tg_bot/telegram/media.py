@@ -21,6 +21,8 @@ from typing import Any, Protocol
 from telegram.constants import MessageLimit, ParseMode
 from telegram.error import BadRequest
 
+from .sending import send_document, send_photo
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -228,14 +230,18 @@ class MediaHandler:
         """Deliver one image by URL or by a measured temporary relay."""
 
         mode = self._mode_for(source)
-        sender = message.reply_document if as_document else message.reply_photo
         send_kwargs: dict[str, Any] = {"caption": caption}
         if caption is not None:
             send_kwargs["parse_mode"] = ParseMode.HTML
 
         if mode is not DeliveryMode.RELAY:
             try:
-                await sender(image.url, **send_kwargs)
+                await _send_image_reply(
+                    message,
+                    image.url,
+                    as_document=as_document,
+                    **send_kwargs,
+                )
             except BadRequest:
                 if mode is DeliveryMode.URL:
                     raise
@@ -254,7 +260,12 @@ class MediaHandler:
             saved_path = Path(await image.save(path=temp_directory))
             num_bytes = saved_path.stat().st_size
             with saved_path.open("rb") as media_file:
-                await sender(media_file, **send_kwargs)
+                await _send_image_reply(
+                    message,
+                    media_file,
+                    as_document=as_document,
+                    **send_kwargs,
+                )
 
         self._egress_meter.record(num_bytes)
         return DeliveryResult(DeliveryMode.RELAY, relayed_bytes=num_bytes)
@@ -314,6 +325,18 @@ def _select_upload(message: Any) -> tuple[Any, str]:
         return document, _safe_filename(str(raw_name))
 
     raise UnsupportedUploadError("message contains no photo or document")
+
+
+async def _send_image_reply(
+    message: Any,
+    media: Any,
+    *,
+    as_document: bool,
+    **kwargs: Any,
+) -> Any:
+    if as_document:
+        return await send_document(message, media, **kwargs)
+    return await send_photo(message, media, **kwargs)
 
 
 def _safe_filename(filename: str) -> str:

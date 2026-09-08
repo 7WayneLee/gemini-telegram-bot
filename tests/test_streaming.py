@@ -12,11 +12,13 @@ from telegram.constants import ParseMode
 from telegram.error import RetryAfter
 
 from gemini_tg_bot.queue import RequestQueue
+from gemini_tg_bot.telegram.sending import (
+    FloodControlExceeded,
+    MAX_FLOOD_WAIT_SECONDS,
+)
 from gemini_tg_bot.telegram.streaming import (
     EDIT_CHARACTER_THRESHOLD,
     EDIT_INTERVAL_SECONDS,
-    FloodControlExceeded,
-    MAX_FLOOD_WAIT_SECONDS,
     PLACEHOLDER_TEXT,
     stream_response,
 )
