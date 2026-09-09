@@ -299,15 +299,53 @@ def test_chinese_table_uses_display_width_for_alignment() -> None:
 
 
 def test_table_separator_is_replaced_by_a_solid_rule() -> None:
-    """Alignment markers are Markdown syntax and should become a readable visual rule."""
+    """The established three-hyphen table output must remain byte-for-byte stable."""
 
-    rendered = markdown_to_telegram_html(
-        "| Left | Right |\n| :--- | ---: |\n| one | two |"
-    )
+    source = "| Left | Right |\n| :--- | ---: |\n| one | two |"
 
-    assert ":---" not in rendered
-    assert "---:" not in rendered
-    assert "────  ─────" in rendered
+    assert render_markdown_chunks(source) == [
+        "<pre>Left  Right\n"
+        "────  ─────\n"
+        "one   two</pre>"
+    ]
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [
+        "| :- | :- |",
+        "| - | - |",
+        "|---|---|",
+        "| :-- | --: |",
+        "| :-: | --- |",
+    ],
+)
+def test_gfm_table_separator_variants_are_recognised(separator: str) -> None:
+    """Accepting every GFM alignment form keeps valid compact tables readable."""
+
+    source = f"| 名稱 | 值 |\n{separator}\n| 甲 | 乙 |"
+
+    assert render_markdown_chunks(source) == [
+        "<pre>名稱  值\n"
+        "────  ──\n"
+        "甲    乙</pre>"
+    ]
+
+
+def test_table_separator_column_count_must_match_header() -> None:
+    """Keeping the column-count guard prevents ambiguous pipe text becoming a table."""
+
+    source = "| 名稱 | 值 |\n| - | - | - |\n| 甲 | 乙 |"
+
+    assert render_markdown_chunks(source) == [source]
+
+
+def test_table_separator_cells_reject_non_syntax_characters() -> None:
+    """Rejecting mixed-content cells prevents hyphenated prose from acting as syntax."""
+
+    source = "| 名稱 | 值 |\n| -a- | --- |\n| 甲 | 乙 |"
+
+    assert render_markdown_chunks(source) == [source]
 
 
 @pytest.mark.parametrize(

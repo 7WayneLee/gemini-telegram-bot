@@ -43,7 +43,7 @@ _BLANK_LINE_WHITESPACE_RE = re.compile(r"(?m)^[ \t]+(?=\r?$)")
 _LEADING_BLANK_LINES_RE = re.compile(r"^(?:[ \t]*\r?\n)+")
 _TRAILING_BLANK_LINES_RE = re.compile(r"(?:\r?\n[ \t]*)+$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
-_TABLE_SEPARATOR_CELL_RE = re.compile(r":?[ \t]*-{3,}[ \t]*:?")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?[ \t]*-+[ \t]*:?")
 _SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto", "tg"})
 _TABLE_LINE_START_FORBIDDEN = frozenset(
     "。，、；：？！）」』】》〉・ー％‧.,;:?!)]}"
