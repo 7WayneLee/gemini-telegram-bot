@@ -226,14 +226,15 @@ your host.
 Preferred on a small machine, or when nothing else there uses Docker.
 
 ```bash
-# On the server
+# On the server. UV is an absolute path because sudo resets PATH, so a uv
+# installed under your home directory is not on it: UV=$(command -v uv)
 sudo useradd --system --home-dir /var/lib/gemini-tg-bot --shell /usr/sbin/nologin gemini-tg-bot
-sudo mkdir -p /opt/gemini-tg-bot && sudo tar xzf gemini-tg-bot.tar.gz -C /opt/gemini-tg-bot
+sudo git clone https://github.com/7WayneLee/gemini-telegram-bot.git /opt/gemini-tg-bot
 
 # Build the venv somewhere the service account can read (not under /root)
 cd /opt/gemini-tg-bot
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python uv venv --python 3.12 .venv
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python uv pip install --python .venv/bin/python .
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" venv --python 3.12 .venv
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" pip install --python .venv/bin/python .
 sudo chmod -R a+rX /opt/uv-python /opt/gemini-tg-bot
 
 sudo install -m 600 .env /etc/gemini-tg-bot.env
@@ -243,6 +244,17 @@ sudo systemctl enable --now gemini-tg-bot
 
 Keeping the environment file in `/etc` rather than the repository directory reduces
 the chance of a tool reading it by accident.
+
+To update, pull and **reinstall** — the package is copied into the venv, so new
+source on disk is not new code in the service:
+
+```bash
+cd /opt/gemini-tg-bot && sudo git pull --ff-only
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" pip install --python .venv/bin/python .
+sudo chmod -R a+rX /opt/gemini-tg-bot && sudo systemctl restart gemini-tg-bot
+```
+
+Schema migrations run at startup, so no separate step is needed.
 
 ### Docker Compose
 

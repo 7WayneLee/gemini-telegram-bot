@@ -210,14 +210,15 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 小型主機、或該機器上沒有其他東西在用 Docker 時建議這個。
 
 ```bash
-# 在伺服器上
+# 在伺服器上。UV 用絕對路徑，因為 sudo 會重設 PATH，
+# 裝在家目錄的 uv 不在上面：UV=$(command -v uv)
 sudo useradd --system --home-dir /var/lib/gemini-tg-bot --shell /usr/sbin/nologin gemini-tg-bot
-sudo mkdir -p /opt/gemini-tg-bot && sudo tar xzf gemini-tg-bot.tar.gz -C /opt/gemini-tg-bot
+sudo git clone https://github.com/7WayneLee/gemini-telegram-bot.git /opt/gemini-tg-bot
 
 # venv 要建在服務帳號讀得到的位置（不要在 /root 底下）
 cd /opt/gemini-tg-bot
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python uv venv --python 3.12 .venv
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python uv pip install --python .venv/bin/python .
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" venv --python 3.12 .venv
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" pip install --python .venv/bin/python .
 sudo chmod -R a+rX /opt/uv-python /opt/gemini-tg-bot
 
 sudo install -m 600 .env /etc/gemini-tg-bot.env
@@ -226,6 +227,17 @@ sudo systemctl enable --now gemini-tg-bot
 ```
 
 把環境變數檔放在 `/etc` 而非專案目錄，可降低被某個工具意外讀取的機會。
+
+更新時要 pull 並**重新安裝** —— 套件是複製進 venv 的，
+磁碟上的新原始碼不等於服務跑的新程式碼：
+
+```bash
+cd /opt/gemini-tg-bot && sudo git pull --ff-only
+sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" pip install --python .venv/bin/python .
+sudo chmod -R a+rX /opt/gemini-tg-bot && sudo systemctl restart gemini-tg-bot
+```
+
+資料庫遷移在啟動時自動執行，不需要額外步驟。
 
 ### Docker Compose
 
