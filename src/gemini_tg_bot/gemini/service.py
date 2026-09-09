@@ -171,6 +171,9 @@ class GeminiService:
         self._account_status: AccountStatus | None = None
         self._state = ServiceState.NEW
         self._degraded_reason: DegradedReason | None = None
+        # The degraded reason the administrator has already been paged about.
+        # Cleared on recovery so the next distinct failure pages again.
+        self._notified_degraded_reason: DegradedReason | None = None
         self._blocked_until: float | None = None
         self._consecutive_blocked_errors = 0
         self._active_requests = 0
@@ -477,15 +480,22 @@ class GeminiService:
         self._consecutive_blocked_errors = 0
         self._blocked_until = None
         if isinstance(error, AccountStatusError):
+            # Only the transition into a degraded reason is worth paging for.
+            # Repeated lifecycle failures with the same cause must stay silent,
+            # or a restart loop turns one problem into an admin-chat flood that
+            # trips Telegram's per-chat rate limit and buries /setcookie.
             if error.status is AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE:
                 self._set_blocked_degraded_locked()
             else:
                 self._set_auth_degraded_locked(error)
+            if not self._claim_degraded_page_locked():
+                return None
             return account_status_guidance(error.status)
         if kind is ErrorKind.AUTH:
-            if self._set_auth_degraded_locked(error):
-                return AUTH_DEGRADED_NOTIFICATION
-            return None
+            self._set_auth_degraded_locked(error)
+            if not self._claim_degraded_page_locked():
+                return None
+            return AUTH_DEGRADED_NOTIFICATION
         self._state = ServiceState.FAILED
         self._degraded_reason = None
         return None
@@ -614,6 +624,7 @@ class GeminiService:
             )
         self._state = ServiceState.HEALTHY
         self._degraded_reason = None
+        self._notified_degraded_reason = None
         self._blocked_until = None
         self._consecutive_blocked_errors = 0
         self._last_error_kind = None
@@ -632,6 +643,24 @@ class GeminiService:
         self._last_error_kind = ErrorKind.AUTH
         self._last_error_type = type(error).__name__
         return not was_auth_degraded
+
+    def _claim_degraded_page_locked(self) -> bool:
+        """Return whether the current degraded reason still needs paging.
+
+        ``reinit`` clears ``_state`` before it retries, so a state transition
+        is not a reliable signal: a caller that retries -- or a supervisor that
+        restarts the process -- would page the administrator on every attempt.
+        Tracking the reason already paged for keeps one cause to one message
+        until the service recovers, which matters because Telegram rate-limits
+        a chat and a flood buries the ``/setcookie`` prompt needed to recover.
+        """
+
+        if self._degraded_reason is None:
+            return False
+        if self._notified_degraded_reason is self._degraded_reason:
+            return False
+        self._notified_degraded_reason = self._degraded_reason
+        return True
 
     def _set_blocked_degraded_locked(self) -> None:
         self._state = ServiceState.DEGRADED

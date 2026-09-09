@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -570,3 +571,91 @@ async def test_health_and_errors_never_render_credentials(
     rendered = f"{service.health!r}"
     assert "FAKE_1PSID_FOR_TEST" not in rendered
     assert "FAKE_1PSIDTS_FOR_TEST" not in rendered
+
+
+async def test_repeated_unauthenticated_reinit_notifies_once(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the transition into AUTH degradation pages the administrator.
+
+    A restart loop or a retrying caller must not turn one auth failure into a
+    stream of identical pushes: Telegram rate-limits a chat, and the flood
+    would bury the ``/setcookie`` prompt that is the only way to recover.
+    """
+
+    clients = [_mock_client(AccountStatus.UNAUTHENTICATED) for _ in range(5)]
+    _patch_client_factory(monkeypatch, *clients)
+    notifier = AsyncMock()
+    service = GeminiService(settings, notifier)
+
+    await service.init()
+    assert service.health.degraded_reason is DegradedReason.AUTH
+    assert notifier.await_count == 1
+
+    for _ in range(4):
+        with pytest.raises(AccountStatusError):
+            await service.reinit(
+                secure_1psid="FAKE_REPLACEMENT_1PSID_FOR_TEST",
+                secure_1psidts="FAKE_REPLACEMENT_1PSIDTS_FOR_TEST",
+            )
+
+    assert notifier.await_count == 1
+    assert service.health.degraded_reason is DegradedReason.AUTH
+
+
+async def test_degraded_reason_change_still_notifies(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deduplication keys on the reason, so BLOCKED -> AUTH still pages."""
+
+    blocked = _mock_client(AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE)
+    unauthenticated = _mock_client(AccountStatus.UNAUTHENTICATED)
+    _patch_client_factory(monkeypatch, blocked, unauthenticated)
+    notifier = AsyncMock()
+    service = GeminiService(settings, notifier)
+
+    await service.init()
+    assert service.health.degraded_reason is DegradedReason.BLOCKED
+    assert notifier.await_count == 1
+
+    with pytest.raises(AccountStatusError):
+        await service.reinit(
+            secure_1psid="FAKE_REPLACEMENT_1PSID_FOR_TEST",
+            secure_1psidts="FAKE_REPLACEMENT_1PSIDTS_FOR_TEST",
+        )
+
+    assert service.health.degraded_reason is DegradedReason.AUTH
+    assert notifier.await_count == 2
+
+
+async def test_unauthenticated_startup_starts_polling_and_pages_once(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real service that cannot authenticate must not stop the process.
+
+    ``/setcookie`` is the only recovery path, and it needs a live process to
+    reach.  The companion test in ``test_handlers`` drives this with a mocked
+    service, so it cannot catch a regression inside the service itself.
+    """
+
+    from gemini_tg_bot.__main__ import _initialize_and_start_polling
+
+    _patch_client_factory(
+        monkeypatch,
+        _mock_client(AccountStatus.UNAUTHENTICATED),
+    )
+    notifier = AsyncMock()
+    service = GeminiService(settings, notifier)
+    sessions = SimpleNamespace(restore_all=AsyncMock())
+    research = SimpleNamespace(restore_running=AsyncMock())
+    updater = SimpleNamespace(start_polling=AsyncMock())
+
+    await _initialize_and_start_polling(service, sessions, research, updater)
+
+    assert service.state is ServiceState.DEGRADED
+    assert service.health.degraded_reason is DegradedReason.AUTH
+    updater.start_polling.assert_awaited_once()
+    assert notifier.await_count == 1

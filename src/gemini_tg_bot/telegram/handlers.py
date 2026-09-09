@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime
@@ -93,6 +94,24 @@ COOKIE_PROMPT = (
     "第二行 __Secure-1PSIDTS。該訊息收到後會立即刪除。"
 )
 COOKIE_INPUT_INVALID = "Cookie 格式無效，請重新執行 /setcookie。"
+CREDENTIALS_NOT_RELAYED = (
+    "偵測到訊息含有 Gemini 憑證，已停止處理，內容不會送往 Gemini。\n"
+    "請自行刪除該則訊息。憑證只有管理者能透過 /setcookie 套用。"
+)
+
+# The opening of a real Gemini session cookie.  Matching the value rather than
+# the cookie name keeps ordinary conversation -- including questions that merely
+# mention the cookie names -- out of this path, while still catching every paste
+# that actually carries a secret.
+_CREDENTIAL_VALUE_RE = re.compile(
+    r"g\.a000[A-Za-z0-9_-]{20,}|sidts-[A-Za-z0-9_-]{20,}"
+)
+
+
+def _looks_like_credentials(text: str | None) -> bool:
+    """Report whether a message carries Gemini credential material."""
+
+    return bool(text) and _CREDENTIAL_VALUE_RE.search(text) is not None
 RESEARCH_USAGE = "用法：/research <topic>"
 RESEARCH_UNAVAILABLE = "Deep Research 服務目前無法使用，請稍後再試。"
 IMAGE_USAGE = "用法：/img <prompt>"
@@ -711,6 +730,9 @@ class TelegramHandlers:
         if user_id in self._awaiting_cookie_users:
             await self.setcookie_value(update, context)
             return
+        if _looks_like_credentials(message.text):
+            await self._handle_unprompted_credentials(identity, update, context)
+            return
         del context
         prompt = message.text
         if not prompt:
@@ -1080,6 +1102,35 @@ class TelegramHandlers:
             )
         except Exception as error:
             _log_handler_error("usage write", error)
+
+    async def _handle_unprompted_credentials(
+        self,
+        identity: tuple[int, int, Any],
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """Handle credential material that arrived without a /setcookie prompt.
+
+        The two-step interaction keeps its state in memory, so a restart, or a
+        prompt lost to flood control, leaves an administrator pasting cookies
+        the bot is no longer expecting.  Treating that as ordinary text would
+        forward the session cookie to Gemini as a prompt and leave it sitting
+        in the chat transcript, so the paste is routed into the credential path
+        instead -- which deletes the message before doing anything else.
+        """
+
+        user_id, _, message = identity
+        is_admin = False
+        if self._auth is not None:
+            try:
+                is_admin = self._auth.is_admin(user_id)
+            except ValueError:
+                is_admin = False
+        if is_admin:
+            self._awaiting_cookie_users.add(user_id)
+            await self.setcookie_value(update, context)
+            return
+        await send_text_or_busy(message, CREDENTIALS_NOT_RELAYED)
 
     async def _require_admin(
         self,

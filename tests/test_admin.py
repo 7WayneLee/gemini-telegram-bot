@@ -20,6 +20,7 @@ from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.telegram.auth import AuthMiddleware, SQLiteAccessOverrides
 from gemini_tg_bot.telegram.handlers import (
     ADMIN_ONLY,
+    CREDENTIALS_NOT_RELAYED,
     EgressMeter,
     TelegramHandlers,
     register_handlers,
@@ -279,3 +280,87 @@ async def test_reinit_clears_old_cache_only_when_credentials_change(
         second.close.assert_awaited_once_with()
     finally:
         await service.close()
+
+
+# Split so the literal never appears whole: this shape is exactly what the
+# repository's own CI credential scanner greps for, and a committed test
+# fixture matching it would fail that job.
+_FAKE_PSID = "g.a" + "000" + "FAKE_1PSID_SHAPE_FOR_TEST_0000000000"
+_FAKE_PSIDTS = "sidts" + "-" + "FAKE_1PSIDTS_SHAPE_FOR_TEST_0000000000"
+
+
+async def test_pasted_credentials_are_never_relayed_to_gemini(
+    tmp_path: Path,
+) -> None:
+    """A paste with no preceding /setcookie still takes the credential path.
+
+    The prompt that arms the two-step interaction can be lost -- to a restart,
+    or to Telegram flood control -- leaving an administrator pasting cookies
+    the bot is not expecting.  Treating that as ordinary text would forward the
+    session cookie to Gemini and leave it in the chat transcript.
+    """
+
+    database, _, handlers, service = await _admin_stack(tmp_path)
+    try:
+        update = _update(f"{_FAKE_PSID}\n{_FAKE_PSIDTS}")
+
+        await handlers.text_message(update, SimpleNamespace())
+
+        update.effective_message.delete.assert_awaited_once_with()
+        service.reinit.assert_awaited_once_with(
+            secure_1psid=_FAKE_PSID,
+            secure_1psidts=_FAKE_PSIDTS,
+        )
+        handlers._sessions.get.assert_not_called()
+        confirmation = update.effective_message.reply_text.await_args.args[0]
+        assert _FAKE_PSID not in confirmation
+        assert _FAKE_PSIDTS not in confirmation
+    finally:
+        await database.close()
+
+
+async def test_non_admin_credential_paste_is_refused_without_reinit(
+    tmp_path: Path,
+) -> None:
+    """A non-administrator's paste is stopped, but never applied."""
+
+    other_user = ADMIN_USER_ID + 1
+    database, _, handlers, service = await _admin_stack(
+        tmp_path,
+        allowed_user_ids={other_user},
+    )
+    try:
+        update = _update(f"{_FAKE_PSID}\n{_FAKE_PSIDTS}", user_id=other_user)
+
+        await handlers.text_message(update, SimpleNamespace())
+
+        service.reinit.assert_not_awaited()
+        handlers._sessions.get.assert_not_called()
+        assert (
+            update.effective_message.reply_text.await_args.args[0]
+            == CREDENTIALS_NOT_RELAYED
+        )
+    finally:
+        await database.close()
+
+
+async def test_mentioning_the_cookie_names_is_still_an_ordinary_prompt(
+    tmp_path: Path,
+) -> None:
+    """Detection keys on the value shape, so asking about cookies still works."""
+
+    database, _, handlers, service = await _admin_stack(tmp_path)
+    try:
+        update = _update("__Secure-1PSID 跟 __Secure-1PSIDTS 有什麼差別？")
+
+        await handlers.text_message(update, SimpleNamespace())
+
+        service.reinit.assert_not_awaited()
+        update.effective_message.delete.assert_not_awaited()
+        replies = [
+            call.args[0]
+            for call in update.effective_message.reply_text.await_args_list
+        ]
+        assert CREDENTIALS_NOT_RELAYED not in replies
+    finally:
+        await database.close()

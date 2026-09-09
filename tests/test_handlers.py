@@ -1143,7 +1143,9 @@ async def test_startup_registers_public_command_menu() -> None:
     application.start.assert_awaited_once_with()
 
 
-async def test_degraded_gemini_startup_still_starts_polling() -> None:
+async def test_startup_sequence_restores_state_before_polling() -> None:
+    """Order only.  The service-level guarantee is covered in test_service."""
+
     service = SimpleNamespace(
         init=AsyncMock(),
         state=ServiceState.DEGRADED,
