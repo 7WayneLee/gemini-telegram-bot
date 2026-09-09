@@ -19,10 +19,22 @@
 3. **禁止將 cookie 值寫入 log、測試 fixture、commit、或任何 `docs/` 產出。**
    測試用假值一律使用顯性假字串，格式為 `FAKE_1PSID_FOR_TEST` / `FAKE_1PSIDTS_FOR_TEST`。
 
-4. **禁止在正式主機上執行任何指令。**
+4. **正式主機上只允許唯讀診斷，任何會改變狀態的指令一律由人工執行。**
    本專案設計為與其他服務共用主機，一次誤下的指令即可造成同機服務中斷。
-   Agent 只在開發環境寫碼與跑 mock 測試；
+
+   Agent **可以**執行：`journalctl`、`systemctl status` / `show`、
+   唯讀的 sqlite 查詢、`ls` / `cat`（非機密檔案）等不改變狀態的指令。
+   連線一律加 `-o ClearAllForwardings=yes`（ssh config 的 8080 轉送會與本機衝突）。
+
+   Agent **不得**執行：`git pull`、`uv pip install`、`systemctl restart` / `stop`、
+   `rm`、`sed -i`、`cp`、`mkdir`，以及任何寫入、刪除、重啟、容器操作。
    **所有部署、重啟、容器操作一律由人工執行。**
+
+   判斷準則：**這道指令會改變主機上的任何狀態嗎？** 會，就交給人。
+   不確定就當作會。第 5 條（不得展開或印出 `.env`）不受此放寬影響，全程有效。
+
+   > 放寬決議：2026-09-09，由 Commander 提出選項、使用者選擇「只開唯讀診斷」。
+   > 原文為「禁止在正式主機上執行任何指令」。
 
 5. **禁止執行任何會展開或印出 `.env` 的指令。**
    已知會觸發的：`docker compose config`、`docker-compose config`
