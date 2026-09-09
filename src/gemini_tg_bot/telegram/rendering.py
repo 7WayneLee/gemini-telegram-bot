@@ -45,6 +45,10 @@ _TRAILING_BLANK_LINES_RE = re.compile(r"(?:\r?\n[ \t]*)+$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r":?[ \t]*-{3,}[ \t]*:?")
 _SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto", "tg"})
+_TABLE_LINE_START_FORBIDDEN = frozenset(
+    "。，、；：？！）」』】》〉・ー％‧.,;:?!)]}"
+)
+_TABLE_LINE_END_FORBIDDEN = frozenset("（「『【《〈([{")
 _LATEX_MACROS = {
     "approx": "≈",
     "cdot": "·",
@@ -661,7 +665,7 @@ def _table_column_widths(rows: tuple[tuple[str, ...], ...]) -> tuple[int, ...]:
 
 
 def _normalise_table_cell(cell: str) -> str:
-    """Apply safe math conversion while keeping code spans literal in a pre table."""
+    """Apply safe math conversion without inspecting inline code span contents."""
 
     normalised: list[str] = []
     position = 0
@@ -687,6 +691,73 @@ def _normalise_table_cell(cell: str) -> str:
         normalised.append(cell[position])
         position += 1
     return "".join(normalised)
+
+
+def _strip_table_cell_markdown(cell: str) -> str:
+    """Remove inline presentation syntax without producing HTML inside ``pre``."""
+
+    plain: list[str] = []
+    position = 0
+    while position < len(cell):
+        if cell[position] == "\\" and position + 1 < len(cell):
+            plain.append(cell[position : position + 2])
+            position += 2
+            continue
+
+        if cell[position] == "[":
+            label_end = _matching_bracket(cell, position + 1, "[", "]")
+            if (
+                label_end >= 0
+                and label_end + 1 < len(cell)
+                and cell[label_end + 1] == "("
+            ):
+                target_end = _matching_bracket(cell, label_end + 2, "(", ")")
+                if target_end >= 0:
+                    label = _strip_table_cell_markdown(
+                        cell[position + 1 : label_end]
+                    )
+                    url = _link_destination(cell[label_end + 2 : target_end])
+                    plain.append(f"{label}（{url}）" if url else label)
+                    position = target_end + 1
+                    continue
+
+        if cell[position] == "`":
+            closing = _find_unescaped(cell, "`", position + 1)
+            if closing >= 0:
+                plain.append(cell[position + 1 : closing])
+                position = closing + 1
+                continue
+
+        if cell.startswith("~~", position):
+            closing = _find_unescaped(cell, "~~", position + 2)
+            if closing > position + 2:
+                plain.append(
+                    _strip_table_cell_markdown(cell[position + 2 : closing])
+                )
+                position = closing + 2
+                continue
+
+        if cell.startswith("**", position):
+            closing = _find_emphasis_close(cell, position + 2, "**")
+            if closing > position + 2:
+                plain.append(
+                    _strip_table_cell_markdown(cell[position + 2 : closing])
+                )
+                position = closing + 2
+                continue
+
+        if cell[position] == "*":
+            closing = _find_emphasis_close(cell, position + 1, "*")
+            if closing > position + 1:
+                plain.append(
+                    _strip_table_cell_markdown(cell[position + 1 : closing])
+                )
+                position = closing + 1
+                continue
+
+        plain.append(cell[position])
+        position += 1
+    return "".join(plain)
 
 
 def _fit_table_column_widths(
@@ -764,13 +835,27 @@ def _wrap_table_cell(cell: str, width: int) -> tuple[str, ...]:
             ),
             None,
         )
-        if whitespace is not None:
-            lines.append(remaining[:whitespace].rstrip())
-            remaining = remaining[whitespace:].lstrip()
-        else:
-            lines.append(remaining[:cut])
-            remaining = remaining[cut:].lstrip()
-    lines.append(remaining)
+        cut = whitespace if whitespace is not None else cut
+
+        before = cut - 1
+        while before >= 0 and remaining[before].isspace():
+            before -= 1
+        after = cut
+        while after < len(remaining) and remaining[after].isspace():
+            after += 1
+        violates_punctuation_rule = (
+            before >= 0 and remaining[before] in _TABLE_LINE_END_FORBIDDEN
+        ) or (
+            after < len(remaining)
+            and remaining[after] in _TABLE_LINE_START_FORBIDDEN
+        )
+        if violates_punctuation_rule and remaining[: cut - 1].rstrip():
+            cut -= 1
+
+        lines.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        lines.append(remaining)
     return tuple(lines)
 
 
@@ -820,7 +905,10 @@ def _render_list_table(rows: tuple[tuple[str, ...], ...]) -> str:
 
 def _render_table_block(block: _TableBlock) -> str:
     rows = tuple(
-        tuple(_normalise_table_cell(cell) for cell in row)
+        tuple(
+            _strip_table_cell_markdown(_normalise_table_cell(cell))
+            for cell in row
+        )
         for row in block.rows
     )
     widths = _fit_table_column_widths(_table_column_widths(rows))

@@ -310,6 +310,74 @@ def test_table_separator_is_replaced_by_a_solid_rule() -> None:
     assert "────  ─────" in rendered
 
 
+@pytest.mark.parametrize(
+    ("marked", "plain"),
+    [
+        ("**粗體**", "粗體"),
+        ("*斜體*", "斜體"),
+        ("`程式碼`", "程式碼"),
+        ("~~刪除線~~", "刪除線"),
+        ("[文字](https://example.test)", "文字（https://example.test）"),
+    ],
+)
+def test_pre_table_cells_show_inline_markdown_as_plain_text(
+    marked: str,
+    plain: str,
+) -> None:
+    """Removing unusable delimiters keeps preformatted table values readable."""
+
+    source = (
+        "| 類型 | 值 |\n"
+        "| --- | --- |\n"
+        f"| {marked} | 一般 |\n"
+    )
+
+    rendered = markdown_to_telegram_html(source)
+    pre_content = rendered.removeprefix("<pre>").removesuffix("</pre>\n")
+
+    assert rendered.startswith("<pre>")
+    assert plain in unescape(pre_content)
+    assert marked not in pre_content
+    assert "<" not in pre_content
+
+
+def test_pre_table_width_uses_text_after_markdown_is_removed() -> None:
+    """Measuring only visible glyphs prevents hidden delimiters from shifting columns."""
+
+    source = (
+        "| 名稱 | 值 |\n"
+        "| --- | --- |\n"
+        "| **粗體** | 一般 |\n"
+    )
+
+    assert markdown_to_telegram_html(source) == (
+        "<pre>名稱  值\n"
+        "────  ────\n"
+        "粗體  一般</pre>\n"
+    )
+
+
+def test_list_fallback_still_renders_inline_markdown_as_html() -> None:
+    """The mobile fallback needs emphasis and links because it is not monospace text."""
+
+    source = (
+        "| First | Second | Third | Fourth | Fifth |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| **粗體** | *斜體* | `code` | [site](https://example.test) | plain |\n"
+    )
+
+    rendered = markdown_to_telegram_html(source)
+
+    assert rendered.startswith("<b>粗體</b>\n")
+    assert f"{LIST_INDENT_CHARACTER * 2}◦ Second：<i>斜體</i>" in rendered
+    assert f"{LIST_INDENT_CHARACTER * 2}◦ Third：<code>code</code>" in rendered
+    assert (
+        f'{LIST_INDENT_CHARACTER * 2}◦ Fourth：'
+        '<a href="https://example.test">site</a>'
+    ) in rendered
+    assert "<pre>" not in rendered
+
+
 def test_wide_table_wraps_cells_and_keeps_display_column_starts_aligned() -> None:
     """Wrapped CJK rows must retain exact visual column starts in Telegram monospace."""
 
@@ -350,6 +418,48 @@ def test_wide_table_wraps_cells_and_keeps_display_column_starts_aligned() -> Non
         assert any(text_at_display_column(line, 10).startswith(fragment) for line in lines)
     for fragment in third_column_fragments:
         assert any(text_at_display_column(line, 20).startswith(fragment) for line in lines)
+
+
+def test_chinese_closing_punctuation_does_not_start_a_wrapped_line() -> None:
+    """Keeping a Chinese full stop with preceding text avoids a visually orphaned mark."""
+
+    lines = _RENDERING._wrap_table_cell("平衡的分割。仍然繼續", 10)
+
+    assert lines == ("平衡的分", "割。仍然繼", "續")
+    assert all(not line.startswith("。") for line in lines)
+
+
+def test_chinese_opening_punctuation_does_not_end_a_wrapped_line() -> None:
+    """Moving an opening bracket forward keeps its enclosed Chinese phrase connected."""
+
+    lines = _RENDERING._wrap_table_cell("排序方法（最差情況）", 10)
+
+    assert lines == ("排序方法", "（最差情", "況）")
+    assert all(not line.endswith("（") for line in lines)
+
+
+@pytest.mark.parametrize("cell", ["（甲", "。甲"])
+def test_extremely_narrow_table_wrap_terminates_without_empty_lines(cell: str) -> None:
+    """An impossible one-cell width must favor progress over punctuation aesthetics."""
+
+    lines = _RENDERING._wrap_table_cell(cell, 1)
+
+    assert "".join(lines) == cell
+    assert all(lines)
+
+
+def test_ascii_table_cell_wrapping_remains_unchanged() -> None:
+    """Kinsoku rules must not disturb established wrapping for ordinary ASCII text."""
+
+    assert _RENDERING._wrap_table_cell("alpha beta gamma", 10) == (
+        "alpha",
+        "beta gamma",
+    )
+    assert _RENDERING._wrap_table_cell("abcdefghijkl", 5) == (
+        "abcde",
+        "fghij",
+        "kl",
+    )
 
 
 def test_chinese_table_cell_wraps_between_characters() -> None:
