@@ -14,10 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 
 MAX_MESSAGE_LENGTH = 4000
+TABLE_MAX_WIDTH = 60
 UNORDERED_LIST_BULLETS = ("•", "◦", "▪")
 LIST_INDENT_CHARACTER = "\u2007"
 LIST_INDENT_CHARACTERS_PER_LEVEL = 2
@@ -41,6 +43,7 @@ _BLANK_LINE_WHITESPACE_RE = re.compile(r"(?m)^[ \t]+(?=\r?$)")
 _LEADING_BLANK_LINES_RE = re.compile(r"^(?:[ \t]*\r?\n)+")
 _TRAILING_BLANK_LINES_RE = re.compile(r"(?:\r?\n[ \t]*)+$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?[ \t]*-{3,}[ \t]*:?")
 _SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto", "tg"})
 
 
@@ -56,6 +59,26 @@ class _CodeBlock:
     info: str
     content: str
     closed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _TableBlock:
+    raw: str
+    rows: tuple[tuple[str, ...], ...]
+
+
+def display_width(text: str) -> int:
+    """Return the number of monospace cells occupied by ``text``.
+
+    Telegram's monospace font uses two cells for East Asian wide and fullwidth
+    characters.  Counting code points with ``len`` would therefore misalign
+    tables containing Chinese, Japanese, or Korean text.
+    """
+
+    return sum(
+        2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+        for character in text
+    )
 
 
 def _without_line_ending(line: str) -> tuple[str, str]:
@@ -122,6 +145,103 @@ def _parse_blocks(markdown: str) -> list[_TextBlock | _CodeBlock]:
 
     if plain:
         blocks.append(_TextBlock("".join(plain)))
+    return blocks
+
+
+def _split_table_row(line: str) -> tuple[str, ...] | None:
+    body, _ = _without_line_ending(line)
+    body = body.strip()
+    if "|" not in body:
+        return None
+
+    cells: list[str] = []
+    current: list[str] = []
+    found_separator = False
+    in_code = False
+    position = 0
+    while position < len(body):
+        character = body[position]
+        if character == "\\" and position + 1 < len(body):
+            current.extend(body[position : position + 2])
+            position += 2
+            continue
+        if character == "`":
+            in_code = not in_code
+            current.append(character)
+        elif character == "|" and not in_code:
+            cells.append("".join(current).strip())
+            current.clear()
+            found_separator = True
+        else:
+            current.append(character)
+        position += 1
+    cells.append("".join(current).strip())
+
+    if body.startswith("|"):
+        cells.pop(0)
+    if body.endswith("|") and not _is_escaped(body, len(body) - 1):
+        cells.pop()
+    if not found_separator or len(cells) < 2:
+        return None
+    return tuple(cells)
+
+
+def _is_table_separator(cells: tuple[str, ...], columns: int) -> bool:
+    return len(cells) == columns and all(
+        _TABLE_SEPARATOR_CELL_RE.fullmatch(cell) is not None for cell in cells
+    )
+
+
+def _split_text_tables(block: str) -> list[_TextBlock | _TableBlock]:
+    lines = block.splitlines(keepends=True)
+    blocks: list[_TextBlock | _TableBlock] = []
+    plain: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        header = _split_table_row(lines[index])
+        separator = (
+            _split_table_row(lines[index + 1]) if index + 1 < len(lines) else None
+        )
+        if (
+            header is None
+            or separator is None
+            or not _is_table_separator(separator, len(header))
+        ):
+            plain.append(lines[index])
+            index += 1
+            continue
+
+        if plain:
+            blocks.append(_TextBlock("".join(plain)))
+            plain.clear()
+
+        table_lines = [lines[index], lines[index + 1]]
+        rows = [header]
+        index += 2
+        while index < len(lines):
+            row = _split_table_row(lines[index])
+            if row is None or len(row) != len(header):
+                break
+            table_lines.append(lines[index])
+            rows.append(row)
+            index += 1
+        blocks.append(_TableBlock("".join(table_lines), tuple(rows)))
+
+    if plain:
+        blocks.append(_TextBlock("".join(plain)))
+    return blocks
+
+
+def _parse_document_blocks(
+    markdown: str,
+) -> list[_TextBlock | _CodeBlock | _TableBlock]:
+    blocks: list[_TextBlock | _CodeBlock | _TableBlock] = []
+    for block in _parse_blocks(markdown):
+        if isinstance(block, _TextBlock):
+            blocks.extend(_split_text_tables(block.raw))
+        else:
+            blocks.append(block)
     return blocks
 
 
@@ -370,6 +490,59 @@ def _render_text_block(block: str) -> str:
     return "".join(rendered)
 
 
+def _table_column_widths(rows: tuple[tuple[str, ...], ...]) -> tuple[int, ...]:
+    return tuple(
+        max(display_width(row[column]) for row in rows)
+        for column in range(len(rows[0]))
+    )
+
+
+def _render_pre_table(
+    rows: tuple[tuple[str, ...], ...],
+    widths: tuple[int, ...],
+) -> str:
+    rendered_rows: list[str] = []
+    for index, row in enumerate(rows):
+        padded = [
+            cell + " " * (width - display_width(cell))
+            for cell, width in zip(row, widths, strict=True)
+        ]
+        rendered_rows.append("  ".join(padded).rstrip())
+        if index == 0:
+            rendered_rows.append("  ".join("─" * width for width in widths))
+    content = "\n".join(rendered_rows)
+    return f"<pre>{escape(content, quote=False)}</pre>"
+
+
+def _render_list_table(rows: tuple[tuple[str, ...], ...]) -> str:
+    header, *data_rows = rows
+    if not data_rows:
+        return _render_inline(" | ".join(header))
+
+    indent = LIST_INDENT_CHARACTER * LIST_INDENT_CHARACTERS_PER_LEVEL
+    marker = UNORDERED_LIST_BULLETS[1]
+    rendered_rows: list[str] = []
+    for row in data_rows:
+        lines = [_render_inline(row[0])]
+        lines.extend(
+            f"{indent}{marker} {_render_inline(label)}：{_render_inline(value)}"
+            for label, value in zip(header[1:], row[1:], strict=True)
+        )
+        rendered_rows.append("\n".join(lines))
+    return "\n\n".join(rendered_rows)
+
+
+def _render_table_block(block: _TableBlock) -> str:
+    widths = _table_column_widths(block.rows)
+    table_width = sum(widths) + 2 * (len(widths) - 1)
+    rendered = (
+        _render_pre_table(block.rows, widths)
+        if table_width <= TABLE_MAX_WIDTH
+        else _render_list_table(block.rows)
+    )
+    return rendered + ("\n" if block.raw.endswith(("\n", "\r")) else "")
+
+
 def strip_googleusercontent_artifacts(text: str) -> str:
     """Remove Gemini image placeholders without touching inline underscore text."""
 
@@ -387,9 +560,12 @@ def markdown_to_telegram_html(markdown: str) -> str:
     """
 
     rendered: list[str] = []
-    for block in _parse_blocks(_clean_markdown(markdown)):
+    for block in _parse_document_blocks(_clean_markdown(markdown)):
         if isinstance(block, _TextBlock):
             rendered.append(_render_text_block(block.raw))
+            continue
+        if isinstance(block, _TableBlock):
+            rendered.append(_render_table_block(block))
             continue
         language = _normalise_language(block.info)
         language_class = f' class="language-{escape(language, quote=True)}"' if language else ""
@@ -431,12 +607,13 @@ def _split_code_block(block: _CodeBlock, limit: int) -> list[str]:
 
 
 def split_message(markdown: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
-    """Split Markdown without leaving a chunk inside a fenced code block.
+    """Split Markdown without leaving a chunk inside a protected block.
 
     Paragraph boundaries are preferred over line boundaries, followed by a
     hard cut.  A code block that cannot fit as a whole is closed at the end of
-    every chunk and reopened (with its language marker) in the next chunk.
-    Returned chunks never exceed ``limit`` characters.
+    every chunk and reopened (with its language marker) in the next chunk.  A
+    Markdown table is kept whole so no chunk can be mistaken for plain pipe-
+    separated text.  Returned chunks never exceed ``limit`` characters.
     """
 
     if limit < 32:
@@ -446,7 +623,16 @@ def split_message(markdown: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
 
     chunks: list[str] = []
     current = ""
-    for block in _parse_blocks(markdown):
+    for block in _parse_document_blocks(markdown):
+        if isinstance(block, _TableBlock):
+            if len(block.raw) > limit:
+                raise ValueError("limit is too small for a Markdown table")
+            if current and len(current) + len(block.raw) > limit:
+                chunks.append(current)
+                current = ""
+            current += block.raw
+            continue
+
         if isinstance(block, _CodeBlock):
             if len(current) + len(block.raw) <= limit:
                 current += block.raw
@@ -527,7 +713,9 @@ __all__ = [
     "LIST_INDENT_CHARACTERS_PER_LEVEL",
     "MAX_MESSAGE_LENGTH",
     "ORPHAN_ARTIFACT_SUFFIX_RE",
+    "TABLE_MAX_WIDTH",
     "UNORDERED_LIST_BULLETS",
+    "display_width",
     "markdown_to_telegram_html",
     "render_markdown",
     "render_markdown_chunks",
@@ -538,6 +726,20 @@ __all__ = [
 
 THOUGHTS_TRUNCATION_NOTE = "…（思考過程過長，已截斷）"
 THOUGHTS_TITLE = "思考過程"
+
+
+def _render_thoughts_inline(text: str) -> str:
+    rendered: list[str] = []
+    for line in text.splitlines(keepends=True):
+        body, ending = _without_line_ending(line)
+        heading = _HEADING_RE.fullmatch(body)
+        if heading is not None:
+            rendered.append(f"<b>{_render_inline(heading.group('body'))}</b>{ending}")
+        elif _opening_fence(line) is not None:
+            rendered.append(escape(body, quote=False) + ending)
+        else:
+            rendered.append(_render_inline(body) + ending)
+    return "".join(rendered)
 
 
 def render_thoughts_blockquote(
@@ -571,7 +773,7 @@ def render_thoughts_blockquote(
     if budget <= overhead:
         return ""
 
-    body = escape(text, quote=False)
+    body = _render_thoughts_inline(text)
     if len(body) + overhead <= budget:
         return f"{opening}{title}{body}{closing}"
 
@@ -579,12 +781,14 @@ def render_thoughts_blockquote(
     room = budget - overhead - len(note)
     if room <= 0:
         return ""
-    # Escaping expands characters, so trim the escaped form and re-escape the
-    # plain prefix it corresponds to; truncating escaped text directly could
-    # cut an entity in half and produce invalid HTML.
+    # Inline tags and escaping expand the source, so trim the source and render
+    # it again.  Cutting rendered HTML directly could leave a tag or entity
+    # incomplete and make Telegram reject the entire message.
     trimmed = text[:room]
-    while trimmed and len(escape(trimmed, quote=False)) > room:
+    rendered_trimmed = _render_thoughts_inline(trimmed)
+    while trimmed and len(rendered_trimmed) > room:
         trimmed = trimmed[:-1]
+        rendered_trimmed = _render_thoughts_inline(trimmed)
     if not trimmed:
         return ""
-    return f"{opening}{title}{escape(trimmed, quote=False)}{note}{closing}"
+    return f"{opening}{title}{rendered_trimmed}{note}{closing}"

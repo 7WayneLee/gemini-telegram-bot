@@ -21,6 +21,8 @@ _SPEC.loader.exec_module(_RENDERING)
 
 MAX_MESSAGE_LENGTH = _RENDERING.MAX_MESSAGE_LENGTH
 LIST_INDENT_CHARACTER = _RENDERING.LIST_INDENT_CHARACTER
+TABLE_MAX_WIDTH = _RENDERING.TABLE_MAX_WIDTH
+display_width = _RENDERING.display_width
 markdown_to_telegram_html = _RENDERING.markdown_to_telegram_html
 render_markdown = _RENDERING.render_markdown
 render_markdown_chunks = _RENDERING.render_markdown_chunks
@@ -155,6 +157,107 @@ def test_latex_fragments_remain_copyable_code() -> None:
         r"<code>$$\int_0^1 x^2\,dx$$</code>; price $5 and $10."
         "\n<code>$$\nx + y\n$$</code>"
     )
+
+
+def test_display_width_counts_ascii_and_east_asian_characters() -> None:
+    """Cell widths must reflect Telegram monospace glyphs instead of code-point count."""
+
+    assert display_width("ASCII") == 5
+    assert display_width("中文") == 4
+    assert display_width("Ａ，") == 4
+
+
+def test_display_width_counts_mixed_text_correctly() -> None:
+    """Mixed Latin and CJK cells are common in Gemini tables and must stay aligned."""
+
+    assert display_width("A中Ｂ!") == 6
+
+
+def test_ascii_table_renders_as_an_aligned_preformatted_block() -> None:
+    """A compact table should remain scannable after Telegram strips Markdown pipes."""
+
+    source = (
+        "| Name | Score |\n"
+        "| --- | --- |\n"
+        "| Ada | 10 |\n"
+        "| Grace | 9 |\n"
+    )
+
+    assert markdown_to_telegram_html(source) == (
+        "<pre>Name   Score\n"
+        "─────  ─────\n"
+        "Ada    10\n"
+        "Grace  9</pre>\n"
+    )
+
+
+def test_chinese_table_uses_display_width_for_alignment() -> None:
+    """Double-width Chinese glyphs must not shift later columns out of alignment."""
+
+    source = "| 名稱 | 值 |\n| --- | --- |\n| A | 中文 |\n"
+
+    assert markdown_to_telegram_html(source) == (
+        "<pre>名稱  值\n"
+        "────  ────\n"
+        "A     中文</pre>\n"
+    )
+
+
+def test_table_separator_is_replaced_by_a_solid_rule() -> None:
+    """Alignment markers are Markdown syntax and should become a readable visual rule."""
+
+    rendered = markdown_to_telegram_html(
+        "| Left | Right |\n| :--- | ---: |\n| one | two |"
+    )
+
+    assert ":---" not in rendered
+    assert "---:" not in rendered
+    assert "────  ─────" in rendered
+
+
+def test_wide_table_falls_back_to_inline_rendered_list_items() -> None:
+    """Wide tables need a mobile-friendly layout without losing cell emphasis."""
+
+    wide_heading = "Description " * 6
+    source = (
+        f"| Algorithm | {wide_heading} |\n"
+        "| --- | --- |\n"
+        "| **Quicksort** | `O(n log n)` |\n"
+    )
+
+    rendered = markdown_to_telegram_html(source)
+
+    assert display_width("Algorithm") + 2 + display_width(wide_heading.strip()) > TABLE_MAX_WIDTH
+    assert rendered == (
+        f"<b>Quicksort</b>\n{LIST_INDENT_CHARACTER * 2}◦ "
+        f"{wide_heading.strip()}：<code>O(n log n)</code>\n"
+    )
+    assert "<pre>" not in rendered
+
+
+def test_isolated_pipe_is_not_mistaken_for_a_table() -> None:
+    """Ordinary prose containing a pipe must retain its existing rendering."""
+
+    assert markdown_to_telegram_html("Use | as a separator.") == "Use | as a separator."
+
+
+def test_table_like_row_without_separator_is_not_converted() -> None:
+    """Requiring a separator row prevents one-off pipe-delimited prose from changing."""
+
+    source = "| this looks | table-like |\nbut it has no separator"
+
+    assert markdown_to_telegram_html(source) == source
+
+
+def test_split_message_keeps_a_table_in_one_chunk() -> None:
+    """Moving a whole table preserves the header context for every data row."""
+
+    table = "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+    source = f"{'x' * 40}\n{table}"
+
+    chunks = split_message(source, limit=64)
+
+    assert chunks == ["x" * 40 + "\n", table]
 
 
 def test_split_prefers_paragraph_then_newline_then_hard_cut() -> None:
@@ -354,6 +457,59 @@ def test_thoughts_escape_html_special_characters() -> None:
     assert _RENDERING.render_thoughts_blockquote("a < b > c & d", budget=100) == (
         "<blockquote expandable>a &lt; b &gt; c &amp; d</blockquote>"
     )
+
+
+def test_thoughts_render_inline_markdown() -> None:
+    """Reasoning emphasis and code should not appear with literal Markdown delimiters."""
+
+    assert _RENDERING.render_thoughts_blockquote(
+        "**Defining the Comparison** with *care* and `values`",
+        budget=150,
+    ) == (
+        "<blockquote expandable><b>Defining the Comparison</b> with "
+        "<i>care</i> and <code>values</code></blockquote>"
+    )
+
+
+def test_thoughts_keep_block_syntax_flat_and_render_headings_as_bold() -> None:
+    """Flat quote contents avoid Telegram's unreliable nested block rendering."""
+
+    source = (
+        "# Heading\n"
+        "- **item**\n"
+        "```python\n"
+        "code\n"
+        "```\n"
+        "| A | B |\n"
+        "| --- | --- |"
+    )
+
+    rendered = _RENDERING.render_thoughts_blockquote(source, budget=500)
+
+    assert "<b>Heading</b>" in rendered
+    assert "- <b>item</b>" in rendered
+    assert "```python" in rendered
+    assert "| --- | --- |" in rendered
+    assert "<pre>" not in rendered
+    assert "• item" not in rendered
+    assert rendered.count("<blockquote") == 1
+
+
+def test_thoughts_truncation_accounts_for_inline_tag_expansion() -> None:
+    """Added inline tags must never make a truncated Telegram message exceed budget."""
+
+    opening, closing = "<blockquote expandable>", "</blockquote>"
+    note = _RENDERING.THOUGHTS_TRUNCATION_NOTE
+    budget = len(opening) + len(closing) + len(note) + 20
+
+    rendered = _RENDERING.render_thoughts_blockquote(
+        "**bold** & " * 20,
+        budget=budget,
+    )
+
+    assert "<b>bold</b>" in rendered
+    assert rendered.endswith(f"{note}{closing}")
+    assert len(rendered) <= budget
 
 
 @pytest.mark.parametrize("thoughts", ["", " \t\n "])
