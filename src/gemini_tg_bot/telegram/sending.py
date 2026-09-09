@@ -7,13 +7,15 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any, TypeVar
 
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 
 
 MAX_FLOOD_WAIT_SECONDS = 30.0
 MAX_FLOOD_RETRIES = 3
+MAX_NETWORK_RETRIES = 2
+NETWORK_RETRY_DELAY_SECONDS = 1.0
 SERVICE_BUSY = translate("generic.service_busy", DEFAULT_LANGUAGE)
 
 _ResultT = TypeVar("_ResultT")
@@ -42,30 +44,49 @@ def _retry_delay(error: RetryAfter) -> float:
 async def call_telegram(
     operation: Callable[..., Awaitable[_ResultT]],
     *args: Any,
+    retry_on_network: bool = False,
     sleep: _Sleep | None = None,
     flood_wait: _Sleep | None = None,
     **kwargs: Any,
 ) -> _ResultT | None:
-    """Call one Telegram operation with a bounded flood-control budget."""
+    """Call one Telegram operation with bounded retry budgets.
+
+    Network retries default to disabled because an operation that creates a
+    message may have succeeded remotely even when its response was lost;
+    retrying it could create a duplicate, which is worse than one failed send.
+    """
 
     waited_seconds = 0.0
+    flood_retries = 0
+    network_retries = 0
     wait = flood_wait or sleep or asyncio.sleep
-    for attempt in range(MAX_FLOOD_RETRIES + 1):
+    while True:
         try:
             return await operation(*args, **kwargs)
         except RetryAfter as error:
             delay = max(0.0, _retry_delay(error))
             remaining = MAX_FLOOD_WAIT_SECONDS - waited_seconds
-            if attempt == MAX_FLOOD_RETRIES or delay > remaining:
+            if flood_retries == MAX_FLOOD_RETRIES or delay > remaining:
                 raise FloodControlExceeded(delay, waited_seconds) from error
             await wait(delay)
             waited_seconds += delay
+            flood_retries += 1
         except BadRequest as error:
             if "message is not modified" in str(error).casefold():
                 return None
             raise
-
-    raise AssertionError("unreachable")
+        except NetworkError as error:
+            retryable = isinstance(error, NetworkError) and not isinstance(
+                error, BadRequest
+            )
+            if (
+                not retry_on_network
+                or not retryable
+                or network_retries == MAX_NETWORK_RETRIES
+            ):
+                raise
+            await wait(NETWORK_RETRY_DELAY_SECONDS)
+            network_retries += 1
 
 
 async def send_text(message: Any, text: str, **kwargs: Any) -> Any:
@@ -113,13 +134,23 @@ async def send_media_group(message: Any, media: Any, **kwargs: Any) -> Any:
 async def edit_text(message: Any, text: str, **kwargs: Any) -> Any:
     """Edit a message through the protected transport."""
 
-    return await call_telegram(message.edit_text, text, **kwargs)
+    return await call_telegram(
+        message.edit_text,
+        text,
+        retry_on_network=True,
+        **kwargs,
+    )
 
 
 async def edit_message_text(query: Any, text: str, **kwargs: Any) -> Any:
     """Edit a callback query's message through the protected transport."""
 
-    return await call_telegram(query.edit_message_text, text, **kwargs)
+    return await call_telegram(
+        query.edit_message_text,
+        text,
+        retry_on_network=True,
+        **kwargs,
+    )
 
 
 async def edit_message_text_or_busy(
@@ -156,6 +187,8 @@ __all__ = [
     "FloodControlExceeded",
     "MAX_FLOOD_RETRIES",
     "MAX_FLOOD_WAIT_SECONDS",
+    "MAX_NETWORK_RETRIES",
+    "NETWORK_RETRY_DELAY_SECONDS",
     "SERVICE_BUSY",
     "answer_callback",
     "call_telegram",
