@@ -612,6 +612,7 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     sessions.get_state.return_value = SimpleNamespace(
         model=None,
         temporary=False,
+        extended_thinking=False,
     )
     sessions.get_or_create.return_value = session
 
@@ -708,6 +709,7 @@ async def test_handler_passes_upload_as_files_and_cleans_it_after_send(
     sessions.get_state.return_value = SimpleNamespace(
         model="dynamic-model",
         temporary=True,
+        extended_thinking=False,
     )
     sessions.get_or_create.return_value = session
 

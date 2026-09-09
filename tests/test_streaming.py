@@ -40,10 +40,12 @@ class FakeClient:
         *,
         clock: FakeClock,
         images: tuple[Any, ...] = (),
+        thoughts: str | None = None,
     ) -> None:
         self._chunks = list(chunks)
         self._clock = clock
         self._images = images
+        self._thoughts = thoughts
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _generate(self) -> AsyncIterator[SimpleNamespace]:
@@ -51,11 +53,14 @@ class FakeClient:
         for timestamp, delta in self._chunks:
             self._clock.current = timestamp
             full_text += delta
-            yield SimpleNamespace(
-                text_delta=delta,
-                text=full_text,
-                images=self._images,
-            )
+            chunk: dict[str, Any] = {
+                "text_delta": delta,
+                "text": full_text,
+                "images": self._images,
+            }
+            if self._thoughts is not None:
+                chunk["thoughts"] = self._thoughts
+            yield SimpleNamespace(**chunk)
 
     def generate_content_stream(
         self,
@@ -298,3 +303,73 @@ async def test_long_final_response_replaces_placeholder_and_sends_more_chunks() 
     assert message.reply_text.await_args.kwargs == {"parse_mode": ParseMode.HTML}
     assert len(second_chunk) <= 4000
     assert first_chunk + second_chunk == text
+
+
+async def test_thoughts_are_prepended_as_an_expandable_blockquote() -> None:
+    """Reasoning shares the answer's message so nothing can arrive between them."""
+
+    clock = FakeClock()
+    client = FakeClient(
+        [(0.1, "**答案**")],
+        clock=clock,
+        thoughts="先看資料規模，再確認迴圈層數",
+    )
+    message, placeholder = telegram_message()
+
+    result = await stream_response(
+        message,
+        client,
+        "question",
+        clock=clock,
+        sleep=AsyncMock(),
+    )
+
+    assert result.thoughts == "先看資料規模，再確認迴圈層數"
+    final = placeholder.edit_text.await_args.args[0]
+    assert final.startswith("<blockquote expandable>先看資料規模，再確認迴圈層數</blockquote>")
+    assert final.endswith("<b>答案</b>")
+    assert placeholder.edit_text.await_args.kwargs["parse_mode"] == ParseMode.HTML
+
+
+async def test_long_thoughts_are_truncated_to_keep_one_message() -> None:
+    """The answer must not be pushed into a second message by its own reasoning."""
+
+    clock = FakeClock()
+    client = FakeClient(
+        [(0.1, "答案")],
+        clock=clock,
+        thoughts="思" * 8000,
+    )
+    message, placeholder = telegram_message()
+
+    await stream_response(
+        message,
+        client,
+        "question",
+        clock=clock,
+        sleep=AsyncMock(),
+    )
+
+    final = placeholder.edit_text.await_args.args[0]
+    assert len(final) <= 4096
+    assert "已截斷" in final
+    assert final.endswith("答案")
+
+
+async def test_missing_thoughts_leave_the_answer_untouched() -> None:
+    """Models without reasoning must render exactly as before."""
+
+    clock = FakeClock()
+    client = FakeClient([(0.1, "**答案**")], clock=clock)
+    message, placeholder = telegram_message()
+
+    result = await stream_response(
+        message,
+        client,
+        "question",
+        clock=clock,
+        sleep=AsyncMock(),
+    )
+
+    assert result.thoughts == ""
+    assert placeholder.edit_text.await_args.args[0] == "<b>答案</b>"

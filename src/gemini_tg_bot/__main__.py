@@ -240,6 +240,7 @@ class _DryRunRegistry:
             model=None,
             gem_id=None,
             temporary=False,
+            extended_thinking=False,
             updated_at=None,
         )
 
@@ -392,7 +393,11 @@ async def _run_dry_run() -> None:
         assert service.client.calls == [
             (
                 "dry-run request",
-                {"chat": sessions.session, "temporary": False},
+                {
+                    "chat": sessions.session,
+                    "temporary": False,
+                    "extended_thinking": False,
+                },
             )
         ]
         assert sessions.persisted is True

@@ -534,3 +534,45 @@ __all__ = [
     "split_message",
     "strip_googleusercontent_artifacts",
 ]
+
+
+THOUGHTS_TRUNCATION_NOTE = "…（思考過程過長，已截斷）"
+
+
+def render_thoughts_blockquote(thoughts: str, *, budget: int) -> str:
+    """Wrap reasoning in a collapsed blockquote that fits within ``budget``.
+
+    Telegram renders ``<blockquote expandable>`` collapsed until tapped, which
+    suits reasoning that is usually longer than the answer it precedes.  The
+    result shares one message with the answer so the two cannot be separated by
+    other traffic, which is why the caller has to pass a character budget: the
+    reasoning is supplementary, so it is truncated rather than allowed to push
+    the answer into another message.
+    """
+
+    text = thoughts.strip()
+    if not text or budget <= 0:
+        return ""
+
+    opening, closing = "<blockquote expandable>", "</blockquote>"
+    overhead = len(opening) + len(closing)
+    if budget <= overhead:
+        return ""
+
+    body = escape(text, quote=False)
+    if len(body) + overhead <= budget:
+        return f"{opening}{body}{closing}"
+
+    note = escape(THOUGHTS_TRUNCATION_NOTE, quote=False)
+    room = budget - overhead - len(note)
+    if room <= 0:
+        return ""
+    # Escaping expands characters, so trim the escaped form and re-escape the
+    # plain prefix it corresponds to; truncating escaped text directly could
+    # cut an entity in half and produce invalid HTML.
+    trimmed = text[:room]
+    while trimmed and len(escape(trimmed, quote=False)) > room:
+        trimmed = trimmed[:-1]
+    if not trimmed:
+        return ""
+    return f"{opening}{escape(trimmed, quote=False)}{note}{closing}"

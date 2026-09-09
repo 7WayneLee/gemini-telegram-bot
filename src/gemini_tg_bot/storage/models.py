@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     model         TEXT,
     gem_id        TEXT,
     temporary     INTEGER DEFAULT 0,
-    updated_at    TEXT NOT NULL
+    updated_at    TEXT NOT NULL,
+    -- Appended by migration v5, so it must stay last here too: ALTER TABLE
+    -- adds columns at the end, and a fresh database has to match a migrated one.
+    extended_thinking INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS research_tasks (
@@ -81,6 +84,7 @@ class ChatSession:
     model: str | None = None
     gem_id: str | None = None
     temporary: bool = False
+    extended_thinking: bool = False
     updated_at: str
 
 
@@ -118,14 +122,16 @@ class ChatSessionDAO:
         await self._connection.execute(
             """
             INSERT INTO chat_sessions (
-                chat_id, cid, metadata_json, model, gem_id, temporary, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                chat_id, cid, metadata_json, model, gem_id, temporary,
+                extended_thinking, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 cid = excluded.cid,
                 metadata_json = excluded.metadata_json,
                 model = excluded.model,
                 gem_id = excluded.gem_id,
                 temporary = excluded.temporary,
+                extended_thinking = excluded.extended_thinking,
                 updated_at = excluded.updated_at
             """,
             (
@@ -135,6 +141,7 @@ class ChatSessionDAO:
                 session.model,
                 session.gem_id,
                 int(session.temporary),
+                int(session.extended_thinking),
                 session.updated_at,
             ),
         )
@@ -288,6 +295,9 @@ class UsageLogDAO:
         return [_usage_log_from_row(row) for row in rows]
 
 
+CHAT_SESSION_THINKING_COLUMN = "extended_thinking"
+
+
 ADMIN_NOTIFICATION_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS admin_notifications (
     fingerprint TEXT PRIMARY KEY,
@@ -349,6 +359,7 @@ def _chat_session_from_row(row: aiosqlite.Row) -> ChatSession:
         model=row["model"],
         gem_id=row["gem_id"],
         temporary=bool(row["temporary"]),
+        extended_thinking=bool(row["extended_thinking"]),
         updated_at=row["updated_at"],
     )
 

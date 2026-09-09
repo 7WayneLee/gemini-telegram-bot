@@ -68,6 +68,7 @@ PUBLIC_BOT_COMMANDS = (
     BotCommand("model", "選擇 Gemini 模型"),
     BotCommand("gem", "選擇 Gem"),
     BotCommand("temp", "切換暫時對話模式"),
+    BotCommand("think", "切換 Extended Thinking"),
     BotCommand("img", "生成圖片"),
     BotCommand("research", "提交 Deep Research 任務"),
     BotCommand("research_status", "查看 Deep Research 任務狀態"),
@@ -82,6 +83,12 @@ HELP_TEXT = "\n".join(
         "直接傳送文字即可延續目前對話。",
     )
 )
+
+THINKING_ENABLED = (
+    "Extended Thinking 已開啟。回覆會附上可展開的思考過程。\n"
+    "注意：這會消耗 Gemini Advanced 額度，用得比一般模式快。"
+)
+THINKING_DISABLED = "Extended Thinking 已關閉。"
 
 MODEL_LIST_UNAVAILABLE = "模型清單暫時無法取得，請稍後再試。"
 GEM_LIST_UNAVAILABLE = "Gem 清單暫時無法取得，請稍後再試。"
@@ -362,6 +369,22 @@ class TelegramHandlers:
         label = "開啟" if enabled else "關閉"
         await send_text_or_busy(message, f"Temporary mode 已{label}。")
 
+    async def think(self, update: Update, context: CallbackContext) -> None:
+        """Toggle the persisted extended-thinking setting for this chat."""
+
+        del context
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        state = await self._sessions.get_state(chat_id)
+        enabled = not state.extended_thinking
+        await self._sessions.set_extended_thinking(chat_id, enabled)
+        if enabled:
+            await send_text_or_busy(message, THINKING_ENABLED)
+            return
+        await send_text_or_busy(message, THINKING_DISABLED)
+
     async def status(self, update: Update, context: CallbackContext) -> None:
         """Report session, queue, refresh, usage, and egress state."""
 
@@ -385,6 +408,7 @@ class TelegramHandlers:
             else f" ({health.degraded_reason.value})"
         )
         temporary = "開啟" if state.temporary else "關閉"
+        thinking = "開啟" if state.extended_thinking else "關閉"
         await send_text_or_busy(
             message,
             "\n".join(
@@ -392,6 +416,7 @@ class TelegramHandlers:
                     f"目前模型：{state.model or '帳號預設'}",
                     f"Session CID：{state.cid or '尚未建立'}",
                     f"Temporary mode：{temporary}",
+                    f"Extended Thinking：{thinking}",
                     f"服務狀態：{health.state.value}{reason}",
                     "Account status："
                     f"{_account_status_label(getattr(health, 'account_status', None))}",
@@ -764,6 +789,7 @@ class TelegramHandlers:
                         prompt,
                         chat=session,
                         temporary=state.temporary,
+                        extended_thinking=state.extended_thinking,
                         flood_wait=permit.wait_for_flood_control,
                     )
                 )
@@ -845,6 +871,7 @@ class TelegramHandlers:
                             upload.prompt,
                             files=upload.files,
                             temporary=state.temporary,
+                            extended_thinking=state.extended_thinking,
                         )
                     )
                 self._media.record_upload(upload)
@@ -1178,6 +1205,7 @@ def register_handlers(
     application.add_handler(CommandHandler("model", handlers.model))
     application.add_handler(CommandHandler("gem", handlers.gem))
     application.add_handler(CommandHandler("temp", handlers.temp))
+    application.add_handler(CommandHandler("think", handlers.think))
     application.add_handler(CommandHandler("status", handlers.status))
     application.add_handler(CommandHandler("img", handlers.img))
     application.add_handler(CommandHandler("research", handlers.research))

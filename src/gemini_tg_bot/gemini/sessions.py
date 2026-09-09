@@ -29,6 +29,7 @@ class ChatState:
     model: str | None
     gem_id: str | None
     temporary: bool
+    extended_thinking: bool
     updated_at: str | None
 
 
@@ -110,6 +111,15 @@ class ChatSessionRegistry:
                 _updated_record(chat_id, current, temporary=temporary)
             )
 
+    async def set_extended_thinking(self, chat_id: int, enabled: bool) -> None:
+        """Persist whether subsequent messages should use extended thinking."""
+
+        async with self._lock:
+            current = await self._dao.get(chat_id)
+            await self._dao.upsert(
+                _updated_record(chat_id, current, extended_thinking=enabled)
+            )
+
     async def persist(self, chat_id: int, session: ChatSession) -> None:
         """Persist the conversation identifiers from a successful response."""
 
@@ -167,6 +177,7 @@ def _to_state(
             model=None,
             gem_id=None,
             temporary=False,
+            extended_thinking=False,
             updated_at=None,
         )
     return ChatState(
@@ -175,6 +186,7 @@ def _to_state(
         model=record.model,
         gem_id=record.gem_id,
         temporary=record.temporary,
+        extended_thinking=record.extended_thinking,
         updated_at=record.updated_at,
     )
 
@@ -186,10 +198,14 @@ def _updated_record(
     model: str | None | object = _UNSET,
     gem_id: str | None | object = _UNSET,
     temporary: bool | object = _UNSET,
+    extended_thinking: bool | object = _UNSET,
 ) -> StoredChatSession:
     previous_model = current.model if current is not None else None
     previous_gem_id = current.gem_id if current is not None else None
     previous_temporary = current.temporary if current is not None else False
+    previous_thinking = (
+        current.extended_thinking if current is not None else False
+    )
     return StoredChatSession(
         chat_id=chat_id,
         cid=current.cid if current is not None else None,
@@ -208,6 +224,11 @@ def _updated_record(
             previous_temporary
             if temporary is _UNSET
             else cast(bool, temporary)
+        ),
+        extended_thinking=(
+            previous_thinking
+            if extended_thinking is _UNSET
+            else cast(bool, extended_thinking)
         ),
         updated_at=_timestamp(),
     )

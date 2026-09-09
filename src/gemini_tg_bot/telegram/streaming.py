@@ -16,7 +16,11 @@ from typing import Any
 
 from telegram.constants import ParseMode
 
-from .rendering import MAX_MESSAGE_LENGTH, render_markdown_chunks
+from .rendering import (
+    MAX_MESSAGE_LENGTH,
+    render_markdown_chunks,
+    render_thoughts_blockquote,
+)
 from .sending import (
     FloodControlExceeded,
     MAX_FLOOD_RETRIES,
@@ -41,6 +45,7 @@ class StreamResult:
 
     text: str
     output: Any | None
+    thoughts: str = ""
 
 
 async def _cancel(task: asyncio.Future[Any] | None) -> None:
@@ -96,6 +101,7 @@ async def stream_response(
     last_edit_at = clock()
     pending_characters = 0
     latest_text = ""
+    latest_thoughts = ""
     latest_output: Any | None = None
     last_sent_text = placeholder_text
 
@@ -149,6 +155,9 @@ async def stream_response(
             next_chunk = asyncio.ensure_future(anext(iterator))
             latest_output = chunk
             latest_text = chunk.text
+            # Reasoning arrives before the answer and is absent on models that
+            # do not support it, so read it defensively and keep the last value.
+            latest_thoughts = getattr(chunk, "thoughts", None) or latest_thoughts
             pending_characters += len(chunk.text_delta)
 
             can_edit = bool(latest_text) and len(latest_text) <= MAX_MESSAGE_LENGTH
@@ -169,7 +178,11 @@ async def stream_response(
             else ()
         )
         if images:
-            return StreamResult(text=latest_text, output=latest_output)
+            return StreamResult(
+                text=latest_text,
+                output=latest_output,
+                thoughts=latest_thoughts,
+            )
         await edit_text(
             placeholder,
             EMPTY_RESPONSE_TEXT,
@@ -177,7 +190,23 @@ async def stream_response(
             sleep=sleep,
             flood_wait=flood_wait,
         )
-        return StreamResult(text=latest_text, output=latest_output)
+        return StreamResult(
+            text=latest_text,
+            output=latest_output,
+            thoughts=latest_thoughts,
+        )
+
+    if latest_thoughts:
+        # Share one message with the answer so nothing can arrive between them.
+        # The reasoning is supplementary, so it yields the space rather than
+        # pushing the answer into a second message.
+        separator = "\n\n"
+        quote = render_thoughts_blockquote(
+            latest_thoughts,
+            budget=MAX_MESSAGE_LENGTH - len(rendered_chunks[0]) - len(separator),
+        )
+        if quote:
+            rendered_chunks[0] = f"{quote}{separator}{rendered_chunks[0]}"
 
     if rendered_chunks[0] != last_sent_text:
         await edit_text(
@@ -195,7 +224,11 @@ async def stream_response(
             sleep=sleep,
             flood_wait=flood_wait,
         )
-    return StreamResult(text=latest_text, output=latest_output)
+    return StreamResult(
+        text=latest_text,
+        output=latest_output,
+        thoughts=latest_thoughts,
+    )
 
 
 __all__ = [

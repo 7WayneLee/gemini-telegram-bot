@@ -34,6 +34,7 @@ async def test_unknown_chat_has_default_state_and_creates_one_session(
             model=None,
             gem_id=None,
             temporary=False,
+            extended_thinking=False,
             updated_at=None,
         )
         assert await registry.get_or_create(-1001) is session

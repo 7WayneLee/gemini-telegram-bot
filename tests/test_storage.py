@@ -29,6 +29,7 @@ EXPECTED_SCHEMA = {
         ("gem_id", "TEXT", 0, None, 0),
         ("temporary", "INTEGER", 0, "0", 0),
         ("updated_at", "TEXT", 1, None, 0),
+        ("extended_thinking", "INTEGER", 0, "0", 0),
     ],
     "research_tasks": [
         ("task_id", "TEXT", 0, None, 1),
@@ -381,3 +382,48 @@ async def test_notification_text_is_never_stored(tmp_path) -> None:
     assert len(rows) == 1
     assert "FAKE_1PSID_FOR_TEST" not in rows[0][0]
     assert len(rows[0][0]) == 64
+
+
+@pytest.mark.asyncio
+async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
+    """A column added by ALTER TABLE lands last, so the schema must agree.
+
+    Declaring a migrated column anywhere but last in ``SCHEMA_SQL`` leaves a
+    fresh database ordered differently from an upgraded one, which only shows up
+    against real data.
+    """
+
+    async with Database(tmp_path / "fresh.sqlite3") as database:
+        fresh = await _column_names(database, "chat_sessions")
+
+    legacy = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(legacy)
+    connection.executescript(
+        """
+        CREATE TABLE chat_sessions (
+            chat_id       INTEGER PRIMARY KEY,
+            cid           TEXT,
+            metadata_json TEXT,
+            model         TEXT,
+            gem_id        TEXT,
+            temporary     INTEGER DEFAULT 0,
+            updated_at    TEXT NOT NULL
+        );
+        PRAGMA user_version = 4;
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    async with Database(legacy) as database:
+        migrated = await _column_names(database, "chat_sessions")
+
+    assert migrated == fresh
+    assert fresh[-1] == "extended_thinking"
+
+
+async def _column_names(database: Database, table: str) -> list[str]:
+    async with database.connection.execute(
+        f"PRAGMA table_info({table})"
+    ) as cursor:
+        return [row[1] for row in await cursor.fetchall()]

@@ -54,6 +54,9 @@ except ModuleNotFoundError:
         async def set_model(self, chat_id: int, model: str | None) -> None: ...
         async def set_gem(self, chat_id: int, gem_id: str | None) -> None: ...
         async def set_temporary(self, chat_id: int, temporary: bool) -> None: ...
+        async def set_extended_thinking(
+            self, chat_id: int, enabled: bool
+        ) -> None: ...
         async def persist(self, chat_id: int, session: Any) -> None: ...
         async def restore_all(self) -> None: ...
 
@@ -78,6 +81,7 @@ def _state(
     cid: str | None = "cid-test",
     model: str | None = "dynamic-model",
     temporary: bool = False,
+    extended_thinking: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         chat_id=chat_id,
@@ -85,6 +89,7 @@ def _state(
         model=model,
         gem_id=None,
         temporary=temporary,
+        extended_thinking=extended_thinking,
         updated_at=NOW.isoformat(),
     )
 
@@ -428,7 +433,7 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     assert client.calls == [
         (
             f"{IMAGE_GENERATION_PREFIX}\n\n台北 101 的水彩畫",
-            {"chat": session, "temporary": False},
+            {"chat": session, "temporary": False, "extended_thinking": False},
         )
     ]
     media_handler.send_output_images.assert_awaited_once_with(
@@ -636,7 +641,7 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     assert client.calls == [
         (
             "question",
-            {"chat": session, "temporary": True},
+            {"chat": session, "temporary": True, "extended_thinking": False},
         )
     ]
     registry.persist.assert_awaited_once_with(202, session)
@@ -1107,7 +1112,7 @@ def test_registration_places_auth_in_first_group(
 
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
-    assert len(calls) == 13
+    assert len(calls) == 14
     registered_commands = {
         command
         for registered in calls
@@ -1133,6 +1138,7 @@ async def test_startup_registers_public_command_menu() -> None:
         "model",
         "gem",
         "temp",
+        "think",
         "img",
         "research",
         "research_status",
@@ -1211,3 +1217,49 @@ def test_cookie_location_is_logged_as_an_absolute_path(
     assert "override=False" in caplog.text
     assert "FAKE_1PSID_FOR_TEST" not in caplog.text
     assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text
+
+
+async def test_think_toggles_from_registry_state(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """/think mirrors /temp: a persisted per-chat switch, not a per-message flag."""
+
+    handlers, _ = handlers_factory()
+    update = _update()
+    registry.get_state.side_effect = [
+        _state(extended_thinking=False),
+        _state(extended_thinking=True),
+    ]
+
+    await handlers.think(update, SimpleNamespace())
+    await handlers.think(update, SimpleNamespace())
+
+    assert registry.set_extended_thinking.await_args_list == [
+        call(202, True),
+        call(202, False),
+    ]
+    replies = [
+        c.args[0] for c in update.effective_message.reply_text.await_args_list
+    ]
+    assert "已開啟" in replies[0]
+    assert "Advanced" in replies[0]
+    assert "已關閉" in replies[1]
+
+
+async def test_enabled_thinking_reaches_the_upstream_call(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """The persisted switch has to arrive as the upstream keyword argument."""
+
+    client = _StreamingClient(
+        [SimpleNamespace(text="ok", text_delta="ok", images=())]
+    )
+    registry.get_state.return_value = _state(extended_thinking=True)
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(client)
+
+    await handlers.text_message(_update(text="question"), SimpleNamespace())
+
+    assert client.calls[0][1]["extended_thinking"] is True
