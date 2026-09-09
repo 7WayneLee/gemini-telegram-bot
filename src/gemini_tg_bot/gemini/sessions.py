@@ -31,6 +31,7 @@ class ChatState:
     gem_id: str | None
     temporary: bool
     extended_thinking: bool
+    language: str | None
     updated_at: str | None
 
 
@@ -68,17 +69,19 @@ class ChatSessionRegistry:
 
         async with self._lock:
             current = await self._dao.get(chat_id)
-            await self._dao.upsert(
-                StoredChatSession(
+            if current is None:
+                record = StoredChatSession(
                     chat_id=chat_id,
-                    model=current.model if current is not None else None,
-                    gem_id=current.gem_id if current is not None else None,
-                    temporary=(
-                        current.temporary if current is not None else False
-                    ),
                     updated_at=_timestamp(),
                 )
-            )
+            else:
+                record = dataclasses.replace(
+                    current,
+                    cid=None,
+                    metadata=None,
+                    updated_at=_timestamp(),
+                )
+            await self._dao.upsert(record)
             self._sessions.pop(chat_id, None)
 
     async def set_model(self, chat_id: int, model: str | None) -> None:
@@ -119,6 +122,15 @@ class ChatSessionRegistry:
             current = await self._dao.get(chat_id)
             await self._dao.upsert(
                 _updated_record(chat_id, current, extended_thinking=enabled)
+            )
+
+    async def set_language(self, chat_id: int, language: str) -> None:
+        """Persist an explicit interface language for this chat."""
+
+        async with self._lock:
+            current = await self._dao.get(chat_id)
+            await self._dao.upsert(
+                _updated_record(chat_id, current, language=language)
             )
 
     async def persist(self, chat_id: int, session: ChatSession) -> None:
@@ -186,6 +198,7 @@ def _to_state(
             gem_id=None,
             temporary=False,
             extended_thinking=False,
+            language=None,
             updated_at=None,
         )
     return ChatState(
@@ -195,6 +208,7 @@ def _to_state(
         gem_id=record.gem_id,
         temporary=record.temporary,
         extended_thinking=record.extended_thinking,
+        language=record.language,
         updated_at=record.updated_at,
     )
 
@@ -207,6 +221,7 @@ def _updated_record(
     gem_id: str | None | object = _UNSET,
     temporary: bool | object = _UNSET,
     extended_thinking: bool | object = _UNSET,
+    language: str | None | object = _UNSET,
 ) -> StoredChatSession:
     previous_model = current.model if current is not None else None
     previous_gem_id = current.gem_id if current is not None else None
@@ -214,6 +229,7 @@ def _updated_record(
     previous_thinking = (
         current.extended_thinking if current is not None else False
     )
+    previous_language = current.language if current is not None else None
     return StoredChatSession(
         chat_id=chat_id,
         cid=current.cid if current is not None else None,
@@ -237,6 +253,11 @@ def _updated_record(
             previous_thinking
             if extended_thinking is _UNSET
             else cast(bool, extended_thinking)
+        ),
+        language=(
+            previous_language
+            if language is _UNSET
+            else cast(str | None, language)
         ),
         updated_at=_timestamp(),
     )

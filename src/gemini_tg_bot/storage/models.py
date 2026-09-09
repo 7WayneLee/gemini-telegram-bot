@@ -18,9 +18,10 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     gem_id        TEXT,
     temporary     INTEGER DEFAULT 0,
     updated_at    TEXT NOT NULL,
-    -- Appended by migration v5, so it must stay last here too: ALTER TABLE
+    extended_thinking INTEGER DEFAULT 0,
+    -- Appended by migration v6, so it must stay last here too: ALTER TABLE
     -- adds columns at the end, and a fresh database has to match a migrated one.
-    extended_thinking INTEGER DEFAULT 0
+    language      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS research_tasks (
@@ -85,6 +86,7 @@ class ChatSession:
     gem_id: str | None = None
     temporary: bool = False
     extended_thinking: bool = False
+    language: str | None = None
     updated_at: str
 
 
@@ -123,8 +125,8 @@ class ChatSessionDAO:
             """
             INSERT INTO chat_sessions (
                 chat_id, cid, metadata_json, model, gem_id, temporary,
-                extended_thinking, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                extended_thinking, language, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 cid = excluded.cid,
                 metadata_json = excluded.metadata_json,
@@ -132,6 +134,7 @@ class ChatSessionDAO:
                 gem_id = excluded.gem_id,
                 temporary = excluded.temporary,
                 extended_thinking = excluded.extended_thinking,
+                language = excluded.language,
                 updated_at = excluded.updated_at
             """,
             (
@@ -142,6 +145,7 @@ class ChatSessionDAO:
                 session.gem_id,
                 int(session.temporary),
                 int(session.extended_thinking),
+                session.language,
                 session.updated_at,
             ),
         )
@@ -296,6 +300,7 @@ class UsageLogDAO:
 
 
 CHAT_SESSION_THINKING_COLUMN = "extended_thinking"
+CHAT_SESSION_LANGUAGE_COLUMN = "language"
 
 
 ADMIN_NOTIFICATION_SCHEMA_SQL = """
@@ -360,6 +365,7 @@ def _chat_session_from_row(row: aiosqlite.Row) -> ChatSession:
         gem_id=row["gem_id"],
         temporary=bool(row["temporary"]),
         extended_thinking=bool(row["extended_thinking"]),
+        language=row["language"],
         updated_at=row["updated_at"],
     )
 

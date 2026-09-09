@@ -30,6 +30,7 @@ EXPECTED_SCHEMA = {
         ("temporary", "INTEGER", 0, "0", 0),
         ("updated_at", "TEXT", 1, None, 0),
         ("extended_thinking", "INTEGER", 0, "0", 0),
+        ("language", "TEXT", 0, None, 0),
     ],
     "research_tasks": [
         ("task_id", "TEXT", 0, None, 1),
@@ -419,7 +420,7 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
         migrated = await _column_names(database, "chat_sessions")
 
     assert migrated == fresh
-    assert fresh[-1] == "extended_thinking"
+    assert fresh[-1] == "language"
 
 
 async def _column_names(database: Database, table: str) -> list[str]:

@@ -35,6 +35,7 @@ async def test_unknown_chat_has_default_state_and_creates_one_session(
             gem_id=None,
             temporary=False,
             extended_thinking=False,
+            language=None,
             updated_at=None,
         )
         assert await registry.get_or_create(-1001) is session
@@ -140,6 +141,7 @@ async def test_persist_preserves_every_setting_and_updates_context(
         await registry.set_gem(2, "configured-gem")
         await registry.set_temporary(2, True)
         await registry.set_extended_thinking(2, True)
+        await registry.set_language(2, "zh-hant")
 
         await registry.persist(2, session)  # type: ignore[arg-type]
 
@@ -149,6 +151,7 @@ async def test_persist_preserves_every_setting_and_updates_context(
         assert state.gem_id == "configured-gem"
         assert state.temporary is True
         assert state.extended_thinking is True
+        assert state.language == "zh-hant"
 
         async with database.connection.execute(
             "SELECT metadata_json FROM chat_sessions WHERE chat_id = 2"
@@ -181,6 +184,7 @@ async def test_reset_discards_conversation_and_preserves_settings(
         await registry.set_model(7, "chosen-model")
         await registry.set_gem(7, "chosen-gem")
         await registry.set_temporary(7, True)
+        await registry.set_language(7, "zh-hant")
         assert await registry.get_or_create(7) is old_session
         await registry.persist(7, old_session)  # type: ignore[arg-type]
 
@@ -191,6 +195,7 @@ async def test_reset_discards_conversation_and_preserves_settings(
         assert state.model == "chosen-model"
         assert state.gem_id == "chosen-gem"
         assert state.temporary is True
+        assert state.language == "zh-hant"
         assert await registry.get_or_create(7) is new_session
 
     assert client.start_chat.call_args_list[-1].kwargs == {

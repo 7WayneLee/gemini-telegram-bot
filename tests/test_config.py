@@ -30,6 +30,7 @@ ENVIRONMENT_VARIABLES = {
     "GEMINI_COOKIE_PATH",
     "GEMINI_PROXY",
     "DEFAULT_MODEL",
+    "DEFAULT_LANGUAGE",
     "MAX_CONCURRENCY",
     "USER_RATE_LIMIT_PER_MIN",
     "RESEARCH_TIMEOUT_SEC",
@@ -65,7 +66,16 @@ def test_required_values_and_safe_defaults() -> None:
     assert settings.enable_video_generation is False
     assert settings.enable_audio_generation is False
     assert settings.default_model is None
+    assert settings.default_language == "en"
     assert settings.gemini_proxy is None
+
+
+def test_default_language_accepts_only_supported_catalogs() -> None:
+    """Non-chat notifications must never select an unavailable catalog."""
+
+    assert make_settings(DEFAULT_LANGUAGE="zh-hant").default_language == "zh-hant"
+    with pytest.raises(ValidationError):
+        make_settings(DEFAULT_LANGUAGE="fr")
 
 
 @pytest.mark.parametrize(

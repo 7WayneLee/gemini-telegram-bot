@@ -32,6 +32,13 @@ from gemini_tg_bot.gemini.service import (
     ServiceUnavailableError,
     account_status_guidance,
 )
+from gemini_tg_bot.i18n import (
+    DEFAULT_LANGUAGE,
+    LANGUAGE_CHINESE,
+    LANGUAGE_ENGLISH,
+    resolve_language,
+    translate,
+)
 from gemini_tg_bot.queue import QueueAcquireTimeout, RateLimitExceeded, RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 
@@ -60,40 +67,53 @@ LOGGER = logging.getLogger(__name__)
 CALLBACK_DATA_LIMIT = 64
 MODEL_CALLBACK_PREFIX = "model:"
 GEM_CALLBACK_PREFIX = "gem:"
+LANGUAGE_CALLBACK_PREFIX = "lang:"
 
-PUBLIC_BOT_COMMANDS = (
-    BotCommand("start", "顯示使用說明"),
-    BotCommand("help", "顯示使用說明"),
-    BotCommand("new", "開始新的對話"),
-    BotCommand("model", "選擇 Gemini 模型"),
-    BotCommand("gem", "選擇 Gem"),
-    BotCommand("temp", "切換暫時對話模式"),
-    BotCommand("think", "切換 Extended Thinking"),
-    BotCommand("img", "生成圖片"),
-    BotCommand("research", "提交 Deep Research 任務"),
-    BotCommand("research_status", "查看 Deep Research 任務狀態"),
-    BotCommand("status", "查看目前狀態"),
+_PUBLIC_COMMAND_KEYS = (
+    ("start", "command.start.description"),
+    ("help", "command.help.description"),
+    ("new", "command.new.description"),
+    ("model", "command.model.description"),
+    ("gem", "command.gem.description"),
+    ("temp", "command.temp.description"),
+    ("think", "command.think.description"),
+    ("lang", "command.lang.description"),
+    ("img", "command.img.description"),
+    ("research", "command.research.description"),
+    ("research_status", "command.research_status.description"),
+    ("status", "command.status.description"),
 )
 
-HELP_TEXT = "\n".join(
-    (
-        "可用指令：",
-        *(f"/{item.command} — {item.description}" for item in PUBLIC_BOT_COMMANDS),
-        "",
-        "直接傳送文字即可延續目前對話。",
+
+def _commands_for_language(language: str) -> tuple[BotCommand, ...]:
+    return tuple(
+        BotCommand(command, translate(description_key, language))
+        for command, description_key in _PUBLIC_COMMAND_KEYS
     )
-)
 
-THINKING_ENABLED = (
-    "Extended Thinking 已開啟。回覆會附上可展開的思考過程。\n"
-    "注意：這會消耗 Gemini Advanced 額度，用得比一般模式快。"
-)
-THINKING_DISABLED = "Extended Thinking 已關閉。"
+
+def _help_text(language: str) -> str:
+    commands = _commands_for_language(language)
+    return "\n".join(
+        (
+            translate("help.heading", language),
+            *(f"/{item.command} — {item.description}" for item in commands),
+            "",
+            translate("help.footer", language),
+        )
+    )
+
+
+PUBLIC_BOT_COMMANDS = _commands_for_language(DEFAULT_LANGUAGE)
+HELP_TEXT = _help_text(DEFAULT_LANGUAGE)
+
+THINKING_ENABLED = translate("think.enabled", DEFAULT_LANGUAGE)
+THINKING_DISABLED = translate("think.disabled", DEFAULT_LANGUAGE)
 
 MODEL_LIST_UNAVAILABLE = "模型清單暫時無法取得，請稍後再試。"
 GEM_LIST_UNAVAILABLE = "Gem 清單暫時無法取得，請稍後再試。"
 SERVICE_UNAVAILABLE = "Gemini 服務目前無法接受請求，請稍後再試。"
-GENERIC_FAILURE = "處理請求時發生錯誤，請稍後再試。"
+GENERIC_FAILURE = translate("generic.failure", DEFAULT_LANGUAGE)
 ADMIN_ONLY = "此指令僅限管理員使用。"
 ADMIN_NOT_CONFIGURED = "管理員功能尚未設定。"
 COOKIE_PROMPT = (
@@ -224,9 +244,16 @@ class TelegramHandlers:
         """Explain the bot's user-facing commands."""
 
         del context
-        message = update.effective_message
-        if message is not None:
-            await send_text_or_busy(message, HELP_TEXT)
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
+        await send_text_or_busy(message, _help_text(language))
 
     async def help(self, update: Update, context: CallbackContext) -> None:
         """Alias for :meth:`start`."""
@@ -241,8 +268,13 @@ class TelegramHandlers:
         if identity is None:
             return
         _, chat_id, message = identity
+        state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
         await self._sessions.reset(chat_id)
-        await send_text_or_busy(message, "已開始新的對話。")
+        await send_text_or_busy(message, translate("new.started", language))
 
     async def model(self, update: Update, context: CallbackContext) -> None:
         """Dynamically list currently available upstream models."""
@@ -378,12 +410,53 @@ class TelegramHandlers:
             return
         _, chat_id, message = identity
         state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
         enabled = not state.extended_thinking
         await self._sessions.set_extended_thinking(chat_id, enabled)
         if enabled:
-            await send_text_or_busy(message, THINKING_ENABLED)
+            await send_text_or_busy(message, translate("think.enabled", language))
             return
-        await send_text_or_busy(message, THINKING_DISABLED)
+        await send_text_or_busy(message, translate("think.disabled", language))
+
+    async def lang(self, update: Update, context: CallbackContext) -> None:
+        """Offer the supported per-chat interface languages."""
+
+        del context
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "English",
+                    callback_data=(
+                        f"{LANGUAGE_CALLBACK_PREFIX}{LANGUAGE_ENGLISH}"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "正體中文",
+                    callback_data=(
+                        f"{LANGUAGE_CALLBACK_PREFIX}{LANGUAGE_CHINESE}"
+                    ),
+                )
+            ],
+        ]
+        await send_text_or_busy(
+            message,
+            translate("lang.choose", language),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     async def status(self, update: Update, context: CallbackContext) -> None:
         """Report session, queue, refresh, usage, and egress state."""
@@ -470,6 +543,7 @@ class TelegramHandlers:
         await self._stream_prompt(
             identity,
             f"{IMAGE_GENERATION_PREFIX}\n\n{prompt}",
+            telegram_code=_telegram_language_code(update),
         )
 
     async def research_status(
@@ -705,7 +779,7 @@ class TelegramHandlers:
         )
 
     async def callback(self, update: Update, context: CallbackContext) -> None:
-        """Apply a model or Gem selected by an inline keyboard callback."""
+        """Apply a model, Gem, or language selected by an inline keyboard."""
 
         del context
         query = update.callback_query
@@ -740,6 +814,25 @@ class TelegramHandlers:
                 chat_id=chat.id,
                 gem_id=data[len(GEM_CALLBACK_PREFIX) :],
             )
+        elif data.startswith(LANGUAGE_CALLBACK_PREFIX):
+            language = data[len(LANGUAGE_CALLBACK_PREFIX) :]
+            if language not in (LANGUAGE_ENGLISH, LANGUAGE_CHINESE):
+                state = await self._sessions.get_state(chat.id)
+                current_language = resolve_language(
+                    _stored_language(state),
+                    _telegram_language_code(update),
+                )
+                await edit_message_text_or_busy(
+                    query,
+                    translate("lang.invalid", current_language),
+                )
+                return
+            await self._sessions.set_language(chat.id, language)
+            label = "English" if language == LANGUAGE_ENGLISH else "正體中文"
+            await edit_message_text_or_busy(
+                query,
+                translate("lang.selected", language, language=label),
+            )
 
     async def text_message(
         self,
@@ -763,18 +856,25 @@ class TelegramHandlers:
         if not prompt:
             return
 
-        await self._stream_prompt(identity, prompt)
+        await self._stream_prompt(
+            identity,
+            prompt,
+            telegram_code=_telegram_language_code(update),
+        )
 
     async def _stream_prompt(
         self,
         identity: tuple[int, int, Any],
         prompt: str,
+        *,
+        telegram_code: str | None = None,
     ) -> None:
         """Stream one prompt and deliver its images through ``MediaHandler``."""
 
         user_id, chat_id, message = identity
         started = time.monotonic()
         state = await self._sessions.get_state(chat_id)
+        language = resolve_language(_stored_language(state), telegram_code)
         ok = False
         error_kind: str | None = None
         stream_message = _StreamingMessageProxy(message)
@@ -838,7 +938,10 @@ class TelegramHandlers:
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("text message", error)
-            await send_text_or_busy(message, GENERIC_FAILURE)
+            await send_text_or_busy(
+                message,
+                translate("generic.failure", language),
+            )
         finally:
             await self._record_usage(
                 user_id=user_id,
@@ -878,6 +981,10 @@ class TelegramHandlers:
         user_id, chat_id, message = identity
         started = time.monotonic()
         state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
         ok = False
         error_kind: str | None = None
 
@@ -918,7 +1025,10 @@ class TelegramHandlers:
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("media message", error)
-            await send_text_or_busy(message, GENERIC_FAILURE)
+            await send_text_or_busy(
+                message,
+                translate("generic.failure", language),
+            )
         finally:
             await self._record_usage(
                 user_id=user_id,
@@ -1233,6 +1343,7 @@ def register_handlers(
     application.add_handler(CommandHandler("gem", handlers.gem))
     application.add_handler(CommandHandler("temp", handlers.temp))
     application.add_handler(CommandHandler("think", handlers.think))
+    application.add_handler(CommandHandler("lang", handlers.lang))
     application.add_handler(CommandHandler("status", handlers.status))
     application.add_handler(CommandHandler("img", handlers.img))
     application.add_handler(CommandHandler("research", handlers.research))
@@ -1248,7 +1359,10 @@ def register_handlers(
     application.add_handler(
         CallbackQueryHandler(
             handlers.callback,
-            pattern=rf"^(?:{MODEL_CALLBACK_PREFIX}|{GEM_CALLBACK_PREFIX})",
+            pattern=(
+                rf"^(?:{MODEL_CALLBACK_PREFIX}|{GEM_CALLBACK_PREFIX}|"
+                rf"{LANGUAGE_CALLBACK_PREFIX})"
+            ),
         )
     )
     user_messages = (
@@ -1262,13 +1376,19 @@ async def register_command_menu(
 ) -> None:
     """Publish user commands without making menu availability startup-critical."""
 
-    try:
-        await call_telegram(application.bot.set_my_commands, PUBLIC_BOT_COMMANDS)
-    except Exception as error:
-        LOGGER.warning(
-            "Unable to register Telegram command menu (%s)",
-            type(error).__name__,
-        )
+    for language in (LANGUAGE_ENGLISH, LANGUAGE_CHINESE):
+        try:
+            await call_telegram(
+                application.bot.set_my_commands,
+                _commands_for_language(language),
+                language_code=language,
+            )
+        except Exception as error:
+            LOGGER.warning(
+                "Unable to register Telegram command menu for %s (%s)",
+                language,
+                type(error).__name__,
+            )
 
 
 def _message_identity(update: Update) -> tuple[int, int, Any] | None:
@@ -1278,6 +1398,19 @@ def _message_identity(update: Update) -> tuple[int, int, Any] | None:
     if user is None or chat is None or message is None:
         return None
     return user.id, chat.id, message
+
+
+def _telegram_language_code(update: Update) -> str | None:
+    user = update.effective_user
+    if user is None:
+        return None
+    language_code = getattr(user, "language_code", None)
+    return language_code if isinstance(language_code, str) else None
+
+
+def _stored_language(state: Any) -> str | None:
+    language = getattr(state, "language", None)
+    return language if isinstance(language, str) else None
 
 
 def _command_name(text: str | None) -> str | None:

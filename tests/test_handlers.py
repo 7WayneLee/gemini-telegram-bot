@@ -24,6 +24,11 @@ from gemini_tg_bot.__main__ import (
 )
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME
 from gemini_tg_bot.gemini.service import DegradedReason, ServiceState
+from gemini_tg_bot.i18n import (
+    LANGUAGE_CHINESE,
+    LANGUAGE_ENGLISH,
+    translate,
+)
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 from gemini_tg_bot.telegram.handlers import (
@@ -57,6 +62,7 @@ except ModuleNotFoundError:
         async def set_extended_thinking(
             self, chat_id: int, enabled: bool
         ) -> None: ...
+        async def set_language(self, chat_id: int, language: str) -> None: ...
         async def persist(self, chat_id: int, session: Any) -> None: ...
         async def restore_all(self) -> None: ...
 
@@ -82,6 +88,7 @@ def _state(
     model: str | None = "dynamic-model",
     temporary: bool = False,
     extended_thinking: bool = False,
+    language: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         chat_id=chat_id,
@@ -90,6 +97,7 @@ def _state(
         gem_id=None,
         temporary=temporary,
         extended_thinking=extended_thinking,
+        language=language,
         updated_at=NOW.isoformat(),
     )
 
@@ -136,6 +144,7 @@ def _update(
     text: str = "hello",
     user_id: int = 101,
     chat_id: int = 202,
+    language_code: str | None = None,
 ) -> SimpleNamespace:
     placeholder = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
     message = SimpleNamespace(
@@ -148,7 +157,7 @@ def _update(
         placeholder=placeholder,
     )
     return SimpleNamespace(
-        effective_user=SimpleNamespace(id=user_id),
+        effective_user=SimpleNamespace(id=user_id, language_code=language_code),
         effective_chat=SimpleNamespace(id=chat_id),
         effective_message=message,
         callback_query=None,
@@ -160,6 +169,7 @@ def _callback_update(
     *,
     user_id: int = 101,
     chat_id: int = 202,
+    language_code: str | None = None,
 ) -> SimpleNamespace:
     query = SimpleNamespace(
         data=data,
@@ -167,7 +177,7 @@ def _callback_update(
         edit_message_text=AsyncMock(),
     )
     return SimpleNamespace(
-        effective_user=SimpleNamespace(id=user_id),
+        effective_user=SimpleNamespace(id=user_id, language_code=language_code),
         effective_chat=SimpleNamespace(id=chat_id),
         effective_message=None,
         callback_query=query,
@@ -251,6 +261,8 @@ async def test_help_and_new_commands(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
+    """The English default must cover both discovery and conversation reset."""
+
     handlers, _ = handlers_factory()
     update = _update()
 
@@ -261,13 +273,115 @@ async def test_help_and_new_commands(
 
     await handlers.new(update, SimpleNamespace())
     registry.reset.assert_awaited_once_with(202)
-    assert "新的對話" in update.effective_message.reply_text.await_args.args[0]
+    assert update.effective_message.reply_text.await_args.args[0] == translate(
+        "new.started",
+        LANGUAGE_ENGLISH,
+    )
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+async def test_help_is_generated_for_the_stored_chat_language(
+    handlers_factory,
+    registry: AsyncMock,
+    language: str,
+) -> None:
+    """Help must match the same per-chat choice used by ordinary replies."""
+
+    handlers, _ = handlers_factory()
+    registry.get_state.return_value = _state(language=language)
+    update = _update(text="/help")
+
+    await handlers.help(update, SimpleNamespace())
+
+    help_text = update.effective_message.reply_text.await_args.args[0]
+    assert help_text.startswith(translate("help.heading", language))
+    assert (
+        f"/lang — {translate('command.lang.description', language)}"
+        in help_text
+    )
+    assert help_text.endswith(translate("help.footer", language))
+
+
+@pytest.mark.parametrize(
+    ("language", "telegram_code"),
+    [
+        (LANGUAGE_ENGLISH, "zh-tw"),
+        (LANGUAGE_CHINESE, "en"),
+    ],
+)
+async def test_new_uses_the_stored_chat_language(
+    handlers_factory,
+    registry: AsyncMock,
+    language: str,
+    telegram_code: str,
+) -> None:
+    """A persisted choice must localize /new even if Telegram disagrees."""
+
+    handlers, _ = handlers_factory()
+    registry.get_state.return_value = _state(language=language)
+    update = _update(text="/new", language_code=telegram_code)
+
+    await handlers.new(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("new.started", language)
+    )
+
+
+async def test_lang_shows_both_choices_in_the_resolved_language(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """The language picker must remain usable before a preference is stored."""
+
+    handlers, _ = handlers_factory()
+    registry.get_state.return_value = _state(language=None)
+    update = _update(text="/lang", language_code="zh-hk")
+
+    await handlers.lang(update, SimpleNamespace())
+
+    reply = update.effective_message.reply_text.await_args
+    assert reply.args[0] == translate("lang.choose", LANGUAGE_CHINESE)
+    keyboard = reply.kwargs["reply_markup"].inline_keyboard
+    assert [row[0].text for row in keyboard] == ["English", "正體中文"]
+    assert [row[0].callback_data for row in keyboard] == [
+        "lang:en",
+        "lang:zh-hant",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("language", "label"),
+    [
+        (LANGUAGE_ENGLISH, "English"),
+        (LANGUAGE_CHINESE, "正體中文"),
+    ],
+)
+async def test_lang_callback_persists_the_selection(
+    handlers_factory,
+    registry: AsyncMock,
+    language: str,
+    label: str,
+) -> None:
+    """A keyboard choice must be durable and confirm itself in that language."""
+
+    handlers, _ = handlers_factory()
+    update = _callback_update(f"lang:{language}")
+
+    await handlers.callback(update, SimpleNamespace())
+
+    registry.set_language.assert_awaited_once_with(202, language)
+    update.callback_query.edit_message_text.assert_awaited_once_with(
+        translate("lang.selected", language, language=label)
+    )
 
 
 async def test_new_retries_bounded_flood_control_and_succeeds(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
+    """Localization must preserve the bounded retry behavior of /new."""
+
     handlers, _ = handlers_factory()
     update = _update(text="/new")
     update.effective_message.reply_text.side_effect = [
@@ -281,8 +395,8 @@ async def test_new_retries_bounded_flood_control_and_succeeds(
 
     registry.reset.assert_awaited_once_with(202)
     assert update.effective_message.reply_text.await_args_list == [
-        call("已開始新的對話。"),
-        call("已開始新的對話。"),
+        call(translate("new.started", LANGUAGE_ENGLISH)),
+        call(translate("new.started", LANGUAGE_ENGLISH)),
     ]
     sleep.assert_awaited_once_with(3.0)
 
@@ -291,6 +405,8 @@ async def test_new_reports_busy_when_flood_wait_exceeds_limit(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
+    """Localized reset confirmation must not bypass the flood-wait ceiling."""
+
     handlers, _ = handlers_factory()
     update = _update(text="/new")
     update.effective_message.reply_text.side_effect = [
@@ -304,7 +420,7 @@ async def test_new_reports_busy_when_flood_wait_exceeds_limit(
 
     registry.reset.assert_awaited_once_with(202)
     assert update.effective_message.reply_text.await_args_list == [
-        call("已開始新的對話。"),
+        call(translate("new.started", LANGUAGE_ENGLISH)),
         call(SERVICE_BUSY),
     ]
     sleep.assert_not_awaited()
@@ -653,6 +769,26 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     assert saved.chat_id == 202
     assert saved.model == "dynamic-model"
     assert saved.ok is True
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+async def test_generic_failure_uses_the_stored_chat_language(
+    handlers_factory,
+    registry: AsyncMock,
+    language: str,
+) -> None:
+    """Unexpected failures must remain actionable in the user's chosen UI."""
+
+    handlers, service = handlers_factory()
+    registry.get_state.return_value = _state(language=language)
+    service.execute.side_effect = RuntimeError("synthetic failure")
+    update = _update(text="question")
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("generic.failure", language)
+    )
 
 
 async def test_unformatted_stream_skips_final_edit_and_records_success(
@@ -1093,6 +1229,8 @@ def test_egress_meter_resets_on_calendar_month() -> None:
 def test_registration_places_auth_in_first_group(
     handlers_factory,
 ) -> None:
+    """The new public command must stay behind the authorization middleware."""
+
     handlers, _ = handlers_factory()
     application = SimpleNamespace(add_handler=MagicMock())
     auth = AsyncMock()
@@ -1101,16 +1239,18 @@ def test_registration_places_auth_in_first_group(
 
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
-    assert len(calls) == 14
+    assert len(calls) == 15
     registered_commands = {
         command
         for registered in calls
         for command in getattr(registered.args[0], "commands", ())
     }
-    assert {"img", "research", "research_status"} <= registered_commands
+    assert {"lang", "img", "research", "research_status"} <= registered_commands
 
 
 async def test_startup_registers_public_command_menu() -> None:
+    """Telegram needs separately localized menus for each supported language."""
+
     application = SimpleNamespace(
         bot=SimpleNamespace(set_my_commands=AsyncMock()),
         start=AsyncMock(),
@@ -1118,7 +1258,17 @@ async def test_startup_registers_public_command_menu() -> None:
 
     await _start_application(application)
 
-    application.bot.set_my_commands.assert_awaited_once_with(PUBLIC_BOT_COMMANDS)
+    menu_calls = application.bot.set_my_commands.await_args_list
+    assert len(menu_calls) == 2
+    assert menu_calls[0] == call(
+        PUBLIC_BOT_COMMANDS,
+        language_code=LANGUAGE_ENGLISH,
+    )
+    chinese_commands = menu_calls[1].args[0]
+    assert menu_calls[1].kwargs == {"language_code": LANGUAGE_CHINESE}
+    assert next(
+        item.description for item in chinese_commands if item.command == "lang"
+    ) == translate("command.lang.description", LANGUAGE_CHINESE)
     registered_commands = {item.command for item in PUBLIC_BOT_COMMANDS}
     assert registered_commands == {
         "start",
@@ -1128,6 +1278,7 @@ async def test_startup_registers_public_command_menu() -> None:
         "gem",
         "temp",
         "think",
+        "lang",
         "img",
         "research",
         "research_status",
@@ -1164,6 +1315,8 @@ async def test_startup_sequence_restores_state_before_polling() -> None:
 
 
 async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
+    """An optional localized menu outage must not prevent update processing."""
+
     application = SimpleNamespace(
         bot=SimpleNamespace(
             set_my_commands=AsyncMock(side_effect=RuntimeError("offline"))
@@ -1175,7 +1328,10 @@ async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
         await _start_application(application)
 
     application.start.assert_awaited_once_with()
-    assert "Unable to register Telegram command menu (RuntimeError)" in caplog.text
+    assert application.bot.set_my_commands.await_count == 2
+    assert "Unable to register Telegram command menu for en (RuntimeError)" in (
+        caplog.text
+    )
 
 
 def test_cookie_location_is_logged_as_an_absolute_path(
@@ -1208,17 +1364,19 @@ def test_cookie_location_is_logged_as_an_absolute_path(
     assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text
 
 
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
 async def test_think_toggles_from_registry_state(
     handlers_factory,
     registry: AsyncMock,
+    language: str,
 ) -> None:
-    """/think mirrors /temp: a persisted per-chat switch, not a per-message flag."""
+    """The persisted /think switch must report both states in the chat UI."""
 
     handlers, _ = handlers_factory()
     update = _update()
     registry.get_state.side_effect = [
-        _state(extended_thinking=False),
-        _state(extended_thinking=True),
+        _state(extended_thinking=False, language=language),
+        _state(extended_thinking=True, language=language),
     ]
 
     await handlers.think(update, SimpleNamespace())
@@ -1231,9 +1389,10 @@ async def test_think_toggles_from_registry_state(
     replies = [
         c.args[0] for c in update.effective_message.reply_text.await_args_list
     ]
-    assert "已開啟" in replies[0]
-    assert "Advanced" in replies[0]
-    assert "已關閉" in replies[1]
+    assert replies == [
+        translate("think.enabled", language),
+        translate("think.disabled", language),
+    ]
 
 
 async def test_enabled_thinking_reaches_the_upstream_call(

@@ -26,6 +26,11 @@ from gemini_tg_bot.gemini.service import (
     SingletonViolationError,
     account_status_guidance,
 )
+from gemini_tg_bot.i18n import (
+    LANGUAGE_CHINESE,
+    LANGUAGE_ENGLISH,
+    translate,
+)
 
 
 def _exception_instance(exception_type: type[BaseException]) -> BaseException:
@@ -78,6 +83,24 @@ def _patch_client_factory(
     factory = MagicMock(name="GeminiClientFactory", side_effect=clients)
     monkeypatch.setattr(service_module, "GeminiClient", factory)
     return factory
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+async def test_auth_notification_uses_configured_default_language(
+    settings: Settings,
+    language: str,
+) -> None:
+    """Administrator pages lack chat state and need an explicit locale source."""
+
+    localized_settings = settings.model_copy(
+        update={"default_language": language}
+    )
+    notifier = AsyncMock()
+    service = GeminiService(localized_settings, notifier)
+
+    await service.handle_error(_exception_instance(gw_exc.AuthError))
+
+    notifier.assert_awaited_once_with(translate("auth.degraded", language))
 
 
 async def test_init_configures_cookie_path_and_auto_refresh(

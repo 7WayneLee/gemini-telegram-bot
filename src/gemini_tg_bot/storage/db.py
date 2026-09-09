@@ -10,12 +10,13 @@ import aiosqlite
 
 from .models import (
     ADMIN_NOTIFICATION_SCHEMA_SQL,
+    CHAT_SESSION_LANGUAGE_COLUMN,
     CHAT_SESSION_THINKING_COLUMN,
     SCHEMA_SQL,
 )
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 _TELEGRAM_ACCESS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_user_access (
@@ -42,6 +43,7 @@ async def migrate(connection: aiosqlite.Connection) -> None:
         3: _migrate_to_v3,
         4: _migrate_to_v4,
         5: _migrate_to_v5,
+        6: _migrate_to_v6,
     }
     for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
         await migrations[version](connection)
@@ -94,6 +96,25 @@ async def _migrate_to_v5(connection: aiosqlite.Connection) -> None:
                 f"ADD COLUMN {CHAT_SESSION_THINKING_COLUMN} INTEGER DEFAULT 0"
             )
         await connection.execute("PRAGMA user_version = 5")
+        await connection.commit()
+    except BaseException:
+        await connection.rollback()
+        raise
+
+
+async def _migrate_to_v6(connection: aiosqlite.Connection) -> None:
+    await connection.execute("BEGIN IMMEDIATE")
+    try:
+        if not await _column_exists(
+            connection,
+            "chat_sessions",
+            CHAT_SESSION_LANGUAGE_COLUMN,
+        ):
+            await connection.execute(
+                "ALTER TABLE chat_sessions "
+                f"ADD COLUMN {CHAT_SESSION_LANGUAGE_COLUMN} TEXT"
+            )
+        await connection.execute("PRAGMA user_version = 6")
         await connection.commit()
     except BaseException:
         await connection.rollback()

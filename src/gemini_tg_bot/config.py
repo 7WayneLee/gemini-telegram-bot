@@ -14,6 +14,8 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE
+
 
 LogLevel = Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
 RUNTIME_CREDENTIALS_FILENAME = "runtime-credentials.json"
@@ -166,6 +168,10 @@ class Settings(BaseSettings):
     default_model: str | None = Field(
         default=None,
         validation_alias="DEFAULT_MODEL",
+    )
+    default_language: Literal["en", "zh-hant"] = Field(
+        default=DEFAULT_LANGUAGE,
+        validation_alias="DEFAULT_LANGUAGE",
     )
     max_concurrency: int = Field(
         default=1,

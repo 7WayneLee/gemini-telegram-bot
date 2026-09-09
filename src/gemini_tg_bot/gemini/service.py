@@ -20,13 +20,14 @@ from gemini_webapi.utils import clear_cookies_cache
 from pydantic import SecretStr
 
 from gemini_tg_bot.config import Settings
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 
 from .errors import AccountStatusError, ErrorKind, classify_error
 
 
 BLOCKED_ESCALATION_THRESHOLD = 3
 BLOCKED_COOLDOWN_SEC = 900.0
-AUTH_DEGRADED_NOTIFICATION = "認證失效，請 /setcookie"
+AUTH_DEGRADED_NOTIFICATION = translate("auth.degraded", DEFAULT_LANGUAGE)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,12 +47,15 @@ _TOS_STATUSES = frozenset(
 )
 
 
-def account_status_guidance(status: AccountStatus) -> str:
+def account_status_guidance(
+    status: AccountStatus,
+    language: str = DEFAULT_LANGUAGE,
+) -> str:
     """Return secret-free remediation guidance for an unavailable account."""
 
     details = f"{status.name}: {status.description}"
     if status is AccountStatus.UNAUTHENTICATED:
-        return f"{AUTH_DEGRADED_NOTIFICATION}\n{details}"
+        return f"{translate('auth.degraded', language)}\n{details}"
     if status is AccountStatus.LOCATION_REJECTED:
         return (
             f"{details}\n可能是 Cookie 取得 IP 與服務使用 IP 不符；"
@@ -411,7 +415,7 @@ class GeminiService:
             notification: str | None = None
             if kind is ErrorKind.AUTH:
                 if self._set_auth_degraded_locked(error):
-                    notification = AUTH_DEGRADED_NOTIFICATION
+                    notification = self._auth_degraded_notification()
             elif (
                 isinstance(error, gw_exc.TemporarilyBlockedError)
                 and self._state is ServiceState.HEALTHY
@@ -490,12 +494,15 @@ class GeminiService:
                 self._set_auth_degraded_locked(error)
             if not self._claim_degraded_page_locked():
                 return None
-            return account_status_guidance(error.status)
+            return account_status_guidance(
+                error.status,
+                self._settings.default_language,
+            )
         if kind is ErrorKind.AUTH:
             self._set_auth_degraded_locked(error)
             if not self._claim_degraded_page_locked():
                 return None
-            return AUTH_DEGRADED_NOTIFICATION
+            return self._auth_degraded_notification()
         self._state = ServiceState.FAILED
         self._degraded_reason = None
         return None
@@ -588,7 +595,7 @@ class GeminiService:
 
             if kind is ErrorKind.AUTH:
                 if self._set_auth_degraded_locked(error):
-                    notification = AUTH_DEGRADED_NOTIFICATION
+                    notification = self._auth_degraded_notification()
             elif is_probe:
                 self._set_blocked_degraded_locked()
                 notification = self._blocked_notification()
@@ -674,6 +681,9 @@ class GeminiService:
             f"Gemini 暫時封鎖，將於約 {minutes} 分鐘後自動重試，"
             "無需人工介入"
         )
+
+    def _auth_degraded_notification(self) -> str:
+        return translate("auth.degraded", self._settings.default_language)
 
     @staticmethod
     def _client_account_status(client: GeminiClient) -> AccountStatus:
