@@ -136,6 +136,14 @@ Once running, the bot rotates `__Secure-1PSIDTS` in the background and persists 
   session
 - `/setcookie` persists to a `0600` override that takes precedence on the next start,
   so hot updates survive restarts
+- **Only `__Secure-1PSID` really matters.** A stale or even invalid `__Secure-1PSIDTS`
+  does not break authentication: a valid `__Secure-1PSID` is enough for the client to
+  obtain a fresh one. You need to re-acquire cookies only when Google invalidates
+  `__Secure-1PSID` itself
+
+> When authentication does fail, the upstream error blames `SECURE_1PSIDTS` and says it
+> "could get expired frequently". That is misleading — the value you actually have to
+> replace is almost always `__Secure-1PSID`.
 
 ### Testing locally against a remote server's IP
 
@@ -147,6 +155,11 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 ```
 
 Use `socks5h`, not `socks5` — the `h` sends DNS through the tunnel too.
+
+> If the same Google account is logged in to a browser on that machine, the client may
+> authenticate from those cookies rather than the ones in `.env`, so a local run can
+> succeed while the server fails. A headless server has no browser profile, so this
+> only ever hides problems locally.
 
 ---
 

@@ -124,6 +124,12 @@ Google 會偵測到 session 地理位置跳動，**反覆作廢它**。
 - `GEMINI_COOKIE_PATH` 必須掛在 volume 上，否則容器重建就會失去 session
 - `/setcookie` 會寫入權限 `0600` 的覆寫檔，下次啟動時優先採用，
   **因此熱更新可以跨重啟存活**
+- **真正重要的只有 `__Secure-1PSID`。** `__Secure-1PSIDTS` 過時、甚至值是錯的，
+  都不會造成認證失敗 —— 只要 `__Secure-1PSID` 仍有效，client 就能自行換發新的。
+  需要重新取得 cookie 的情形，只有 `__Secure-1PSID` 本身被 Google 作廢
+
+> 認證真的失敗時，上游的錯誤訊息會指向 `SECURE_1PSIDTS`，說它「容易過期」。
+> 這具有誤導性 —— 實際上需要更換的幾乎都是 `__Secure-1PSID`。
 
 ### 在本機測試但使用遠端伺服器的 IP
 
@@ -135,6 +141,10 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 ```
 
 用 `socks5h` 而非 `socks5` —— `h` 代表 DNS 也走 tunnel。
+
+> 若那台機器的瀏覽器正登入同一個 Google 帳號，client 可能會改用瀏覽器裡的 cookie
+> 而不是 `.env` 裡的，於是**本機跑得起來、伺服器卻失敗**。
+> 無頭伺服器沒有瀏覽器 profile，所以這只會在本機掩蓋問題。
 
 ---
 

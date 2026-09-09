@@ -232,6 +232,48 @@ await self._client.close()
 - `save_cookies(cookies: Cookies, verbose: bool = False)` 同樣吃 jar，
   格式為 `{name, value, domain, path, expires}` 的 JSON list。**不要手刻此格式。**
 
+#### `__Secure-1PSID` 是唯一必要的憑證，`1PSIDTS` 可為空
+
+`utils/get_access_token.py` 組 candidate jar 的階段（Phase 1，離線、不發請求）
+一切以 `base_psid` 為條件：
+
+```python
+psidts = _extract_cookie_value(jar, "__Secure-1PSIDTS") or ""   # 空字串是合法候選
+
+if base_psid:                                                    # 只看 1PSID
+    if (base_psidts or "") not in tried_sessions.get(base_psid, set()):
+        register(Cookies(base_jar), "Base Cookies", base_psid)
+elif verbose and not cookie_jars_to_test:
+    logger.debug("Skipping loading base cookies. __Secure-1PSID is not provided.")
+```
+
+連線成功後由 `rotate_1psidts()` 換發新的 `1PSIDTS` 並寫入快取。
+
+**運維後果**：`1PSIDTS` 過期或值錯誤**不會**造成認證失敗，只要 `1PSID` 仍有效。
+需要人工重新取得 cookie 的情形，只有 `1PSID` 本身失效。
+
+> 已於正式環境實測（2026-09-08）：把 `GEMINI_SECURE_1PSIDTS` 改成無效字串、
+> 並清空 cookie 快取目錄後重啟，client 仍正常完成認證並服務請求。
+> 上游失敗訊息把矛頭指向 `SECURE_1PSIDTS`（"could get expired frequently"），
+> **具誤導性** —— 真正要換的通常是 `1PSID`。
+
+#### ⚠️ 本機瀏覽器 cookie 是隱性的後備來源
+
+快取與呼叫端憑證之後，上游還會嘗試 `load_browser_cookies(domain_name=...)`，
+只採用 `__Secure-1PSID` 與呼叫端相符的 jar：
+
+```python
+if base_psid and base_psid != secure_1psid:
+    continue        # 不相符才跳過；相符就會被採用
+```
+
+**運維後果**：在**開發機**上，若同一個 Google 帳號正登入瀏覽器，
+即使 `.env` 的憑證是錯的，client 仍可能從瀏覽器取得可用 jar 而通過認證 ——
+**本機測試會通過，VM 上卻失敗**。無頭 VM 沒有瀏覽器 profile，此路徑為空轉。
+
+診斷憑證問題時，`InitSession.cookie_source` 會標明實際來源
+（`Cache` / `Base Cookies` / `Cache (Latest)` / 瀏覽器名稱）。
+
 #### 快取檔路徑含有 cookie 明文
 
 ```

@@ -65,9 +65,26 @@ Two behaviours worth knowing:
   it without SSH access.
 - **While degraded, requests fail immediately** rather than queueing behind an
   upstream timeout.
+- **The administrator is paged once per reason, not once per failure.** `reinit()`
+  clears `_state` before it retries, so a state transition is not a usable signal;
+  `_notified_degraded_reason` tracks what has already been announced and is cleared on
+  recovery. This is not tidiness: Telegram rate-limits a chat, and a stream of identical
+  pages swallows the `/setcookie` prompt that is the only way out of AUTH degradation.
 
 Upstream's `init()` returns success even on an unauthenticated session, so the service
 inspects `client.account_status` directly rather than relying on an exception.
+
+### The recovery path must survive its own failure mode
+
+`/setcookie` is a two-step interaction whose armed state lives in memory, so a restart —
+or a prompt lost to flood control — can leave an administrator pasting credentials the
+bot is not expecting. Plain text that carries credential material is therefore routed
+into the credential path regardless of that state, which deletes the message before
+doing anything else. Without it the paste would be forwarded to Gemini as a prompt and
+left in the chat transcript.
+
+Detection keys on the *value* shape (`g.a000…`, `sidts-…`) rather than the cookie names,
+so asking the bot about the cookies is still an ordinary question.
 
 ---
 
