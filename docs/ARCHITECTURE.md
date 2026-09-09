@@ -185,3 +185,13 @@ SQLite via `aiosqlite`, migrated with `PRAGMA user_version`:
 
 `ChatSession.metadata` is a `list[str | None]` and is stored as a JSON array —
 positions carry meaning, so `None` entries must be preserved rather than compacted.
+
+Cookie state lives outside the database, at `GEMINI_COOKIE_PATH`: upstream's rotated
+cookie cache, plus the `0600` `runtime-credentials.json` that `/setcookie` writes.
+`Settings` loads that override ahead of the environment, which is what lets a hot
+credential update survive a restart — verified in production by breaking both
+credentials in the environment file and watching the service authenticate anyway.
+
+The path is resolved relative to the working directory, so a relative value in the
+environment file lands somewhere other than the absolute path a systemd unit names,
+and the two directories then disagree about where the session lives.

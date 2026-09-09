@@ -254,7 +254,13 @@ sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" pip install --python .venv/b
 sudo chmod -R a+rX /opt/gemini-tg-bot && sudo systemctl restart gemini-tg-bot
 ```
 
-Schema migrations run at startup, so no separate step is needed.
+Schema migrations run at startup, so no separate step is needed. The unit file is
+a copy too, so re-install it when `deploy/gemini-tg-bot.service` changes:
+
+```bash
+sudo diff /etc/systemd/system/gemini-tg-bot.service deploy/gemini-tg-bot.service \
+  || { sudo cp deploy/gemini-tg-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload; }
+```
 
 ### Docker Compose
 

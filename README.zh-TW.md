@@ -237,7 +237,13 @@ sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$UV" pip install --python .venv/b
 sudo chmod -R a+rX /opt/gemini-tg-bot && sudo systemctl restart gemini-tg-bot
 ```
 
-資料庫遷移在啟動時自動執行，不需要額外步驟。
+資料庫遷移在啟動時自動執行，不需要額外步驟。但 service 檔同樣是複製過去的，
+`deploy/gemini-tg-bot.service` 有變更時要重新安裝：
+
+```bash
+sudo diff /etc/systemd/system/gemini-tg-bot.service deploy/gemini-tg-bot.service \
+  || { sudo cp deploy/gemini-tg-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload; }
+```
 
 ### Docker Compose
 
