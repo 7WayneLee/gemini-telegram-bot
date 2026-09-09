@@ -1728,21 +1728,24 @@ def register_handlers(
 async def register_command_menu(
     application: Application[Any, Any, Any, Any, Any, Any],
 ) -> None:
-    """Publish user commands without making menu availability startup-critical."""
+    """Publish the English default without making startup depend on its menu.
 
-    for language in (LANGUAGE_ENGLISH, LANGUAGE_CHINESE):
-        try:
-            await call_telegram(
-                application.bot.set_my_commands,
-                _commands_for_language(language),
-                language_code=language,
-            )
-        except Exception as error:
-            LOGGER.warning(
-                "Unable to register Telegram command menu for %s (%s)",
-                language,
-                type(error).__name__,
-            )
+    Telegram's language-specific command menus accept only two-letter codes,
+    so ``zh`` cannot distinguish Traditional from Simplified Chinese.  Users
+    who choose Chinese through ``/language`` instead receive the existing
+    chat-scoped menu, which does not require a language code.
+    """
+
+    try:
+        await call_telegram(
+            application.bot.set_my_commands,
+            _commands_for_language(LANGUAGE_ENGLISH),
+        )
+    except Exception as error:
+        LOGGER.warning(
+            "Unable to register default Telegram command menu (%s)",
+            type(error).__name__,
+        )
 
 
 def _message_identity(update: Update) -> tuple[int, int, Any] | None:

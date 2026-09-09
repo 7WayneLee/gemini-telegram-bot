@@ -337,7 +337,7 @@ async def test_language_shows_both_choices_in_the_resolved_language(
 
     handlers, _ = handlers_factory()
     registry.get_state.return_value = _state(language=None)
-    update = _update(text="/language", language_code="zh-hk")
+    update = _update(text="/language", language_code="zh-Hant-TW")
 
     await handlers.language(update, SimpleNamespace())
 
@@ -1368,7 +1368,7 @@ def test_registration_places_auth_in_first_group(
 
 
 async def test_startup_registers_public_command_menu() -> None:
-    """Telegram needs separately localized menus for each supported language."""
+    """One default menu must cover users without a dedicated chat menu."""
 
     application = SimpleNamespace(
         bot=SimpleNamespace(set_my_commands=AsyncMock()),
@@ -1378,18 +1378,12 @@ async def test_startup_registers_public_command_menu() -> None:
     await _start_application(application)
 
     menu_calls = application.bot.set_my_commands.await_args_list
-    assert len(menu_calls) == 2
-    assert menu_calls[0] == call(
-        PUBLIC_BOT_COMMANDS,
-        language_code=LANGUAGE_ENGLISH,
-    )
-    chinese_commands = menu_calls[1].args[0]
-    assert menu_calls[1].kwargs == {"language_code": LANGUAGE_CHINESE}
+    assert menu_calls == [call(PUBLIC_BOT_COMMANDS)]
     assert next(
         item.description
-        for item in chinese_commands
+        for item in menu_calls[0].args[0]
         if item.command == "language"
-    ) == translate("command.language.description", LANGUAGE_CHINESE)
+    ) == translate("command.language.description", LANGUAGE_ENGLISH)
     registered_commands = {item.command for item in PUBLIC_BOT_COMMANDS}
     assert registered_commands == {
         "start",
@@ -1409,6 +1403,26 @@ async def test_startup_registers_public_command_menu() -> None:
         {"setcookie", "allow", "deny", "health"}
     )
     application.start.assert_awaited_once_with()
+
+
+async def test_startup_never_registers_zh_hant_command_menu(caplog) -> None:
+    """Avoiding Telegram's invalid zh-hant code prevents noisy startup errors."""
+
+    async def reject_invalid_language_code(*args: Any, **kwargs: Any) -> None:
+        if kwargs.get("language_code") == LANGUAGE_CHINESE:
+            raise BadRequest("language_code must be two letters")
+
+    set_my_commands = AsyncMock(side_effect=reject_invalid_language_code)
+    application = SimpleNamespace(
+        bot=SimpleNamespace(set_my_commands=set_my_commands),
+        start=AsyncMock(),
+    )
+
+    with caplog.at_level("WARNING"):
+        await _start_application(application)
+
+    set_my_commands.assert_awaited_once_with(PUBLIC_BOT_COMMANDS)
+    assert "BadRequest" not in caplog.text
 
 
 async def test_startup_sequence_restores_state_before_polling() -> None:
@@ -1436,7 +1450,7 @@ async def test_startup_sequence_restores_state_before_polling() -> None:
 
 
 async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
-    """An optional localized menu outage must not prevent update processing."""
+    """An optional default-menu outage must not prevent update processing."""
 
     application = SimpleNamespace(
         bot=SimpleNamespace(
@@ -1449,8 +1463,8 @@ async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
         await _start_application(application)
 
     application.start.assert_awaited_once_with()
-    assert application.bot.set_my_commands.await_count == 2
-    assert "Unable to register Telegram command menu for en (RuntimeError)" in (
+    assert application.bot.set_my_commands.await_count == 1
+    assert "Unable to register default Telegram command menu (RuntimeError)" in (
         caplog.text
     )
 

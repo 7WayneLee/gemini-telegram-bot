@@ -7,6 +7,14 @@ LANGUAGE_ENGLISH = "en"
 LANGUAGE_CHINESE = "zh-hant"
 DEFAULT_LANGUAGE = LANGUAGE_ENGLISH
 
+_TRADITIONAL_CHINESE_TELEGRAM_CODES = frozenset(
+    {
+        "zh-tw",
+        "zh-hant",
+        "zh-hant-tw",
+    }
+)
+
 
 MESSAGES: dict[str, dict[str, str]] = {
     "think.enabled": {
@@ -578,15 +586,17 @@ def translate(key: str, language: str, /, **params: object) -> str:
 def resolve_language(stored: str | None, telegram_code: str | None) -> str:
     """Resolve a stored preference, Telegram hint, or the English default.
 
-    Every Telegram code beginning with ``zh`` maps to Traditional Chinese,
-    including Simplified variants such as ``zh-hans`` and ``zh-cn``.  The
-    project has one Chinese catalog, and Traditional Chinese is considered a
-    better fallback for those users than English.
+    A stored ``/language`` choice remains authoritative.  Automatic detection
+    conservatively accepts only the exact Traditional Chinese tags supported
+    by this project.  Some Traditional Chinese users may initially receive
+    English and need to choose ``/language``, but this avoids incorrectly
+    presenting Traditional Chinese to users whose tag denotes Simplified
+    Chinese or is otherwise ambiguous.
     """
 
     candidate = stored if stored is not None else telegram_code
     if candidate is None:
         return DEFAULT_LANGUAGE
-    if candidate.casefold().replace("_", "-").startswith("zh"):
+    if candidate.casefold() in _TRADITIONAL_CHINESE_TELEGRAM_CODES:
         return LANGUAGE_CHINESE
     return LANGUAGE_ENGLISH

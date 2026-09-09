@@ -101,27 +101,54 @@ def test_named_parameters_are_formatted() -> None:
     )
 
 
-def test_resolve_language_honors_stored_then_telegram_then_default() -> None:
-    """An explicit chat choice must survive Telegram profile changes."""
-
-    assert resolve_language(LANGUAGE_ENGLISH, "zh-tw") == LANGUAGE_ENGLISH
-    assert resolve_language(None, "zh-tw") == LANGUAGE_CHINESE
-    assert resolve_language(None, None) == DEFAULT_LANGUAGE
-
-
 @pytest.mark.parametrize(
     "telegram_code",
-    ["zh", "zh-hant", "zh-tw", "zh-hans", "zh-cn"],
+    [
+        "zh-TW",
+        "zh-tw",
+        "zh-Hant",
+        "zh-hant",
+        "zh-Hant-TW",
+        "zh-hant-tw",
+    ],
 )
-def test_all_chinese_telegram_variants_use_traditional_chinese(
+def test_explicit_traditional_chinese_tags_use_chinese(
     telegram_code: str,
 ) -> None:
-    """Chinese users should receive the sole Chinese catalog, not English."""
+    """Recognized Traditional tags should localize the first interaction."""
 
     assert resolve_language(None, telegram_code) == LANGUAGE_CHINESE
 
 
-def test_unknown_telegram_language_uses_english() -> None:
-    """Unsupported Telegram locales need the documented primary language."""
+@pytest.mark.parametrize(
+    "telegram_code",
+    ["zh-Hans", "zh-CN", "zh-SG", "zh-HK", "zh-MO", "zh"],
+)
+def test_other_chinese_tags_use_english(telegram_code: str) -> None:
+    """Ambiguous or Simplified tags must not opt users into Traditional UI."""
 
-    assert resolve_language(None, "ja") == LANGUAGE_ENGLISH
+    assert resolve_language(None, telegram_code) == LANGUAGE_ENGLISH
+
+
+@pytest.mark.parametrize("telegram_code", ["ja", "fr", None])
+def test_non_chinese_or_missing_telegram_language_uses_english(
+    telegram_code: str | None,
+) -> None:
+    """Every unrecognized locale needs a predictable, usable fallback."""
+
+    assert resolve_language(None, telegram_code) == DEFAULT_LANGUAGE
+
+
+@pytest.mark.parametrize("telegram_code", ["en", "zh-Hans"])
+def test_stored_chinese_preference_overrides_telegram_language(
+    telegram_code: str,
+) -> None:
+    """A deliberate /language choice must survive app-language changes."""
+
+    assert resolve_language(LANGUAGE_CHINESE, telegram_code) == LANGUAGE_CHINESE
+
+
+def test_stored_english_preference_overrides_traditional_telegram_tag() -> None:
+    """A deliberate English choice must not be undone by profile metadata."""
+
+    assert resolve_language(LANGUAGE_ENGLISH, "zh-TW") == LANGUAGE_ENGLISH
