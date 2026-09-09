@@ -19,6 +19,7 @@ from telegram.error import BadRequest, RetryAfter
 
 from gemini_tg_bot.__main__ import (
     _initialize_and_start_polling,
+    _log_cookie_location,
     _start_application,
 )
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME
@@ -1180,3 +1181,33 @@ async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
 
     application.start.assert_awaited_once_with()
     assert "Unable to register Telegram command menu (RuntimeError)" in caplog.text
+
+
+def test_cookie_location_is_logged_as_an_absolute_path(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A relative cookie path must not be reported as written.
+
+    It resolves against the working directory, so it can land somewhere other
+    than the absolute path a service unit names -- and then an empty directory
+    at the unit's path looks like a lost session rather than a misconfiguration.
+    """
+
+    from gemini_tg_bot.config import Settings
+
+    (tmp_path / "data" / "cookies").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "FAKE_TOKEN_FOR_TEST")
+    monkeypatch.setenv("ADMIN_USER_ID", "1")
+    monkeypatch.setenv("GEMINI_SECURE_1PSID", "FAKE_1PSID_FOR_TEST")
+    monkeypatch.setenv("GEMINI_SECURE_1PSIDTS", "FAKE_1PSIDTS_FOR_TEST")
+    monkeypatch.setenv("GEMINI_COOKIE_PATH", "./data/cookies")
+
+    with caplog.at_level("INFO"):
+        _log_cookie_location(Settings(_env_file=None))
+
+    assert str((tmp_path / "data" / "cookies").resolve()) in caplog.text
+    assert "./data/cookies" not in caplog.text
+    assert "override=False" in caplog.text
+    assert "FAKE_1PSID_FOR_TEST" not in caplog.text
+    assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text

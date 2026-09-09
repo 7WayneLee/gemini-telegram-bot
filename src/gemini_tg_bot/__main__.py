@@ -16,7 +16,7 @@ from pydantic import SecretStr
 from telegram import Update
 from telegram.ext import Application
 
-from gemini_tg_bot.config import Settings
+from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME, Settings
 from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import GeminiService
 from gemini_tg_bot.queue import RequestQueue
@@ -45,9 +45,30 @@ DATABASE_PATH = Path("data/db/bot.sqlite3")
 ADMIN_NOTIFICATION_COOLDOWN_SEC = 900.0
 
 
+def _log_cookie_location(settings: Settings) -> None:
+    """Record where the session actually lives, resolved to an absolute path.
+
+    ``GEMINI_COOKIE_PATH`` is resolved against the working directory, so a
+    relative value lands somewhere other than the absolute path a service unit
+    names, and the two then disagree about where the session is kept.  Nothing
+    else reports which one won, which makes an empty directory look like a lost
+    session.  The directory is safe to log; the cache *file* names inside it are
+    not, because upstream keys them on the cookie value.
+    """
+
+    cookie_path = settings.gemini_cookie_path.resolve()
+    LOGGER.info(
+        "Cookie state directory: %s (exists=%s, /setcookie override=%s)",
+        cookie_path,
+        cookie_path.is_dir(),
+        (cookie_path / RUNTIME_CREDENTIALS_FILENAME).is_file(),
+    )
+
+
 async def _run_polling(settings: Settings) -> None:
     """Run Telegram long polling and Gemini on one asyncio event loop."""
 
+    _log_cookie_location(settings)
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     database = Database(DATABASE_PATH)
     await database.connect()
