@@ -318,3 +318,83 @@ def test_real_web_image_fixture_removes_agent_tag_rule_and_bolds_heading() -> No
     assert "---" not in rendered
     assert "<b>外觀核心設計特點</b>" in rendered
     assert f"{LIST_INDENT_CHARACTER * 2}◦ <b>古錢幣符號：</b>" in rendered
+
+
+def test_thoughts_are_wrapped_in_an_expandable_blockquote() -> None:
+    """Expandable markup keeps supplementary reasoning compact in Telegram."""
+
+    assert _RENDERING.render_thoughts_blockquote("Reasoning", budget=100) == (
+        "<blockquote expandable>Reasoning</blockquote>"
+    )
+
+
+def test_thoughts_escape_html_special_characters() -> None:
+    """Escaping prevents reasoning text from corrupting Telegram's HTML markup."""
+
+    assert _RENDERING.render_thoughts_blockquote("a < b > c & d", budget=100) == (
+        "<blockquote expandable>a &lt; b &gt; c &amp; d</blockquote>"
+    )
+
+
+@pytest.mark.parametrize("thoughts", ["", " \t\n "])
+def test_empty_or_whitespace_only_thoughts_render_nothing(thoughts: str) -> None:
+    """Omitting empty reasoning avoids sending a meaningless Telegram element."""
+
+    assert _RENDERING.render_thoughts_blockquote(thoughts, budget=100) == ""
+
+
+@pytest.mark.parametrize("budget_delta", [-1, 0])
+def test_thoughts_render_nothing_when_budget_cannot_fit_tags(
+    budget_delta: int,
+) -> None:
+    """A complete HTML wrapper is required so a tight budget never emits invalid markup."""
+
+    tags_length = len("<blockquote expandable>") + len("</blockquote>")
+
+    assert (
+        _RENDERING.render_thoughts_blockquote(
+            "Reasoning",
+            budget=tags_length + budget_delta,
+        )
+        == ""
+    )
+
+
+def test_thoughts_are_truncated_with_note_inside_budget() -> None:
+    """Reasoning must yield limited message space to the answer while explaining data loss."""
+
+    opening, closing = "<blockquote expandable>", "</blockquote>"
+    note = _RENDERING.THOUGHTS_TRUNCATION_NOTE
+    budget = len(opening) + len(closing) + len(note) + 12
+
+    rendered = _RENDERING.render_thoughts_blockquote("x" * 100, budget=budget)
+
+    assert rendered.endswith(f"{note}{closing}")
+    assert len(rendered) <= budget
+
+
+@pytest.mark.parametrize(("character", "entity"), [("<", "&lt;"), ("&", "&amp;")])
+def test_thoughts_truncation_preserves_complete_html_entities(
+    character: str,
+    entity: str,
+) -> None:
+    """Whole entities keep truncated reasoning valid for Telegram's strict HTML parser."""
+
+    opening, closing = "<blockquote expandable>", "</blockquote>"
+    note = _RENDERING.THOUGHTS_TRUNCATION_NOTE
+    budget = len(opening) + len(closing) + len(note) + 23
+
+    rendered = _RENDERING.render_thoughts_blockquote(character * 100, budget=budget)
+    escaped_prefix = rendered.removeprefix(opening).removesuffix(f"{note}{closing}")
+
+    assert escaped_prefix
+    assert escaped_prefix == entity * (len(escaped_prefix) // len(entity))
+    assert len(rendered) <= budget
+
+
+def test_thoughts_strip_surrounding_whitespace() -> None:
+    """Trimming presentation-only whitespace preserves room for useful reasoning."""
+
+    assert _RENDERING.render_thoughts_blockquote(" \n  Reasoning \t ", budget=100) == (
+        "<blockquote expandable>Reasoning</blockquote>"
+    )

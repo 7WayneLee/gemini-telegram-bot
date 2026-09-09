@@ -181,6 +181,7 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `/model` | 以 inline keyboard 選擇模型，清單為動態取得 |
 | `/gem` | 選擇要套用於對話的 gem |
 | `/temp` | 切換暫時模式 —— 不寫入 Gemini 歷史 |
+| `/think` | 切換各聊天室獨立持久化的延伸思考；回覆會附上可展開的思考過程，Gemini Advanced 額度消耗速度比一般模式快 |
 | `/img <prompt>` | **明確要求生成圖片。** 未明示時 Gemini 傾向回傳網路搜尋結果而非 AI 生成圖 |
 | `/research <topic>` | 送出 Deep Research 任務，立即回傳 task id |
 | `/research_status` | 該聊天室的研究任務狀態 |

@@ -196,6 +196,7 @@ Everything else has a safe default. Three worth knowing:
 | `/model` | Pick a model from an inline keyboard, listed dynamically |
 | `/gem` | Pick a gem to apply to the conversation |
 | `/temp` | Toggle temporary mode — nothing written to Gemini history |
+| `/think` | Toggle extended thinking for this chat (persisted per chat); replies include an expandable thought process and consume Gemini Advanced quota faster than normal mode |
 | `/img <prompt>` | **Explicitly ask for generation.** Without that wording Gemini tends to return web search results instead of an AI-generated image |
 | `/research <topic>` | Submit a Deep Research task; returns a task id immediately |
 | `/research_status` | Status of this chat's research tasks |
