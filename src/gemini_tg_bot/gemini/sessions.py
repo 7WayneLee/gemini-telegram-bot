@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -121,7 +122,12 @@ class ChatSessionRegistry:
             )
 
     async def persist(self, chat_id: int, session: ChatSession) -> None:
-        """Persist the conversation identifiers from a successful response."""
+        """Persist conversation identifiers without rebuilding chat settings.
+
+        Existing records are derived with :func:`dataclasses.replace` rather
+        than enumerating settings fields so newly added settings cannot be
+        silently reset to their dataclass defaults during a response persist.
+        """
 
         # Take a positional copy before awaiting SQLite so later mutations of
         # the upstream metadata list cannot change the snapshot being written.
@@ -131,19 +137,21 @@ class ChatSessionRegistry:
 
         async with self._lock:
             current = await self._dao.get(chat_id)
-            await self._dao.upsert(
-                StoredChatSession(
+            if current is None:
+                record = StoredChatSession(
                     chat_id=chat_id,
                     cid=cid,
                     metadata=metadata_snapshot,
-                    model=current.model if current is not None else None,
-                    gem_id=current.gem_id if current is not None else None,
-                    temporary=(
-                        current.temporary if current is not None else False
-                    ),
                     updated_at=_timestamp(),
                 )
-            )
+            else:
+                record = dataclasses.replace(
+                    current,
+                    cid=cid,
+                    metadata=metadata_snapshot,
+                    updated_at=_timestamp(),
+                )
+            await self._dao.upsert(record)
 
     async def restore_all(self) -> None:
         """Rebuild all in-memory sessions from their persisted metadata."""

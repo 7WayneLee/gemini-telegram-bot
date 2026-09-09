@@ -1263,3 +1263,81 @@ async def test_enabled_thinking_reaches_the_upstream_call(
     await handlers.text_message(_update(text="question"), SimpleNamespace())
 
     assert client.calls[0][1]["extended_thinking"] is True
+
+
+async def test_enabled_thinking_logs_model_and_thought_character_count(
+    handlers_factory,
+    registry: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    thoughts = "SENSITIVE_THOUGHTS_SENTINEL"
+    client = _StreamingClient(
+        [
+            SimpleNamespace(
+                text="ok",
+                text_delta="ok",
+                images=(),
+                thoughts=thoughts,
+            )
+        ]
+    )
+    registry.get_state.return_value = _state(
+        model="thinking-capable-model",
+        extended_thinking=True,
+    )
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(client)
+
+    with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
+        await handlers.text_message(_update(text="question"), SimpleNamespace())
+
+    assert "thinking-capable-model" in caplog.text
+    assert f"received {len(thoughts)} thought characters" in caplog.text
+    assert thoughts not in caplog.text
+
+
+async def test_enabled_thinking_logs_when_no_thoughts_are_returned(
+    handlers_factory,
+    registry: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _StreamingClient(
+        [SimpleNamespace(text="ok", text_delta="ok", images=(), thoughts=None)]
+    )
+    registry.get_state.return_value = _state(
+        model=None,
+        extended_thinking=True,
+    )
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(client)
+
+    with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
+        await handlers.text_message(_update(text="question"), SimpleNamespace())
+
+    assert "account default" in caplog.text
+    assert "requested but received 0 thought characters" in caplog.text
+
+
+async def test_disabled_thinking_does_not_log_thought_observability(
+    handlers_factory,
+    registry: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _StreamingClient(
+        [
+            SimpleNamespace(
+                text="ok",
+                text_delta="ok",
+                images=(),
+                thoughts="UNEXPECTED_THOUGHTS_SENTINEL",
+            )
+        ]
+    )
+    registry.get_state.return_value = _state(extended_thinking=False)
+    registry.get_or_create.return_value = SimpleNamespace()
+    handlers, _ = handlers_factory(client)
+
+    with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
+        await handlers.text_message(_update(text="question"), SimpleNamespace())
+
+    assert "Extended thinking result" not in caplog.text

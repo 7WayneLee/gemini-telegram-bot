@@ -96,6 +96,72 @@ async def test_settings_are_per_chat_and_rebuild_session_with_context(
     }
 
 
+async def test_persist_preserves_enabled_extended_thinking(
+    tmp_path: Path,
+) -> None:
+    """A successful response must not turn off the persisted /think switch."""
+
+    registry_client = MagicMock()
+    session = SimpleNamespace(cid="response-cid", metadata=["response"])
+
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(registry_client),
+            database,
+        )
+        await registry.set_extended_thinking(1, True)
+
+        await registry.persist(1, session)  # type: ignore[arg-type]
+
+        assert (await registry.get_state(1)).extended_thinking is True
+
+
+async def test_persist_preserves_every_setting_and_updates_context(
+    tmp_path: Path,
+) -> None:
+    """Guard the whole class of bugs where persist omits a settings field.
+
+    Every configurable field is set together so rebuilding a stored record by
+    enumerating only some settings cannot silently pass this regression test.
+    """
+
+    registry_client = MagicMock()
+    session = SimpleNamespace(
+        cid="updated-cid",
+        metadata=["updated", None, "metadata"],
+    )
+
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(registry_client),
+            database,
+        )
+        await registry.set_model(2, "configured-model")
+        await registry.set_gem(2, "configured-gem")
+        await registry.set_temporary(2, True)
+        await registry.set_extended_thinking(2, True)
+
+        await registry.persist(2, session)  # type: ignore[arg-type]
+
+        state = await registry.get_state(2)
+        assert state.cid == "updated-cid"
+        assert state.model == "configured-model"
+        assert state.gem_id == "configured-gem"
+        assert state.temporary is True
+        assert state.extended_thinking is True
+
+        async with database.connection.execute(
+            "SELECT metadata_json FROM chat_sessions WHERE chat_id = 2"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert json.loads(row["metadata_json"]) == [
+            "updated",
+            None,
+            "metadata",
+        ]
+
+
 async def test_reset_discards_conversation_and_preserves_settings(
     tmp_path: Path,
 ) -> None:

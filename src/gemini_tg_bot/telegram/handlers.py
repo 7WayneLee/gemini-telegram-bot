@@ -793,6 +793,24 @@ class TelegramHandlers:
                         flood_wait=permit.wait_for_flood_control,
                     )
                 )
+            if state.extended_thinking:
+                thought_characters = len(streamed.thoughts)
+                model = state.model or "account default"
+                if thought_characters:
+                    LOGGER.info(
+                        "Extended thinking result for model %s: requested, "
+                        "received %d thought characters.",
+                        model,
+                        thought_characters,
+                    )
+                else:
+                    LOGGER.info(
+                        "Extended thinking result for model %s: requested but "
+                        "received 0 thought characters; the model may not "
+                        "support extended thinking or the upstream response "
+                        "omitted it.",
+                        model,
+                    )
             await self._sessions.persist(chat_id, session)
             await self._reply_streamed_output_images(
                 message,
