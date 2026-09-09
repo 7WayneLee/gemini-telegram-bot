@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -285,6 +286,59 @@ class UsageLogDAO:
         ) as cursor:
             rows = await cursor.fetchall()
         return [_usage_log_from_row(row) for row in rows]
+
+
+ADMIN_NOTIFICATION_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS admin_notifications (
+    fingerprint TEXT PRIMARY KEY,
+    sent_at REAL NOT NULL
+);
+"""
+
+
+class AdminNotificationDAO:
+    """Suppress an administrator page that a restart would otherwise repeat.
+
+    The service already refuses to page twice for one degraded reason, but that
+    memory dies with the process.  A supervisor restarting a process that fails
+    the same way every time turns one problem into a stream of identical
+    messages, and Telegram rate-limits a chat: the flood buries the
+    ``/setcookie`` prompt that is the only way back from AUTH degradation.
+
+    Only the digest of a message is stored, never its text, so nothing an
+    administrator may have supplied can reach the database.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def claim(
+        self,
+        message: str,
+        *,
+        now: float,
+        cooldown_sec: float,
+    ) -> bool:
+        """Report whether ``message`` should be sent, recording it when so."""
+
+        fingerprint = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        async with self._connection.execute(
+            "SELECT sent_at FROM admin_notifications WHERE fingerprint = ?",
+            (fingerprint,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is not None and now - float(row[0]) < cooldown_sec:
+            return False
+        await self._connection.execute(
+            """
+            INSERT INTO admin_notifications (fingerprint, sent_at)
+            VALUES (?, ?)
+            ON CONFLICT(fingerprint) DO UPDATE SET sent_at = excluded.sent_at
+            """,
+            (fingerprint, now),
+        )
+        await self._connection.commit()
+        return True
 
 
 def _chat_session_from_row(row: aiosqlite.Row) -> ChatSession:

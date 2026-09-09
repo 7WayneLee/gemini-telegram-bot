@@ -8,10 +8,10 @@ from typing import Awaitable, Callable
 
 import aiosqlite
 
-from .models import SCHEMA_SQL
+from .models import ADMIN_NOTIFICATION_SCHEMA_SQL, SCHEMA_SQL
 
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 _TELEGRAM_ACCESS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_user_access (
@@ -36,6 +36,7 @@ async def migrate(connection: aiosqlite.Connection) -> None:
         1: _migrate_to_v1,
         2: _migrate_to_v2,
         3: _migrate_to_v3,
+        4: _migrate_to_v4,
     }
     for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
         await migrations[version](connection)
@@ -64,6 +65,14 @@ async def _migrate_to_v3(connection: aiosqlite.Connection) -> None:
         connection,
         _TELEGRAM_ACCESS_SCHEMA_SQL,
         version=3,
+    )
+
+
+async def _migrate_to_v4(connection: aiosqlite.Connection) -> None:
+    await _run_schema_migration(
+        connection,
+        ADMIN_NOTIFICATION_SCHEMA_SQL,
+        version=4,
     )
 
 

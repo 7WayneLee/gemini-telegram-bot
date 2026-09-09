@@ -8,6 +8,7 @@ import pytest
 from gemini_tg_bot.storage.db import LATEST_SCHEMA_VERSION, Database
 from gemini_tg_bot.storage.models import (
     SCHEMA_SQL,
+    AdminNotificationDAO,
     ChatSession,
     ChatSessionDAO,
     ResearchTask,
@@ -40,6 +41,10 @@ EXPECTED_SCHEMA = {
         ("created_at", "TEXT", 1, None, 0),
         ("updated_at", "TEXT", 1, None, 0),
         ("plan_json", "TEXT", 0, None, 0),
+    ],
+    "admin_notifications": [
+        ("fingerprint", "TEXT", 0, None, 1),
+        ("sent_at", "REAL", 1, None, 0),
     ],
     "usage_log": [
         ("id", "INTEGER", 0, None, 1),
@@ -319,3 +324,60 @@ async def test_research_and_usage_daos(tmp_path) -> None:
                 created_at="2026-09-07T02:04:00+00:00",
             )
         ]
+
+
+@pytest.mark.asyncio
+async def test_repeated_page_is_suppressed_across_process_restarts(
+    tmp_path,
+) -> None:
+    """A supervisor restarting a process must not re-page the administrator.
+
+    Each DAO here stands for a fresh process: the in-memory guard inside the
+    service cannot see the previous run, so suppression has to be durable or a
+    crash loop floods the chat and buries the /setcookie prompt.
+    """
+
+    message = "認證失效，請 /setcookie"
+    path = tmp_path / "bot.sqlite3"
+    sent = 0
+
+    for restart in range(21):
+        async with Database(path) as database:
+            dao = AdminNotificationDAO(database.connection)
+            if await dao.claim(message, now=100.0 + restart * 10, cooldown_sec=900):
+                sent += 1
+
+    assert sent == 1
+
+
+@pytest.mark.asyncio
+async def test_page_is_sent_again_once_the_cooldown_lapses(tmp_path) -> None:
+    """Suppression is bounded, so an unfixed problem is raised again."""
+
+    message = "認證失效，請 /setcookie"
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        dao = AdminNotificationDAO(database.connection)
+
+        assert await dao.claim(message, now=0.0, cooldown_sec=900)
+        assert not await dao.claim(message, now=899.0, cooldown_sec=900)
+        assert await dao.claim(message, now=900.0, cooldown_sec=900)
+        assert await dao.claim("something else", now=900.0, cooldown_sec=900)
+
+
+@pytest.mark.asyncio
+async def test_notification_text_is_never_stored(tmp_path) -> None:
+    """Only a digest is persisted, so administrator input cannot leak here."""
+
+    message = "認證失效，請 /setcookie FAKE_1PSID_FOR_TEST"
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        dao = AdminNotificationDAO(database.connection)
+        await dao.claim(message, now=0.0, cooldown_sec=900)
+
+        async with database.connection.execute(
+            "SELECT fingerprint FROM admin_notifications"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    assert len(rows) == 1
+    assert "FAKE_1PSID_FOR_TEST" not in rows[0][0]
+    assert len(rows[0][0]) == 64

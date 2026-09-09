@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import logging
 import signal
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,7 +21,7 @@ from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import GeminiService
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
-from gemini_tg_bot.storage.models import UsageLogDAO
+from gemini_tg_bot.storage.models import AdminNotificationDAO, UsageLogDAO
 from gemini_tg_bot.telegram.auth import AuthMiddleware, SQLiteAccessOverrides
 from gemini_tg_bot.telegram.handlers import (
     EgressMeter,
@@ -34,6 +35,15 @@ from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
 LOGGER = logging.getLogger(__name__)
 DATABASE_PATH = Path("data/db/bot.sqlite3")
 
+# How long an identical administrator notification stays suppressed.  The
+# service already refuses to page twice for one degraded reason, but a
+# supervisor restarting a process that keeps failing the same way defeats that,
+# and the resulting flood costs more than the missed repeat: Telegram
+# rate-limits a chat, so it buries the /setcookie prompt that is the only way
+# back.  Nothing is lost by waiting -- AUTH degradation never heals on its own,
+# and a failed /setcookie answers in the chat rather than through this path.
+ADMIN_NOTIFICATION_COOLDOWN_SEC = 900.0
+
 
 async def _run_polling(settings: Settings) -> None:
     """Run Telegram long polling and Gemini on one asyncio event loop."""
@@ -44,7 +54,19 @@ async def _run_polling(settings: Settings) -> None:
 
     application: Application[Any, Any, Any, Any, Any, Any]
 
+    admin_notifications = AdminNotificationDAO(database.connection)
+
     async def notify_admin(text: str) -> None:
+        if not await admin_notifications.claim(
+            text,
+            now=time.time(),
+            cooldown_sec=ADMIN_NOTIFICATION_COOLDOWN_SEC,
+        ):
+            LOGGER.info(
+                "Suppressed an administrator notification repeated within %.0fs",
+                ADMIN_NOTIFICATION_COOLDOWN_SEC,
+            )
+            return
         await application.bot.send_message(
             chat_id=settings.admin_user_id,
             text=text,

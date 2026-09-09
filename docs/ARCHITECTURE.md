@@ -70,6 +70,12 @@ Two behaviours worth knowing:
   `_notified_degraded_reason` tracks what has already been announced and is cleared on
   recovery. This is not tidiness: Telegram rate-limits a chat, and a stream of identical
   pages swallows the `/setcookie` prompt that is the only way out of AUTH degradation.
+- **That suppression is also durable**, because the in-memory half dies with the
+  process. `Restart=always` in front of a process that fails identically every time
+  reproduces the flood one restart at a time, so `notify_admin` additionally claims a
+  digest of each message in `admin_notifications` and drops repeats for 15 minutes.
+  Nothing is lost by waiting: AUTH degradation never heals on its own, and a failed
+  `/setcookie` answers in the chat rather than through this path.
 
 Upstream's `init()` returns success even on an unauthenticated session, so the service
 inspects `client.account_status` directly rather than relying on an exception.
@@ -175,6 +181,7 @@ SQLite via `aiosqlite`, migrated with `PRAGMA user_version`:
 | `research_tasks` | Deep Research state, including the serialised plan needed to resume polling after a restart |
 | `usage_log` | Per-request outcome, error kind, latency |
 | `telegram_user_access` | Runtime allow/deny overrides from `/allow` and `/deny` |
+| `admin_notifications` | Digest and timestamp of each administrator page, so a restart loop cannot repeat one |
 
 `ChatSession.metadata` is a `list[str | None]` and is stored as a JSON array —
 positions carry meaning, so `None` entries must be preserved rather than compacted.
