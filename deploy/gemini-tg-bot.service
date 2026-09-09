@@ -11,12 +11,17 @@ WorkingDirectory=/var/lib/gemini-tg-bot
 EnvironmentFile=/etc/gemini-tg-bot.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=GEMINI_COOKIE_PATH=/var/lib/gemini-tg-bot/cookies
+# Must agree with the field default (data/cookies, resolved against
+# WorkingDirectory) and with any GEMINI_COOKIE_PATH in the environment
+# file.  When they disagree, the session silently lives in one directory
+# while diagnostics point at the other; keeping every source on the same
+# path removes the question rather than relying on which one wins.
+Environment=GEMINI_COOKIE_PATH=/var/lib/gemini-tg-bot/data/cookies
 Environment=TMPDIR=/var/lib/gemini-tg-bot/tmp
 
 # Install the project into this venv before enabling the unit:
 #   /opt/gemini-tg-bot/.venv/bin/python -m pip install /opt/gemini-tg-bot
-ExecStartPre=/usr/bin/mkdir -p /var/lib/gemini-tg-bot/cookies /var/lib/gemini-tg-bot/data/db /var/lib/gemini-tg-bot/tmp
+ExecStartPre=/usr/bin/mkdir -p /var/lib/gemini-tg-bot/data/cookies /var/lib/gemini-tg-bot/data/db /var/lib/gemini-tg-bot/tmp
 ExecStart=/opt/gemini-tg-bot/.venv/bin/python -m gemini_tg_bot
 
 Restart=always
