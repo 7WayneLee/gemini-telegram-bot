@@ -19,6 +19,7 @@ from telegram.ext import Application
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME, Settings
 from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import GeminiService
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import AdminNotificationDAO, UsageLogDAO
@@ -119,6 +120,7 @@ async def _run_polling(settings: Settings) -> None:
             database,
             timeout_sec=settings.research_timeout_sec,
             notify=notify_research,
+            default_language=settings.default_language,
         )
         handlers = TelegramHandlers(
             service=service,
@@ -403,10 +405,30 @@ async def _run_dry_run() -> None:
         assert len(usage) == 1 and usage[0].ok is True
         assert research.submissions == [(chat_id, "dry-run topic")]
         assert research_message.replies == [
-            ("Deep Research 任務已提交：dry-run-research-task", {})
+            (
+                translate(
+                    "research.submitted",
+                    DEFAULT_LANGUAGE,
+                    task_id="dry-run-research-task",
+                ),
+                {},
+            )
         ]
         assert status_message.replies == [
-            ("Deep Research 任務狀態：\ndry-run-research-task：pending", {})
+            (
+                "\n".join(
+                    (
+                        translate("research.status_heading", DEFAULT_LANGUAGE),
+                        translate(
+                            "research.status_line",
+                            DEFAULT_LANGUAGE,
+                            task_id="dry-run-research-task",
+                            status="pending",
+                        ),
+                    )
+                ),
+                {},
+            )
         ]
     finally:
         await database.close()

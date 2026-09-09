@@ -12,6 +12,7 @@ from telegram.constants import ParseMode
 from telegram.error import RetryAfter
 
 from gemini_tg_bot.queue import RequestQueue
+from gemini_tg_bot.i18n import LANGUAGE_CHINESE, translate
 from gemini_tg_bot.telegram.sending import (
     FloodControlExceeded,
     MAX_FLOOD_WAIT_SECONDS,
@@ -393,15 +394,17 @@ async def test_thinking_elapsed_placeholder_is_throttled_and_finally_reported() 
         message,
         ThinkingSession(),
         "question",
+        language=LANGUAGE_CHINESE,
         clock=clock,
         sleep=advancing_sleep,
         extended_thinking=True,
     )
 
+    chinese_placeholder = translate("stream.placeholder", LANGUAGE_CHINESE)
     thinking_edits = [
         edit.args[0]
         for edit in placeholder.edit_text.await_args_list
-        if edit.args[0].startswith(PLACEHOLDER_TEXT)
+        if edit.args[0].startswith(chinese_placeholder)
     ]
     assert thinking_edits == ["思考中… 1 秒", "思考中… 3 秒"]
     assert len(thinking_edits) < int(clock.current)
@@ -464,13 +467,14 @@ async def test_thinking_without_answer_measures_until_stream_end() -> None:
         message,
         ThoughtsOnlySession(),
         "question",
+        language=LANGUAGE_CHINESE,
         clock=clock,
         extended_thinking=True,
     )
 
     assert placeholder.edit_text.await_args_list[-1] == call(
         "<blockquote expandable>思考過程（6 秒）\n只有思考內容</blockquote>"
-        f"\n\n{EMPTY_RESPONSE_TEXT}",
+            "\n\nGemini 未回傳文字。",
         parse_mode=ParseMode.HTML,
     )
 
@@ -490,6 +494,7 @@ async def test_long_thoughts_are_truncated_to_keep_one_message() -> None:
         message,
         session,
         "question",
+        language=LANGUAGE_CHINESE,
         clock=clock,
         sleep=AsyncMock(),
     )

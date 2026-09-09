@@ -22,6 +22,8 @@ from telegram import InputMediaPhoto
 from telegram.constants import MediaGroupLimit, MessageLimit, ParseMode
 from telegram.error import BadRequest
 
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
+
 from .sending import send_document, send_media_group, send_photo
 
 
@@ -32,9 +34,9 @@ CAPTION_LENGTH_SAFETY_MARGIN = 16
 MAX_CAPTION_VISIBLE_LENGTH = (
     MessageLimit.CAPTION_LENGTH - CAPTION_LENGTH_SAFETY_MARGIN
 )
-DEFAULT_MEDIA_PROMPT = "請分析這個檔案的內容。"
-UPLOAD_TOO_LARGE = "檔案超過 Telegram Bot API 的 20 MB 上限，無法處理。"
-UPLOAD_SIZE_UNKNOWN = "無法確認檔案大小；為避免超過 20 MB 上限，已拒絕下載。"
+DEFAULT_MEDIA_PROMPT = translate("media.default_prompt", DEFAULT_LANGUAGE)
+UPLOAD_TOO_LARGE = translate("media.too_large", DEFAULT_LANGUAGE)
+UPLOAD_SIZE_UNKNOWN = translate("media.size_unknown", DEFAULT_LANGUAGE)
 
 
 class DeliveryMode(StrEnum):
@@ -376,7 +378,12 @@ class MediaHandler:
         ]
 
     @asynccontextmanager
-    async def prepare_upload(self, message: Any) -> AsyncIterator[PreparedUpload]:
+    async def prepare_upload(
+        self,
+        message: Any,
+        *,
+        language: str = DEFAULT_LANGUAGE,
+    ) -> AsyncIterator[PreparedUpload]:
         """Download one checked Telegram photo/document and always remove it.
 
         The Telegram-provided size is validated before ``get_file`` or any
@@ -387,11 +394,14 @@ class MediaHandler:
         attachment, filename = _select_upload(message)
         file_size = getattr(attachment, "file_size", None)
         if isinstance(file_size, bool) or not isinstance(file_size, int):
-            raise UploadSizeUnknownError(UPLOAD_SIZE_UNKNOWN)
+            raise UploadSizeUnknownError(translate("media.size_unknown", language))
         if file_size > MAX_UPLOAD_BYTES:
-            raise UploadTooLargeError(UPLOAD_TOO_LARGE)
+            raise UploadTooLargeError(translate("media.too_large", language))
 
-        prompt = getattr(message, "caption", None) or DEFAULT_MEDIA_PROMPT
+        prompt = getattr(message, "caption", None) or translate(
+            "media.default_prompt",
+            language,
+        )
         with TemporaryDirectory(
             prefix="gemini-tg-upload-",
             dir=self._temp_root,

@@ -6,6 +6,12 @@ import sys
 
 import pytest
 
+from gemini_tg_bot.i18n import (
+    LANGUAGE_CHINESE,
+    LANGUAGE_ENGLISH,
+    translate,
+)
+
 
 # The task's fixed DoD spells the coverage source as this slash-separated
 # module key (without the file's .py suffix).  Loading the target under that
@@ -756,16 +762,27 @@ def test_thoughts_are_wrapped_in_an_expandable_blockquote() -> None:
     )
 
 
-def test_thoughts_seconds_title_is_the_first_expandable_line() -> None:
+@pytest.mark.parametrize(
+    ("language", "title"),
+    [
+        (LANGUAGE_ENGLISH, "Thought process (18 seconds)\n"),
+        (LANGUAGE_CHINESE, "思考過程（18 秒）\n"),
+    ],
+)
+def test_thoughts_seconds_title_is_the_first_expandable_line(
+    language: str,
+    title: str,
+) -> None:
+    """The collapsed reasoning heading must follow the active chat language."""
+
     rendered = _RENDERING.render_thoughts_blockquote(
         "Reasoning",
         budget=100,
         seconds=18.9,
+        language=language,
     )
 
-    assert rendered == (
-        "<blockquote expandable>思考過程（18 秒）\nReasoning</blockquote>"
-    )
+    assert rendered == f"<blockquote expandable>{title}Reasoning</blockquote>"
 
 
 def test_thoughts_none_seconds_preserves_existing_output() -> None:
@@ -875,8 +892,14 @@ def test_thoughts_are_truncated_with_note_inside_budget() -> None:
 
 
 def test_thoughts_with_seconds_are_truncated_inside_budget() -> None:
+    """A localized heading must still leave the reasoning inside its budget."""
+
     opening, closing = "<blockquote expandable>", "</blockquote>"
-    title = "思考過程（18 秒）\n"
+    title = translate(
+        "thoughts.title_elapsed.many",
+        LANGUAGE_ENGLISH,
+        seconds=18,
+    )
     note = _RENDERING.THOUGHTS_TRUNCATION_NOTE
     budget = len(opening) + len(title) + len(closing) + len(note) + 12
 

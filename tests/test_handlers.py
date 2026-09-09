@@ -14,6 +14,7 @@ import pytest
 from gemini_webapi import ModelOutput
 from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
+from telegram import BotCommandScopeChat
 from telegram.constants import MediaGroupLimit, ParseMode
 from telegram.error import BadRequest, RetryAfter
 
@@ -296,7 +297,7 @@ async def test_help_is_generated_for_the_stored_chat_language(
     help_text = update.effective_message.reply_text.await_args.args[0]
     assert help_text.startswith(translate("help.heading", language))
     assert (
-        f"/lang — {translate('command.lang.description', language)}"
+        f"/language — {translate('command.language.description', language)}"
         in help_text
     )
     assert help_text.endswith(translate("help.footer", language))
@@ -328,7 +329,7 @@ async def test_new_uses_the_stored_chat_language(
     )
 
 
-async def test_lang_shows_both_choices_in_the_resolved_language(
+async def test_language_shows_both_choices_in_the_resolved_language(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
@@ -336,9 +337,9 @@ async def test_lang_shows_both_choices_in_the_resolved_language(
 
     handlers, _ = handlers_factory()
     registry.get_state.return_value = _state(language=None)
-    update = _update(text="/lang", language_code="zh-hk")
+    update = _update(text="/language", language_code="zh-hk")
 
-    await handlers.lang(update, SimpleNamespace())
+    await handlers.language(update, SimpleNamespace())
 
     reply = update.effective_message.reply_text.await_args
     assert reply.args[0] == translate("lang.choose", LANGUAGE_CHINESE)
@@ -357,23 +358,61 @@ async def test_lang_shows_both_choices_in_the_resolved_language(
         (LANGUAGE_CHINESE, "正體中文"),
     ],
 )
-async def test_lang_callback_persists_the_selection(
+async def test_language_callback_persists_selection_and_chat_menu(
     handlers_factory,
     registry: AsyncMock,
     language: str,
     label: str,
 ) -> None:
-    """A keyboard choice must be durable and confirm itself in that language."""
+    """A chat-scoped menu must override Telegram's unrelated app locale."""
 
     handlers, _ = handlers_factory()
     update = _callback_update(f"lang:{language}")
+    bot = SimpleNamespace(set_my_commands=AsyncMock())
 
-    await handlers.callback(update, SimpleNamespace())
+    await handlers.callback(update, SimpleNamespace(bot=bot))
 
     registry.set_language.assert_awaited_once_with(202, language)
+    menu_call = bot.set_my_commands.await_args
+    assert {item.command for item in menu_call.args[0]} == {
+        item.command for item in PUBLIC_BOT_COMMANDS
+    }
+    assert next(
+        item.description
+        for item in menu_call.args[0]
+        if item.command == "language"
+    ) == translate("command.language.description", language)
+    assert isinstance(menu_call.kwargs["scope"], BotCommandScopeChat)
+    assert menu_call.kwargs["scope"].chat_id == 202
     update.callback_query.edit_message_text.assert_awaited_once_with(
         translate("lang.selected", language, language=label)
     )
+
+
+async def test_language_callback_keeps_selection_when_chat_menu_fails(
+    handlers_factory,
+    registry: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An optional Telegram menu failure must not roll back the chat choice."""
+
+    handlers, _ = handlers_factory()
+    update = _callback_update(f"lang:{LANGUAGE_CHINESE}")
+    bot = SimpleNamespace(
+        set_my_commands=AsyncMock(side_effect=RuntimeError("offline"))
+    )
+
+    await handlers.callback(update, SimpleNamespace(bot=bot))
+
+    registry.set_language.assert_awaited_once_with(202, LANGUAGE_CHINESE)
+    update.callback_query.edit_message_text.assert_awaited_once_with(
+        translate(
+            "lang.selected",
+            LANGUAGE_CHINESE,
+            language=translate("language.chinese", LANGUAGE_CHINESE),
+        )
+    )
+    assert "Unable to register Telegram chat command menu" in caplog.text
 
 
 async def test_new_retries_bounded_flood_control_and_succeeds(
@@ -461,7 +500,11 @@ async def test_research_submits_topic_and_immediately_replies_with_task_id(
 
     research.submit.assert_awaited_once_with(202, "orbital solar power")
     update.effective_message.reply_text.assert_awaited_once_with(
-        "Deep Research 任務已提交：research-task-123"
+        translate(
+            "research.submitted",
+            LANGUAGE_ENGLISH,
+            task_id="research-task-123",
+        )
     )
 
 
@@ -474,7 +517,7 @@ async def test_research_rejects_an_empty_topic(handlers_factory) -> None:
 
     research.submit.assert_not_awaited()
     update.effective_message.reply_text.assert_awaited_once_with(
-        "用法：/research <topic>"
+        translate("research.usage", LANGUAGE_ENGLISH)
     )
 
 
@@ -499,9 +542,23 @@ async def test_research_status_lists_only_manager_results_for_chat(
 
     research.status.assert_awaited_once_with(202)
     update.effective_message.reply_text.assert_awaited_once_with(
-        "Deep Research 任務狀態：\n"
-        "research-task-123：running\n"
-        "research-task-456：done"
+        "\n".join(
+            (
+                translate("research.status_heading", LANGUAGE_ENGLISH),
+                translate(
+                    "research.status_line",
+                    LANGUAGE_ENGLISH,
+                    task_id="research-task-123",
+                    status="running",
+                ),
+                translate(
+                    "research.status_line",
+                    LANGUAGE_ENGLISH,
+                    task_id="research-task-456",
+                    status="done",
+                ),
+            )
+        )
     )
 
 
@@ -900,7 +957,7 @@ async def test_degraded_text_request_fails_before_waiting_for_queue(
 
     service.execute.assert_not_awaited()
     update.effective_message.reply_text.assert_awaited_once_with(
-        "Gemini 服務目前處於認證失效狀態，暫時無法接受請求。"
+        translate("service.unavailable.auth", LANGUAGE_ENGLISH)
     )
 
 
@@ -927,9 +984,9 @@ async def test_setcookie_rejects_non_available_account_status(
     await handlers.setcookie_value(update, SimpleNamespace())
 
     reply = update.effective_message.reply_text.await_args.args[0]
-    assert "Cookie 更新失敗" in reply
+    assert "Cookie update failed" in reply
     assert AccountStatus.UNAUTHENTICATED.description in reply
-    assert "Cookie 已更新" not in reply
+    assert translate("admin.cookie_updated", LANGUAGE_ENGLISH) not in reply
 
 
 async def test_setcookie_success_persists_private_runtime_override(
@@ -965,7 +1022,7 @@ async def test_setcookie_success_persists_private_runtime_override(
     assert replacement_1psid not in caplog.text
     assert replacement_1psidts not in caplog.text
     update.effective_message.reply_text.assert_awaited_once_with(
-        "Cookie 已更新，Gemini 服務已熱重啟。"
+        translate("admin.cookie_updated", LANGUAGE_ENGLISH)
     )
 
 
@@ -1134,6 +1191,8 @@ async def test_status_reports_required_fields_and_does_not_expose_cookie(
     registry: AsyncMock,
     tmp_path: Path,
 ) -> None:
+    """The Chinese status view must keep every operational field secret-free."""
+
     cache_file = tmp_path / ".cached_cookies_FAKE_1PSID_FOR_TEST.json"
     cache_file.write_text("{}", encoding="utf-8")
     refresh_timestamp = datetime(2026, 9, 7, 7, 30, tzinfo=UTC).timestamp()
@@ -1167,6 +1226,7 @@ async def test_status_reports_required_fields_and_does_not_expose_cookie(
         egress_meter=egress,
         cookie_path=tmp_path,
     )
+    registry.get_state.return_value = _state(language=LANGUAGE_CHINESE)
     update = _update()
 
     await handlers.status(update, SimpleNamespace())
@@ -1187,8 +1247,12 @@ async def test_status_reports_required_fields_and_does_not_expose_cookie(
 
 async def test_status_reports_cookie_not_refreshed_when_cache_is_missing(
     handlers_factory,
+    registry: AsyncMock,
 ) -> None:
+    """A missing cache file needs a localized value instead of a blank field."""
+
     handlers, _ = handlers_factory()
+    registry.get_state.return_value = _state(language=LANGUAGE_CHINESE)
     update = _update()
 
     await handlers.status(update, SimpleNamespace())
@@ -1196,6 +1260,59 @@ async def test_status_reports_cookie_not_refreshed_when_cache_is_missing(
     assert "Cookie 最後刷新時間：尚未刷新" in (
         update.effective_message.reply_text.await_args.args[0]
     )
+
+
+@pytest.mark.parametrize(
+    ("language", "labels"),
+    [
+        (
+            LANGUAGE_ENGLISH,
+            (
+                "Current model:",
+                "Session CID:",
+                "Temporary mode:",
+                "Extended Thinking:",
+                "Service status:",
+                "Account status:",
+                "Last cookie refresh:",
+                "Queue depth:",
+                "Today's usage:",
+                "Estimated monthly egress:",
+            ),
+        ),
+        (
+            LANGUAGE_CHINESE,
+            (
+                "目前模型：",
+                "Session CID：",
+                "Temporary mode：",
+                "Extended Thinking：",
+                "服務狀態：",
+                "Account status：",
+                "Cookie 最後刷新時間：",
+                "佇列深度：",
+                "今日用量：",
+                "本月累計 egress 估算值：",
+            ),
+        ),
+    ],
+)
+async def test_status_uses_the_stored_chat_language_for_labels(
+    handlers_factory,
+    registry: AsyncMock,
+    language: str,
+    labels: tuple[str, ...],
+) -> None:
+    """Status labels must follow the chat choice, not Telegram profile hints."""
+
+    handlers, _ = handlers_factory()
+    registry.get_state.return_value = _state(language=language)
+    update = _update(language_code=("zh-tw" if language == "en" else "en"))
+
+    await handlers.status(update, SimpleNamespace())
+
+    report = update.effective_message.reply_text.await_args.args[0]
+    assert all(label in report for label in labels)
 
 
 async def test_health_reports_account_status_name_and_description(
@@ -1210,7 +1327,7 @@ async def test_health_reports_account_status_name_and_description(
 
     report = update.effective_message.reply_text.await_args.args[0]
     assert (
-        "Account status：LOCATION_REJECTED — "
+        "Account status: LOCATION_REJECTED — "
         f"{AccountStatus.LOCATION_REJECTED.description}"
     ) in report
     assert "FAKE_1PSID_FOR_TEST" not in report
@@ -1229,7 +1346,7 @@ def test_egress_meter_resets_on_calendar_month() -> None:
 def test_registration_places_auth_in_first_group(
     handlers_factory,
 ) -> None:
-    """The new public command must stay behind the authorization middleware."""
+    """Only /language should reach the authorized public command surface."""
 
     handlers, _ = handlers_factory()
     application = SimpleNamespace(add_handler=MagicMock())
@@ -1245,7 +1362,9 @@ def test_registration_places_auth_in_first_group(
         for registered in calls
         for command in getattr(registered.args[0], "commands", ())
     }
-    assert {"lang", "img", "research", "research_status"} <= registered_commands
+    assert "language" in registered_commands
+    assert "lang" not in registered_commands
+    assert {"img", "research", "research_status"} <= registered_commands
 
 
 async def test_startup_registers_public_command_menu() -> None:
@@ -1267,8 +1386,10 @@ async def test_startup_registers_public_command_menu() -> None:
     chinese_commands = menu_calls[1].args[0]
     assert menu_calls[1].kwargs == {"language_code": LANGUAGE_CHINESE}
     assert next(
-        item.description for item in chinese_commands if item.command == "lang"
-    ) == translate("command.lang.description", LANGUAGE_CHINESE)
+        item.description
+        for item in chinese_commands
+        if item.command == "language"
+    ) == translate("command.language.description", LANGUAGE_CHINESE)
     registered_commands = {item.command for item in PUBLIC_BOT_COMMANDS}
     assert registered_commands == {
         "start",
@@ -1278,7 +1399,7 @@ async def test_startup_registers_public_command_menu() -> None:
         "gem",
         "temp",
         "think",
-        "lang",
+        "language",
         "img",
         "research",
         "research_status",

@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -77,7 +83,7 @@ _PUBLIC_COMMAND_KEYS = (
     ("gem", "command.gem.description"),
     ("temp", "command.temp.description"),
     ("think", "command.think.description"),
-    ("lang", "command.lang.description"),
+    ("language", "command.language.description"),
     ("img", "command.img.description"),
     ("research", "command.research.description"),
     ("research_status", "command.research_status.description"),
@@ -110,20 +116,17 @@ HELP_TEXT = _help_text(DEFAULT_LANGUAGE)
 THINKING_ENABLED = translate("think.enabled", DEFAULT_LANGUAGE)
 THINKING_DISABLED = translate("think.disabled", DEFAULT_LANGUAGE)
 
-MODEL_LIST_UNAVAILABLE = "模型清單暫時無法取得，請稍後再試。"
-GEM_LIST_UNAVAILABLE = "Gem 清單暫時無法取得，請稍後再試。"
-SERVICE_UNAVAILABLE = "Gemini 服務目前無法接受請求，請稍後再試。"
+MODEL_LIST_UNAVAILABLE = translate("model.list_unavailable", DEFAULT_LANGUAGE)
+GEM_LIST_UNAVAILABLE = translate("gem.list_unavailable", DEFAULT_LANGUAGE)
+SERVICE_UNAVAILABLE = translate("service.unavailable", DEFAULT_LANGUAGE)
 GENERIC_FAILURE = translate("generic.failure", DEFAULT_LANGUAGE)
-ADMIN_ONLY = "此指令僅限管理員使用。"
-ADMIN_NOT_CONFIGURED = "管理員功能尚未設定。"
-COOKIE_PROMPT = (
-    "請在下一則訊息貼上兩行 cookie：第一行 __Secure-1PSID，"
-    "第二行 __Secure-1PSIDTS。該訊息收到後會立即刪除。"
-)
-COOKIE_INPUT_INVALID = "Cookie 格式無效，請重新執行 /setcookie。"
-CREDENTIALS_NOT_RELAYED = (
-    "偵測到訊息含有 Gemini 憑證，已停止處理，內容不會送往 Gemini。\n"
-    "請自行刪除該則訊息。憑證只有管理者能透過 /setcookie 套用。"
+ADMIN_ONLY = translate("admin.only", DEFAULT_LANGUAGE)
+ADMIN_NOT_CONFIGURED = translate("admin.not_configured", DEFAULT_LANGUAGE)
+COOKIE_PROMPT = translate("admin.cookie_prompt", DEFAULT_LANGUAGE)
+COOKIE_INPUT_INVALID = translate("admin.cookie_input_invalid", DEFAULT_LANGUAGE)
+CREDENTIALS_NOT_RELAYED = translate(
+    "admin.credentials_not_relayed",
+    DEFAULT_LANGUAGE,
 )
 
 # The opening of a real Gemini session cookie.  Matching the value rather than
@@ -139,9 +142,9 @@ def _looks_like_credentials(text: str | None) -> bool:
     """Report whether a message carries Gemini credential material."""
 
     return bool(text) and _CREDENTIAL_VALUE_RE.search(text) is not None
-RESEARCH_USAGE = "用法：/research <topic>"
-RESEARCH_UNAVAILABLE = "Deep Research 服務目前無法使用，請稍後再試。"
-IMAGE_USAGE = "用法：/img <prompt>"
+RESEARCH_USAGE = translate("research.usage", DEFAULT_LANGUAGE)
+RESEARCH_UNAVAILABLE = translate("research.unavailable", DEFAULT_LANGUAGE)
+IMAGE_USAGE = translate("image.usage", DEFAULT_LANGUAGE)
 IMAGE_GENERATION_PREFIX = (
     "Generate an original AI image based on the following request. "
     "Do not search for or return existing web images:"
@@ -253,7 +256,7 @@ class TelegramHandlers:
             _stored_language(state),
             _telegram_language_code(update),
         )
-        await send_text_or_busy(message, _help_text(language))
+        await send_text_or_busy(message, _help_text(language), language=language)
 
     async def help(self, update: Update, context: CallbackContext) -> None:
         """Alias for :meth:`start`."""
@@ -274,7 +277,11 @@ class TelegramHandlers:
             _telegram_language_code(update),
         )
         await self._sessions.reset(chat_id)
-        await send_text_or_busy(message, translate("new.started", language))
+        await send_text_or_busy(
+            message,
+            translate("new.started", language),
+            language=language,
+        )
 
     async def model(self, update: Update, context: CallbackContext) -> None:
         """Dynamically list currently available upstream models."""
@@ -283,7 +290,8 @@ class TelegramHandlers:
         identity = _message_identity(update)
         if identity is None:
             return
-        user_id, _, message = identity
+        user_id, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
 
         try:
             self._ensure_service_accepting_requests()
@@ -292,17 +300,29 @@ class TelegramHandlers:
                     lambda client: client.list_models()
                 )
         except RateLimitExceeded as error:
-            await _reply_rate_limited(message, error)
+            await _reply_rate_limited(message, error, language)
             return
         except QueueAcquireTimeout:
-            await send_text_or_busy(message, SERVICE_BUSY)
+            await send_text_or_busy(
+                message,
+                translate("generic.service_busy", language),
+                language=language,
+            )
             return
         except ServiceUnavailableError as error:
-            await send_text_or_busy(message, _service_unavailable_message(error))
+            await send_text_or_busy(
+                message,
+                _service_unavailable_message(error, language),
+                language=language,
+            )
             return
         except Exception as error:
             _log_handler_error("model list", error)
-            await send_text_or_busy(message, MODEL_LIST_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("model.list_unavailable", language),
+                language=language,
+            )
             return
 
         buttons: list[list[InlineKeyboardButton]] = []
@@ -327,11 +347,16 @@ class TelegramHandlers:
                 )
 
         if not buttons:
-            await send_text_or_busy(message, MODEL_LIST_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("model.list_unavailable", language),
+                language=language,
+            )
             return
         await send_text_or_busy(
             message,
-            "請選擇模型：",
+            translate("model.choose", language),
+            language=language,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -342,7 +367,8 @@ class TelegramHandlers:
         identity = _message_identity(update)
         if identity is None:
             return
-        user_id, _, message = identity
+        user_id, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
 
         try:
             self._ensure_service_accepting_requests()
@@ -351,17 +377,29 @@ class TelegramHandlers:
                     lambda client: client.fetch_gems(include_hidden=False)
                 )
         except RateLimitExceeded as error:
-            await _reply_rate_limited(message, error)
+            await _reply_rate_limited(message, error, language)
             return
         except QueueAcquireTimeout:
-            await send_text_or_busy(message, SERVICE_BUSY)
+            await send_text_or_busy(
+                message,
+                translate("generic.service_busy", language),
+                language=language,
+            )
             return
         except ServiceUnavailableError as error:
-            await send_text_or_busy(message, _service_unavailable_message(error))
+            await send_text_or_busy(
+                message,
+                _service_unavailable_message(error, language),
+                language=language,
+            )
             return
         except Exception as error:
             _log_handler_error("gem list", error)
-            await send_text_or_busy(message, GEM_LIST_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("gem.list_unavailable", language),
+                language=language,
+            )
             return
 
         buttons: list[list[InlineKeyboardButton]] = []
@@ -379,11 +417,16 @@ class TelegramHandlers:
                 )
 
         if not buttons:
-            await send_text_or_busy(message, GEM_LIST_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("gem.list_unavailable", language),
+                language=language,
+            )
             return
         await send_text_or_busy(
             message,
-            "請選擇 Gem：",
+            translate("gem.choose", language),
+            language=language,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -396,10 +439,18 @@ class TelegramHandlers:
             return
         _, chat_id, message = identity
         state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
         enabled = not state.temporary
         await self._sessions.set_temporary(chat_id, enabled)
-        label = "開啟" if enabled else "關閉"
-        await send_text_or_busy(message, f"Temporary mode 已{label}。")
+        key = "temp.enabled" if enabled else "temp.disabled"
+        await send_text_or_busy(
+            message,
+            translate(key, language),
+            language=language,
+        )
 
     async def think(self, update: Update, context: CallbackContext) -> None:
         """Toggle the persisted extended-thinking setting for this chat."""
@@ -417,11 +468,19 @@ class TelegramHandlers:
         enabled = not state.extended_thinking
         await self._sessions.set_extended_thinking(chat_id, enabled)
         if enabled:
-            await send_text_or_busy(message, translate("think.enabled", language))
+            await send_text_or_busy(
+                message,
+                translate("think.enabled", language),
+                language=language,
+            )
             return
-        await send_text_or_busy(message, translate("think.disabled", language))
+        await send_text_or_busy(
+            message,
+            translate("think.disabled", language),
+            language=language,
+        )
 
-    async def lang(self, update: Update, context: CallbackContext) -> None:
+    async def language(self, update: Update, context: CallbackContext) -> None:
         """Offer the supported per-chat interface languages."""
 
         del context
@@ -437,7 +496,7 @@ class TelegramHandlers:
         buttons = [
             [
                 InlineKeyboardButton(
-                    "English",
+                    translate("language.english", LANGUAGE_ENGLISH),
                     callback_data=(
                         f"{LANGUAGE_CALLBACK_PREFIX}{LANGUAGE_ENGLISH}"
                     ),
@@ -445,7 +504,7 @@ class TelegramHandlers:
             ],
             [
                 InlineKeyboardButton(
-                    "正體中文",
+                    translate("language.chinese", LANGUAGE_CHINESE),
                     callback_data=(
                         f"{LANGUAGE_CALLBACK_PREFIX}{LANGUAGE_CHINESE}"
                     ),
@@ -455,6 +514,7 @@ class TelegramHandlers:
         await send_text_or_busy(
             message,
             translate("lang.choose", language),
+            language=language,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -467,10 +527,14 @@ class TelegramHandlers:
             return
         _, chat_id, message = identity
         state = await self._sessions.get_state(chat_id)
+        language = resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
         health = self._service.health
         refresh_time = self._cookie_last_refresh()
         refresh_label = (
-            "尚未刷新"
+            translate("status.not_refreshed", language)
             if refresh_time is None
             else refresh_time.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         )
@@ -480,26 +544,71 @@ class TelegramHandlers:
             if health.degraded_reason is None
             else f" ({health.degraded_reason.value})"
         )
-        temporary = "開啟" if state.temporary else "關閉"
-        thinking = "開啟" if state.extended_thinking else "關閉"
+        temporary = translate(
+            "status.on" if state.temporary else "status.off",
+            language,
+        )
+        thinking = translate(
+            "status.on" if state.extended_thinking else "status.off",
+            language,
+        )
         await send_text_or_busy(
             message,
             "\n".join(
                 (
-                    f"目前模型：{state.model or '帳號預設'}",
-                    f"Session CID：{state.cid or '尚未建立'}",
-                    f"Temporary mode：{temporary}",
-                    f"Extended Thinking：{thinking}",
-                    f"服務狀態：{health.state.value}{reason}",
-                    "Account status："
-                    f"{_account_status_label(getattr(health, 'account_status', None))}",
-                    f"Cookie 最後刷新時間：{refresh_label}",
-                    f"佇列深度：{self._request_queue.queue_depth}",
-                    f"今日用量：{today_usage}",
-                    "本月累計 egress 估算值："
-                    f"{_format_bytes(self._egress_meter.month_to_date_bytes)}",
+                    translate(
+                        "status.model",
+                        language,
+                        model=state.model
+                        or translate("status.account_default", language),
+                    ),
+                    translate(
+                        "status.session_cid",
+                        language,
+                        cid=state.cid
+                        or translate("status.session_missing", language),
+                    ),
+                    translate("status.temporary", language, state=temporary),
+                    translate("status.thinking", language, state=thinking),
+                    translate(
+                        "status.service",
+                        language,
+                        state=health.state.value,
+                        reason=reason,
+                    ),
+                    translate(
+                        "status.account",
+                        language,
+                        status=_account_status_label(
+                            getattr(health, "account_status", None),
+                            language,
+                        ),
+                    ),
+                    translate(
+                        "status.cookie_refreshed",
+                        language,
+                        time=refresh_label,
+                    ),
+                    translate(
+                        "status.queue_depth",
+                        language,
+                        depth=self._request_queue.queue_depth,
+                    ),
+                    translate(
+                        "status.today_usage",
+                        language,
+                        usage=today_usage,
+                    ),
+                    translate(
+                        "status.monthly_egress",
+                        language,
+                        egress=_format_bytes(
+                            self._egress_meter.month_to_date_bytes
+                        ),
+                    ),
                 )
-            )
+            ),
+            language=language,
         )
 
     async def research(self, update: Update, context: CallbackContext) -> None:
@@ -509,24 +618,45 @@ class TelegramHandlers:
         if identity is None:
             return
         _, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
         prompt = _command_prompt(context)
         if prompt is None:
-            await send_text_or_busy(message, RESEARCH_USAGE)
+            await send_text_or_busy(
+                message,
+                translate("research.usage", language),
+                language=language,
+            )
             return
         if self._research is None:
-            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("research.unavailable", language),
+                language=language,
+            )
             return
 
         try:
             task_id = await self._research.submit(chat_id, prompt)
         except ValueError:
-            await send_text_or_busy(message, RESEARCH_USAGE)
+            await send_text_or_busy(
+                message,
+                translate("research.usage", language),
+                language=language,
+            )
             return
         except Exception as error:
             _log_handler_error("research submission", error)
-            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("research.unavailable", language),
+                language=language,
+            )
             return
-        await send_text_or_busy(message, f"Deep Research 任務已提交：{task_id}")
+        await send_text_or_busy(
+            message,
+            translate("research.submitted", language, task_id=task_id),
+            language=language,
+        )
 
     async def img(self, update: Update, context: CallbackContext) -> None:
         """Generate an image through the existing streaming media path."""
@@ -535,9 +665,14 @@ class TelegramHandlers:
         if identity is None:
             return
         prompt = _command_prompt(context)
-        message = identity[2]
+        _, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
         if prompt is None:
-            await send_text_or_busy(message, IMAGE_USAGE)
+            await send_text_or_busy(
+                message,
+                translate("image.usage", language),
+                language=language,
+            )
             return
 
         await self._stream_prompt(
@@ -558,23 +693,44 @@ class TelegramHandlers:
         if identity is None:
             return
         _, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
         if self._research is None:
-            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("research.unavailable", language),
+                language=language,
+            )
             return
 
         try:
             tasks = await self._research.status(chat_id)
         except Exception as error:
             _log_handler_error("research status", error)
-            await send_text_or_busy(message, RESEARCH_UNAVAILABLE)
+            await send_text_or_busy(
+                message,
+                translate("research.unavailable", language),
+                language=language,
+            )
             return
         if not tasks:
-            await send_text_or_busy(message, "目前沒有 Deep Research 任務。")
+            await send_text_or_busy(
+                message,
+                translate("research.none", language),
+                language=language,
+            )
             return
 
-        lines = ["Deep Research 任務狀態："]
-        lines.extend(f"{task.task_id}：{task.status.value}" for task in tasks)
-        await send_text_or_busy(message, "\n".join(lines))
+        lines = [translate("research.status_heading", language)]
+        lines.extend(
+            translate(
+                "research.status_line",
+                language,
+                task_id=task.task_id,
+                status=task.status.value,
+            )
+            for task in tasks
+        )
+        await send_text_or_busy(message, "\n".join(lines), language=language)
 
     async def admin_command(
         self,
@@ -605,9 +761,14 @@ class TelegramHandlers:
         identity = await self._require_admin(update)
         if identity is None:
             return
-        user_id, _, message = identity
+        user_id, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
         self._awaiting_cookie_users.add(user_id)
-        await send_text_or_busy(message, COOKIE_PROMPT)
+        await send_text_or_busy(
+            message,
+            translate("admin.cookie_prompt", language),
+            language=language,
+        )
 
     async def setcookie_value(
         self,
@@ -620,7 +781,8 @@ class TelegramHandlers:
         identity = await self._require_admin(update)
         if identity is None:
             return
-        user_id, _, message = identity
+        user_id, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
         if user_id not in self._awaiting_cookie_users:
             return
 
@@ -631,14 +793,19 @@ class TelegramHandlers:
             _log_handler_error("credential message deletion", error)
             await send_text_or_busy(
                 message,
-                "無法刪除含憑證的訊息；未套用 Cookie，請稍後再試。"
+                translate("admin.credential_delete_failed", language),
+                language=language,
             )
             return
 
         self._awaiting_cookie_users.discard(user_id)
         credentials = _parse_cookie_credentials(message.text)
         if credentials is None:
-            await send_text_or_busy(message, COOKIE_INPUT_INVALID)
+            await send_text_or_busy(
+                message,
+                translate("admin.cookie_input_invalid", language),
+                language=language,
+            )
             return
 
         secure_1psid, secure_1psidts = credentials
@@ -651,16 +818,20 @@ class TelegramHandlers:
             _log_handler_error("Gemini client hot restart", error)
             await send_text_or_busy(
                 message,
-                "Cookie 更新失敗，Gemini 服務尚未恢復。\n"
-                f"{account_status_guidance(error.status)}",
+                translate(
+                    "admin.cookie_update_guidance",
+                    language,
+                    guidance=account_status_guidance(error.status, language),
+                ),
+                language=language,
             )
             return
         except Exception as error:
             _log_handler_error("Gemini client hot restart", error)
             await send_text_or_busy(
                 message,
-                "Cookie 更新失敗，Gemini 服務尚未恢復。"
-                "請重新執行 /setcookie。"
+                translate("admin.cookie_update_failed", language),
+                language=language,
             )
             return
 
@@ -671,12 +842,17 @@ class TelegramHandlers:
         )
         if account_status is not AccountStatus.AVAILABLE:
             if isinstance(account_status, AccountStatus):
-                guidance = account_status_guidance(account_status)
+                guidance = account_status_guidance(account_status, language)
             else:
-                guidance = "Gemini 帳號狀態無法確認，請稍後重試。"
+                guidance = translate("admin.account_status_unknown", language)
             await send_text_or_busy(
                 message,
-                f"Cookie 更新失敗，Gemini 服務尚未恢復。\n{guidance}",
+                translate(
+                    "admin.cookie_update_guidance",
+                    language,
+                    guidance=guidance,
+                ),
+                language=language,
             )
             return
 
@@ -691,13 +867,14 @@ class TelegramHandlers:
             _log_handler_error("runtime credential persistence", error)
             await send_text_or_busy(
                 message,
-                "Cookie 已套用且 Gemini 服務已恢復，"
-                "但無法保存供重啟使用；請重新執行 /setcookie。",
+                translate("admin.cookie_persist_failed", language),
+                language=language,
             )
             return
         await send_text_or_busy(
             message,
-            "Cookie 已更新，Gemini 服務已熱重啟。",
+            translate("admin.cookie_updated", language),
+            language=language,
         )
 
     async def allow(self, update: Update, context: CallbackContext) -> None:
@@ -706,10 +883,15 @@ class TelegramHandlers:
         identity = await self._require_admin(update)
         if identity is None:
             return
+        language = await self._chat_language(update, identity[1])
         target_user_id = _command_user_id(context)
         message = identity[2]
         if target_user_id is None:
-            await send_text_or_busy(message, "用法：/allow <user_id>")
+            await send_text_or_busy(
+                message,
+                translate("admin.allow_usage", language),
+                language=language,
+            )
             return
         assert self._auth is not None
         try:
@@ -718,10 +900,15 @@ class TelegramHandlers:
             _log_handler_error("allowlist write", error)
             await send_text_or_busy(
                 message,
-                "白名單更新失敗，請稍後再試。",
+                translate("admin.allowlist_update_failed", language),
+                language=language,
             )
             return
-        await send_text_or_busy(message, f"已允許使用者 {target_user_id}。")
+        await send_text_or_busy(
+            message,
+            translate("admin.allowed", language, user_id=target_user_id),
+            language=language,
+        )
 
     async def deny(self, update: Update, context: CallbackContext) -> None:
         """Persist a deny decision that takes effect immediately."""
@@ -729,10 +916,15 @@ class TelegramHandlers:
         identity = await self._require_admin(update)
         if identity is None:
             return
+        language = await self._chat_language(update, identity[1])
         target_user_id = _command_user_id(context)
         message = identity[2]
         if target_user_id is None:
-            await send_text_or_busy(message, "用法：/deny <user_id>")
+            await send_text_or_busy(
+                message,
+                translate("admin.deny_usage", language),
+                language=language,
+            )
             return
         assert self._auth is not None
         try:
@@ -741,10 +933,15 @@ class TelegramHandlers:
             _log_handler_error("denylist write", error)
             await send_text_or_busy(
                 message,
-                "白名單更新失敗，請稍後再試。",
+                translate("admin.allowlist_update_failed", language),
+                language=language,
             )
             return
-        await send_text_or_busy(message, f"已拒絕使用者 {target_user_id}。")
+        await send_text_or_busy(
+            message,
+            translate("admin.denied", language, user_id=target_user_id),
+            language=language,
+        )
 
     async def health(self, update: Update, context: CallbackContext) -> None:
         """Report secret-free client, recent-error, and database health."""
@@ -754,49 +951,81 @@ class TelegramHandlers:
         if identity is None:
             return
         message = identity[2]
+        language = await self._chat_language(update, identity[1])
         health = self._service.health
         last_error_kind = health.last_error_kind
         last_error_type = health.last_error_type
         if last_error_kind is None and last_error_type is None:
-            last_error = "無"
+            last_error = translate("health.none", language)
         else:
             kind = getattr(last_error_kind, "value", last_error_kind)
             last_error = f"{kind or 'unknown'} ({last_error_type or 'unknown'})"
         database_state = "healthy" if await self._database_healthy() else "unavailable"
-        accepting = "是" if health.accepting_requests else "否"
+        accepting = translate(
+            "health.yes" if health.accepting_requests else "health.no",
+            language,
+        )
         await send_text_or_busy(
             message,
             "\n".join(
                 (
-                    f"Client 狀態：{health.state.value}",
-                    "Account status："
-                    f"{_account_status_label(getattr(health, 'account_status', None))}",
-                    f"接受請求：{accepting}",
-                    f"最近錯誤：{last_error}",
-                    f"DB 狀態：{database_state}",
+                    translate(
+                        "health.client",
+                        language,
+                        state=health.state.value,
+                    ),
+                    translate(
+                        "health.account",
+                        language,
+                        status=_account_status_label(
+                            getattr(health, "account_status", None),
+                            language,
+                        ),
+                    ),
+                    translate(
+                        "health.accepting",
+                        language,
+                        accepting=accepting,
+                    ),
+                    translate(
+                        "health.last_error",
+                        language,
+                        error=last_error,
+                    ),
+                    translate(
+                        "health.database",
+                        language,
+                        state=database_state,
+                    ),
                 )
-            )
+            ),
+            language=language,
         )
 
     async def callback(self, update: Update, context: CallbackContext) -> None:
         """Apply a model, Gem, or language selected by an inline keyboard."""
 
-        del context
         query = update.callback_query
         user = update.effective_user
         chat = update.effective_chat
         if query is None or user is None or chat is None:
             return
+        language = await self._chat_language(update, chat.id)
         try:
             await answer_callback(query)
         except FloodControlExceeded:
-            await edit_message_text_or_busy(query, SERVICE_BUSY)
+            await edit_message_text_or_busy(
+                query,
+                translate("generic.service_busy", language),
+                language=language,
+            )
             return
         data = query.data
         if not isinstance(data, str) or not _valid_callback_data(data):
             await edit_message_text_or_busy(
                 query,
-                "無效的選項，請重新執行指令。",
+                translate("generic.invalid_option", language),
+                language=language,
             )
             return
 
@@ -806,6 +1035,7 @@ class TelegramHandlers:
                 user_id=user.id,
                 chat_id=chat.id,
                 model_name=data[len(MODEL_CALLBACK_PREFIX) :],
+                language=language,
             )
         elif data.startswith(GEM_CALLBACK_PREFIX):
             await self._select_gem(
@@ -813,25 +1043,36 @@ class TelegramHandlers:
                 user_id=user.id,
                 chat_id=chat.id,
                 gem_id=data[len(GEM_CALLBACK_PREFIX) :],
+                language=language,
             )
         elif data.startswith(LANGUAGE_CALLBACK_PREFIX):
-            language = data[len(LANGUAGE_CALLBACK_PREFIX) :]
-            if language not in (LANGUAGE_ENGLISH, LANGUAGE_CHINESE):
-                state = await self._sessions.get_state(chat.id)
-                current_language = resolve_language(
-                    _stored_language(state),
-                    _telegram_language_code(update),
-                )
+            selected_language = data[len(LANGUAGE_CALLBACK_PREFIX) :]
+            if selected_language not in (LANGUAGE_ENGLISH, LANGUAGE_CHINESE):
                 await edit_message_text_or_busy(
                     query,
-                    translate("lang.invalid", current_language),
+                    translate("lang.invalid", language),
+                    language=language,
                 )
                 return
-            await self._sessions.set_language(chat.id, language)
-            label = "English" if language == LANGUAGE_ENGLISH else "正體中文"
+            await self._sessions.set_language(chat.id, selected_language)
+            await self._set_chat_command_menu(
+                getattr(context, "bot", None),
+                chat.id,
+                selected_language,
+            )
+            label_key = (
+                "language.english"
+                if selected_language == LANGUAGE_ENGLISH
+                else "language.chinese"
+            )
             await edit_message_text_or_busy(
                 query,
-                translate("lang.selected", language, language=label),
+                translate(
+                    "lang.selected",
+                    selected_language,
+                    language=translate(label_key, selected_language),
+                ),
+                language=selected_language,
             )
 
     async def text_message(
@@ -887,6 +1128,7 @@ class TelegramHandlers:
                         stream_message,
                         session,
                         prompt,
+                        language=language,
                         temporary=state.temporary,
                         extended_thinking=state.extended_thinking,
                         flood_wait=permit.wait_for_flood_control,
@@ -923,24 +1165,37 @@ class TelegramHandlers:
             ok = True
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
-            await _reply_rate_limited(message, error)
+            await _reply_rate_limited(message, error, language)
         except FloodControlExceeded as error:
             error_kind = "flood_control"
             _log_handler_error("Telegram flood control", error)
-            await send_text_or_busy(message, SERVICE_BUSY)
+            await send_text_or_busy(
+                message,
+                translate("generic.service_busy", language),
+                language=language,
+            )
         except QueueAcquireTimeout as error:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
-            await send_text_or_busy(message, SERVICE_BUSY)
+            await send_text_or_busy(
+                message,
+                translate("generic.service_busy", language),
+                language=language,
+            )
         except ServiceUnavailableError as error:
             error_kind = "unavailable"
-            await send_text_or_busy(message, _service_unavailable_message(error))
+            await send_text_or_busy(
+                message,
+                _service_unavailable_message(error, language),
+                language=language,
+            )
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("text message", error)
             await send_text_or_busy(
                 message,
                 translate("generic.failure", language),
+                language=language,
             )
         finally:
             await self._record_usage(
@@ -990,7 +1245,10 @@ class TelegramHandlers:
 
         try:
             self._ensure_service_accepting_requests()
-            async with self._media.prepare_upload(message) as upload:
+            async with self._media.prepare_upload(
+                message,
+                language=language,
+            ) as upload:
                 async with self._request_queue.request(user_id):
                     session = await self._sessions.get_or_create(chat_id)
                     output = await self._service.execute(
@@ -1003,31 +1261,44 @@ class TelegramHandlers:
                     )
                 self._media.record_upload(upload)
             await self._sessions.persist(chat_id, session)
-            await self._reply_output(message, output)
+            await self._reply_output(message, output, language=language)
             ok = True
         except MediaUploadError as error:
             error_kind = "media_rejected"
-            await send_text_or_busy(message, str(error))
+            await send_text_or_busy(message, str(error), language=language)
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
-            await _reply_rate_limited(message, error)
+            await _reply_rate_limited(message, error, language)
         except FloodControlExceeded as error:
             error_kind = "flood_control"
             _log_handler_error("Telegram flood control", error)
-            await send_text_or_busy(message, SERVICE_BUSY)
+            await send_text_or_busy(
+                message,
+                translate("generic.service_busy", language),
+                language=language,
+            )
         except QueueAcquireTimeout as error:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
-            await send_text_or_busy(message, SERVICE_BUSY)
+            await send_text_or_busy(
+                message,
+                translate("generic.service_busy", language),
+                language=language,
+            )
         except ServiceUnavailableError as error:
             error_kind = "unavailable"
-            await send_text_or_busy(message, _service_unavailable_message(error))
+            await send_text_or_busy(
+                message,
+                _service_unavailable_message(error, language),
+                language=language,
+            )
         except Exception as error:
             error_kind = classify_error(error).value
             _log_handler_error("media message", error)
             await send_text_or_busy(
                 message,
                 translate("generic.failure", language),
+                language=language,
             )
         finally:
             await self._record_usage(
@@ -1039,14 +1310,20 @@ class TelegramHandlers:
                 latency_ms=round((time.monotonic() - started) * 1000),
             )
 
-    async def _reply_output(self, message: Any, output: Any) -> None:
+    async def _reply_output(
+        self,
+        message: Any,
+        output: Any,
+        *,
+        language: str,
+    ) -> None:
         rendered_chunks = render_markdown_chunks(output.text)
         images = getattr(output, "images", ())
         caption = _caption_from_chunks(rendered_chunks) if images else None
         if images and (caption is not None or not rendered_chunks):
             await self._reply_output_images(message, output, caption=caption)
             return
-        await _reply_rendered_chunks(message, rendered_chunks)
+        await _reply_rendered_chunks(message, rendered_chunks, language=language)
         await self._reply_output_images(message, output)
 
     async def _reply_streamed_output_images(
@@ -1110,11 +1387,13 @@ class TelegramHandlers:
         user_id: int,
         chat_id: int,
         model_name: str,
+        language: str,
     ) -> None:
         if not model_name:
             await edit_message_text_or_busy(
                 query,
-                "無效的模型，請重新執行 /model。",
+                translate("model.invalid", language),
+                language=language,
             )
             return
 
@@ -1132,32 +1411,47 @@ class TelegramHandlers:
             async with self._request_queue.request(user_id):
                 selected = await self._service.execute(resolve)
         except RateLimitExceeded as error:
-            await edit_message_text_or_busy(query, _rate_limit_message(error))
+            await edit_message_text_or_busy(
+                query,
+                _rate_limit_message(error, language),
+                language=language,
+            )
             return
         except QueueAcquireTimeout:
-            await edit_message_text_or_busy(query, SERVICE_BUSY)
+            await edit_message_text_or_busy(
+                query,
+                translate("generic.service_busy", language),
+                language=language,
+            )
             return
         except ServiceUnavailableError as error:
             await edit_message_text_or_busy(
                 query,
-                _service_unavailable_message(error),
+                _service_unavailable_message(error, language),
+                language=language,
             )
             return
         except Exception as error:
             _log_handler_error("model selection", error)
-            await edit_message_text_or_busy(query, MODEL_LIST_UNAVAILABLE)
+            await edit_message_text_or_busy(
+                query,
+                translate("model.list_unavailable", language),
+                language=language,
+            )
             return
 
         if selected is None:
             await edit_message_text_or_busy(
                 query,
-                "此模型已無法使用，請重新執行 /model。",
+                translate("model.unavailable", language),
+                language=language,
             )
             return
         await self._sessions.set_model(chat_id, selected.model_name)
         await edit_message_text_or_busy(
             query,
-            f"已選擇模型：{selected.display_name}",
+            translate("model.selected", language, model=selected.display_name),
+            language=language,
         )
 
     async def _select_gem(
@@ -1167,11 +1461,13 @@ class TelegramHandlers:
         user_id: int,
         chat_id: int,
         gem_id: str,
+        language: str,
     ) -> None:
         if not gem_id:
             await edit_message_text_or_busy(
                 query,
-                "無效的 Gem，請重新執行 /gem。",
+                translate("gem.invalid", language),
+                language=language,
             )
             return
 
@@ -1182,31 +1478,75 @@ class TelegramHandlers:
                     lambda client: client.fetch_gems(include_hidden=False)
                 )
         except RateLimitExceeded as error:
-            await edit_message_text_or_busy(query, _rate_limit_message(error))
+            await edit_message_text_or_busy(
+                query,
+                _rate_limit_message(error, language),
+                language=language,
+            )
             return
         except QueueAcquireTimeout:
-            await edit_message_text_or_busy(query, SERVICE_BUSY)
+            await edit_message_text_or_busy(
+                query,
+                translate("generic.service_busy", language),
+                language=language,
+            )
             return
         except ServiceUnavailableError as error:
             await edit_message_text_or_busy(
                 query,
-                _service_unavailable_message(error),
+                _service_unavailable_message(error, language),
+                language=language,
             )
             return
         except Exception as error:
             _log_handler_error("gem selection", error)
-            await edit_message_text_or_busy(query, GEM_LIST_UNAVAILABLE)
+            await edit_message_text_or_busy(
+                query,
+                translate("gem.list_unavailable", language),
+                language=language,
+            )
             return
 
         selected = None if gem_jar is None else gem_jar.get(id=gem_id)
         if selected is None:
             await edit_message_text_or_busy(
                 query,
-                "此 Gem 已無法使用，請重新執行 /gem。",
+                translate("gem.unavailable", language),
+                language=language,
             )
             return
         await self._sessions.set_gem(chat_id, selected.id)
-        await edit_message_text_or_busy(query, f"已選擇 Gem：{selected.name}")
+        await edit_message_text_or_busy(
+            query,
+            translate("gem.selected", language, gem=selected.name),
+            language=language,
+        )
+
+    async def _chat_language(self, update: Update, chat_id: int) -> str:
+        state = await self._sessions.get_state(chat_id)
+        return resolve_language(
+            _stored_language(state),
+            _telegram_language_code(update),
+        )
+
+    async def _set_chat_command_menu(
+        self,
+        bot: Any,
+        chat_id: int,
+        language: str,
+    ) -> None:
+        try:
+            await call_telegram(
+                bot.set_my_commands,
+                _commands_for_language(language),
+                scope=BotCommandScopeChat(chat_id=chat_id),
+            )
+        except Exception as error:
+            LOGGER.warning(
+                "Unable to register Telegram chat command menu for chat %s (%s)",
+                chat_id,
+                type(error).__name__,
+            )
 
     def _cookie_last_refresh(self) -> datetime | None:
         cache_file = self._cookie_path / (
@@ -1283,7 +1623,7 @@ class TelegramHandlers:
         instead -- which deletes the message before doing anything else.
         """
 
-        user_id, _, message = identity
+        user_id, chat_id, message = identity
         is_admin = False
         if self._auth is not None:
             try:
@@ -1294,7 +1634,12 @@ class TelegramHandlers:
             self._awaiting_cookie_users.add(user_id)
             await self.setcookie_value(update, context)
             return
-        await send_text_or_busy(message, CREDENTIALS_NOT_RELAYED)
+        language = await self._chat_language(update, chat_id)
+        await send_text_or_busy(
+            message,
+            translate("admin.credentials_not_relayed", language),
+            language=language,
+        )
 
     async def _require_admin(
         self,
@@ -1303,16 +1648,25 @@ class TelegramHandlers:
         identity = _message_identity(update)
         if identity is None:
             return None
-        user_id, _, message = identity
+        user_id, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
         if self._auth is None:
-            await send_text_or_busy(message, ADMIN_NOT_CONFIGURED)
+            await send_text_or_busy(
+                message,
+                translate("admin.not_configured", language),
+                language=language,
+            )
             return None
         try:
             is_admin = self._auth.is_admin(user_id)
         except ValueError:
             is_admin = False
         if not is_admin:
-            await send_text_or_busy(message, ADMIN_ONLY)
+            await send_text_or_busy(
+                message,
+                translate("admin.only", language),
+                language=language,
+            )
             return None
         return identity
 
@@ -1343,7 +1697,7 @@ def register_handlers(
     application.add_handler(CommandHandler("gem", handlers.gem))
     application.add_handler(CommandHandler("temp", handlers.temp))
     application.add_handler(CommandHandler("think", handlers.think))
-    application.add_handler(CommandHandler("lang", handlers.lang))
+    application.add_handler(CommandHandler("language", handlers.language))
     application.add_handler(CommandHandler("status", handlers.status))
     application.add_handler(CommandHandler("img", handlers.img))
     application.add_handler(CommandHandler("research", handlers.research))
@@ -1474,16 +1828,39 @@ def _valid_callback_data(value: str) -> bool:
     return bool(value) and len(value.encode("utf-8")) <= CALLBACK_DATA_LIMIT
 
 
-async def _reply_rendered(message: Any, markdown: str) -> None:
-    await _reply_rendered_chunks(message, render_markdown_chunks(markdown))
+async def _reply_rendered(
+    message: Any,
+    markdown: str,
+    *,
+    language: str = DEFAULT_LANGUAGE,
+) -> None:
+    await _reply_rendered_chunks(
+        message,
+        render_markdown_chunks(markdown),
+        language=language,
+    )
 
 
-async def _reply_rendered_chunks(message: Any, chunks: list[str]) -> None:
+async def _reply_rendered_chunks(
+    message: Any,
+    chunks: list[str],
+    *,
+    language: str = DEFAULT_LANGUAGE,
+) -> None:
     if not chunks:
-        await send_text_or_busy(message, "Gemini 未回傳文字。")
+        await send_text_or_busy(
+            message,
+            translate("generic.empty_response", language),
+            language=language,
+        )
         return
     for chunk in chunks:
-        await send_text_or_busy(message, chunk, parse_mode=ParseMode.HTML)
+        await send_text_or_busy(
+            message,
+            chunk,
+            language=language,
+            parse_mode=ParseMode.HTML,
+        )
 
 
 def _caption_from_chunks(chunks: list[str]) -> str | None:
@@ -1502,27 +1879,49 @@ async def _delete_placeholder(placeholder: Any | None) -> None:
         _log_handler_error("stream placeholder deletion", error)
 
 
-def _account_status_label(status: Any) -> str:
+def _account_status_label(
+    status: Any,
+    language: str = DEFAULT_LANGUAGE,
+) -> str:
     if isinstance(status, AccountStatus):
         return f"{status.name} — {status.description}"
-    return "尚未完成初始化"
+    return translate("account.not_initialized", language)
 
 
-def _service_unavailable_message(error: ServiceUnavailableError) -> str:
+def _service_unavailable_message(
+    error: ServiceUnavailableError,
+    language: str = DEFAULT_LANGUAGE,
+) -> str:
     if error.degraded_reason is DegradedReason.AUTH:
-        return "Gemini 服務目前處於認證失效狀態，暫時無法接受請求。"
+        return translate("service.unavailable.auth", language)
     if error.degraded_reason is DegradedReason.BLOCKED:
-        return "Gemini 服務目前處於暫時受限狀態，將在冷卻後自動重試。"
-    return SERVICE_UNAVAILABLE
+        return translate("service.unavailable.blocked", language)
+    return translate("service.unavailable", language)
 
 
-def _rate_limit_message(error: RateLimitExceeded) -> str:
+def _rate_limit_message(
+    error: RateLimitExceeded,
+    language: str = DEFAULT_LANGUAGE,
+) -> str:
     seconds = max(1, round(error.retry_after))
-    return f"請求過於頻繁，請約 {seconds} 秒後再試。"
+    key = (
+        "generic.rate_limited.one"
+        if seconds == 1
+        else "generic.rate_limited.many"
+    )
+    return translate(key, language, seconds=seconds)
 
 
-async def _reply_rate_limited(message: Any, error: RateLimitExceeded) -> None:
-    await send_text_or_busy(message, _rate_limit_message(error))
+async def _reply_rate_limited(
+    message: Any,
+    error: RateLimitExceeded,
+    language: str = DEFAULT_LANGUAGE,
+) -> None:
+    await send_text_or_busy(
+        message,
+        _rate_limit_message(error, language),
+        language=language,
+    )
 
 
 def _created_on(value: str, expected: date) -> bool:

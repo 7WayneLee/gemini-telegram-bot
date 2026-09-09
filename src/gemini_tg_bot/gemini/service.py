@@ -57,19 +57,25 @@ def account_status_guidance(
     if status is AccountStatus.UNAUTHENTICATED:
         return f"{translate('auth.degraded', language)}\n{details}"
     if status is AccountStatus.LOCATION_REJECTED:
-        return (
-            f"{details}\n可能是 Cookie 取得 IP 與服務使用 IP 不符；"
-            "請依 README 的 SSH SOCKS 流程重新取得 Cookie。"
+        return translate(
+            "account.location_rejected",
+            language,
+            details=details,
         )
     if status in _ACCOUNT_RESTRICTION_STATUSES:
-        return (
-            f"{details}\n這可能是帳號層級限制，換 Cookie 無法解除此限制；"
-            "請檢查 Google 帳號狀態。"
+        return translate(
+            "account.restricted",
+            language,
+            details=details,
         )
     if status in _TOS_STATUSES:
-        return f"{details}\n請至 Gemini 網頁版接受最新服務條款後再試。"
+        return translate("account.terms_pending", language, details=details)
     if status is AccountStatus.ACCESS_TEMPORARILY_UNAVAILABLE:
-        return f"{details}\nGemini 暫時受限，服務會在冷卻後自動重試。"
+        return translate(
+            "account.temporarily_unavailable",
+            language,
+            details=details,
+        )
     return details
 
 
@@ -677,9 +683,14 @@ class GeminiService:
 
     def _blocked_notification(self) -> str:
         minutes = max(1, math.ceil(self._blocked_cooldown_sec / 60))
-        return (
-            f"Gemini 暫時封鎖，將於約 {minutes} 分鐘後自動重試，"
-            "無需人工介入"
+        return translate(
+            (
+                "service.blocked_notification.one"
+                if minutes == 1
+                else "service.blocked_notification.many"
+            ),
+            self._settings.default_language,
+            minutes=minutes,
         )
 
     def _auth_degraded_notification(self) -> str:

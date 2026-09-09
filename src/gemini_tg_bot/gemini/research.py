@@ -14,6 +14,7 @@ from typing import Any
 from gemini_webapi import DeepResearchPlan
 
 from gemini_tg_bot.gemini.service import GeminiService
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 from gemini_tg_bot.storage.db import Database
 
 
@@ -63,6 +64,7 @@ class ResearchManager:
         timeout_sec: float,
         poll_interval: float = 10.0,
         notify: ResearchNotifier | None = None,
+        default_language: str = DEFAULT_LANGUAGE,
     ) -> None:
         if isinstance(timeout_sec, bool) or timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
@@ -74,6 +76,7 @@ class ResearchManager:
         self._timeout_sec = float(timeout_sec)
         self._poll_interval = float(poll_interval)
         self._notify = notify
+        self._default_language = default_language
         self._schema_lock = asyncio.Lock()
         self._schema_ready = False
         self._background_tasks: dict[str, asyncio.Task[None]] = {}
@@ -318,7 +321,11 @@ class ResearchManager:
             plan=completed_plan,
         )
         text = result.final_output.text.strip()
-        message = f"Deep Research 任務 {task_id} 已完成。"
+        message = translate(
+            "research.completed",
+            self._default_language,
+            task_id=task_id,
+        )
         if text:
             message = f"{message}\n\n{text}"
         await self._send_notification(chat_id, message)
@@ -385,12 +392,20 @@ class ResearchManager:
         if status is ResearchStatus.FAILED:
             await self._send_notification(
                 chat_id,
-                f"Deep Research 任務 {task_id} 執行失敗。",
+                translate(
+                    "research.failed",
+                    self._default_language,
+                    task_id=task_id,
+                ),
             )
         elif status is ResearchStatus.TIMEOUT:
             await self._send_notification(
                 chat_id,
-                f"Deep Research 任務 {task_id} 已逾時；可用 /research_status 再查。",
+                translate(
+                    "research.timeout",
+                    self._default_language,
+                    task_id=task_id,
+                ),
             )
 
     async def _send_notification(self, chat_id: int, message: str) -> None:

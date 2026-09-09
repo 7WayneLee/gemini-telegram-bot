@@ -16,6 +16,8 @@ import re
 import unicodedata
 from urllib.parse import urlsplit
 
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
+
 
 MAX_MESSAGE_LENGTH = 4000
 TABLE_TARGET_WIDTH = 40
@@ -1103,8 +1105,8 @@ __all__ = [
 ]
 
 
-THOUGHTS_TRUNCATION_NOTE = "…（思考過程過長，已截斷）"
-THOUGHTS_TITLE = "思考過程"
+THOUGHTS_TRUNCATION_NOTE = translate("thoughts.truncated", DEFAULT_LANGUAGE)
+THOUGHTS_TITLE = translate("thoughts.title", DEFAULT_LANGUAGE)
 
 
 def _render_thoughts_inline(text: str) -> str:
@@ -1126,6 +1128,7 @@ def render_thoughts_blockquote(
     *,
     budget: int,
     seconds: float | None = None,
+    language: str = DEFAULT_LANGUAGE,
 ) -> str:
     """Wrap reasoning in a collapsed blockquote that fits within ``budget``.
 
@@ -1144,7 +1147,15 @@ def render_thoughts_blockquote(
 
     opening, closing = "<blockquote expandable>", "</blockquote>"
     title = (
-        f"{THOUGHTS_TITLE}（{int(max(0.0, seconds))} 秒）\n"
+        translate(
+            (
+                "thoughts.title_elapsed.one"
+                if int(max(0.0, seconds)) == 1
+                else "thoughts.title_elapsed.many"
+            ),
+            language,
+            seconds=int(max(0.0, seconds)),
+        )
         if seconds is not None
         else ""
     )
@@ -1156,7 +1167,7 @@ def render_thoughts_blockquote(
     if len(body) + overhead <= budget:
         return f"{opening}{title}{body}{closing}"
 
-    note = escape(THOUGHTS_TRUNCATION_NOTE, quote=False)
+    note = escape(translate("thoughts.truncated", language), quote=False)
     room = budget - overhead - len(note)
     if room <= 0:
         return ""

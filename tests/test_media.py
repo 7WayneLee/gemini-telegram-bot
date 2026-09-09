@@ -15,6 +15,7 @@ from telegram.error import BadRequest, RetryAfter
 
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.telegram.handlers import EgressMeter, TelegramHandlers
+from gemini_tg_bot.i18n import LANGUAGE_CHINESE
 from gemini_tg_bot.telegram.media import (
     DEFAULT_MEDIA_PROMPT,
     DeliveryMode,
@@ -592,7 +593,7 @@ async def test_unknown_upload_size_is_rejected_before_download() -> None:
     media = MediaHandler(egress_meter=EgressMeter())
 
     with pytest.raises(UploadSizeUnknownError, match="無法確認"):
-        async with media.prepare_upload(message):
+        async with media.prepare_upload(message, language=LANGUAGE_CHINESE):
             pytest.fail("unknown-size upload must not enter the context")
 
     attachment.get_file.assert_not_awaited()

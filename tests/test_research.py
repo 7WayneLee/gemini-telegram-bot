@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from gemini_tg_bot.gemini import research as research_module
 from gemini_tg_bot.gemini.research import ResearchManager, ResearchStatus
+from gemini_tg_bot.i18n import LANGUAGE_CHINESE, translate
 from gemini_tg_bot.storage.db import Database
 
 
@@ -103,6 +104,8 @@ async def test_submit_returns_id_while_upstream_work_remains_pending(tmp_path) -
 
 @pytest.mark.asyncio
 async def test_completed_task_is_persisted_and_proactively_notified(tmp_path) -> None:
+    """Background completion must use its configured non-chat language."""
+
     plan = FakePlan(research_id="research-2", cid="cid-2")
     result = SimpleNamespace(
         done=True,
@@ -121,6 +124,7 @@ async def test_completed_task_is_persisted_and_proactively_notified(tmp_path) ->
         timeout_sec=30,
         poll_interval=0.25,
         notify=notify,
+        default_language=LANGUAGE_CHINESE,
     )
 
     task_id = await manager.submit(202, "A topic")
@@ -137,8 +141,10 @@ async def test_completed_task_is_persisted_and_proactively_notified(tmp_path) ->
     assert task.research_id == "research-2"
     notify.assert_awaited_once()
     assert notify.await_args.args[0] == 202
-    assert task_id in notify.await_args.args[1]
-    assert "Finished report" in notify.await_args.args[1]
+    assert notify.await_args.args[1] == (
+        translate("research.completed", LANGUAGE_CHINESE, task_id=task_id)
+        + "\n\nFinished report"
+    )
 
     async with database.connection.execute(
         "SELECT plan_json FROM research_tasks WHERE task_id = ?",

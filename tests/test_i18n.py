@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+import re
+
 import pytest
 
 from gemini_tg_bot.i18n import (
@@ -20,6 +24,47 @@ def test_every_message_has_both_supported_languages() -> None:
     expected = {LANGUAGE_ENGLISH, LANGUAGE_CHINESE}
     for key, translations in MESSAGES.items():
         assert set(translations) == expected, key
+
+
+def test_user_facing_source_strings_are_catalog_backed() -> None:
+    """UI text must not bypass i18n as the source tree evolves.
+
+    Comments and docstrings are deliberately excluded because they document
+    implementation details for maintainers and are never shown to Telegram
+    users.  The catalog module itself is the sole allowed home for localized
+    Chinese string literals.
+    """
+
+    source_root = Path(__file__).parents[1] / "src" / "gemini_tg_bot"
+    chinese = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+    violations: list[str] = []
+    for path in source_root.rglob("*.py"):
+        if path.name == "i18n.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        docstrings = {
+            id(owner.body[0].value)
+            for owner in ast.walk(tree)
+            if isinstance(
+                owner,
+                (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+            and owner.body
+            and isinstance(owner.body[0], ast.Expr)
+            and isinstance(owner.body[0].value, ast.Constant)
+            and isinstance(owner.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+                and chinese.search(node.value)
+            ):
+                relative = path.relative_to(source_root)
+                violations.append(f"{relative}:{node.lineno}: {node.value!r}")
+
+    assert violations == []
 
 
 def test_unknown_message_id_raises_key_error() -> None:

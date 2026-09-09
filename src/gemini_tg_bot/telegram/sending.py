@@ -9,10 +9,12 @@ from typing import Any, TypeVar
 
 from telegram.error import BadRequest, RetryAfter
 
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
+
 
 MAX_FLOOD_WAIT_SECONDS = 30.0
 MAX_FLOOD_RETRIES = 3
-SERVICE_BUSY = "服務忙碌，請稍後再試。"
+SERVICE_BUSY = translate("generic.service_busy", DEFAULT_LANGUAGE)
 
 _ResultT = TypeVar("_ResultT")
 _Sleep = Callable[[float], Awaitable[None]]
@@ -72,15 +74,22 @@ async def send_text(message: Any, text: str, **kwargs: Any) -> Any:
     return await call_telegram(message.reply_text, text, **kwargs)
 
 
-async def send_text_or_busy(message: Any, text: str, **kwargs: Any) -> Any:
+async def send_text_or_busy(
+    message: Any,
+    text: str,
+    *,
+    language: str = DEFAULT_LANGUAGE,
+    **kwargs: Any,
+) -> Any:
     """Send text, replacing an excessive flood wait with a busy response."""
 
     try:
         return await send_text(message, text, **kwargs)
     except FloodControlExceeded:
-        if text == SERVICE_BUSY:
+        busy_text = translate("generic.service_busy", language)
+        if text == busy_text:
             raise
-        return await send_text(message, SERVICE_BUSY)
+        return await send_text(message, busy_text)
 
 
 async def send_photo(message: Any, photo: Any, **kwargs: Any) -> Any:
@@ -113,15 +122,22 @@ async def edit_message_text(query: Any, text: str, **kwargs: Any) -> Any:
     return await call_telegram(query.edit_message_text, text, **kwargs)
 
 
-async def edit_message_text_or_busy(query: Any, text: str, **kwargs: Any) -> Any:
+async def edit_message_text_or_busy(
+    query: Any,
+    text: str,
+    *,
+    language: str = DEFAULT_LANGUAGE,
+    **kwargs: Any,
+) -> Any:
     """Edit callback text, replacing an excessive flood wait with busy text."""
 
     try:
         return await edit_message_text(query, text, **kwargs)
     except FloodControlExceeded:
-        if text == SERVICE_BUSY:
+        busy_text = translate("generic.service_busy", language)
+        if text == busy_text:
             raise
-        return await edit_message_text(query, SERVICE_BUSY)
+        return await edit_message_text(query, busy_text)
 
 
 async def answer_callback(query: Any, **kwargs: Any) -> Any:

@@ -242,7 +242,7 @@ def test_account_status_guidance_preserves_description_and_remediation(
     status: AccountStatus,
     expected_guidance: str,
 ) -> None:
-    guidance = account_status_guidance(status)
+    guidance = account_status_guidance(status, LANGUAGE_CHINESE)
 
     assert status.description in guidance
     assert expected_guidance in guidance
@@ -427,7 +427,7 @@ async def test_three_consecutive_temporary_blocks_enter_degraded(
     assert service.health.blocked_until == 130.0
     assert service.accepting_requests is False
     notifier.assert_awaited_once()
-    assert "2 分鐘" in notifier.await_args.args[0]
+    assert "2 minutes" in notifier.await_args.args[0]
 
 
 async def test_success_resets_consecutive_temporary_block_failures(

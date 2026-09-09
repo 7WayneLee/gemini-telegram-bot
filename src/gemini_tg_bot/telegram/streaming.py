@@ -16,6 +16,8 @@ from typing import Any
 
 from telegram.constants import ParseMode
 
+from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
+
 from .rendering import (
     MAX_MESSAGE_LENGTH,
     render_markdown_chunks,
@@ -30,8 +32,8 @@ from .sending import (
 )
 
 
-PLACEHOLDER_TEXT = "思考中…"
-EMPTY_RESPONSE_TEXT = "Gemini 未回傳文字。"
+PLACEHOLDER_TEXT = translate("stream.placeholder", DEFAULT_LANGUAGE)
+EMPTY_RESPONSE_TEXT = translate("stream.empty", DEFAULT_LANGUAGE)
 EDIT_INTERVAL_SECONDS = 1.5
 EDIT_CHARACTER_THRESHOLD = 200
 
@@ -61,7 +63,8 @@ async def stream_response(
     session: Any,
     prompt: str,
     *,
-    placeholder_text: str = PLACEHOLDER_TEXT,
+    language: str = DEFAULT_LANGUAGE,
+    placeholder_text: str | None = None,
     edit_interval: float = EDIT_INTERVAL_SECONDS,
     edit_character_threshold: int = EDIT_CHARACTER_THRESHOLD,
     sleep: _Sleep = asyncio.sleep,
@@ -92,9 +95,14 @@ async def stream_response(
     if edit_character_threshold <= 0:
         raise ValueError("edit_character_threshold must be positive")
 
+    resolved_placeholder = (
+        translate("stream.placeholder", language)
+        if placeholder_text is None
+        else placeholder_text
+    )
     placeholder = await send_text(
         message,
-        placeholder_text,
+        resolved_placeholder,
         sleep=sleep,
         flood_wait=flood_wait,
     )
@@ -103,7 +111,7 @@ async def stream_response(
     latest_text = ""
     latest_thoughts = ""
     latest_output: Any | None = None
-    last_sent_text = placeholder_text
+    last_sent_text = resolved_placeholder
     extended_thinking = bool(generate_kwargs.get("extended_thinking", False))
     thoughts_started_at: float | None = None
     answer_started_at: float | None = None
@@ -123,9 +131,18 @@ async def stream_response(
             and thoughts_started_at is not None
         ):
             elapsed_seconds = int(max(0.0, clock() - thoughts_started_at))
-            edit_content = f"{placeholder_text} {elapsed_seconds} 秒"
+            edit_content = translate(
+                (
+                    "stream.thinking_elapsed.one"
+                    if elapsed_seconds == 1
+                    else "stream.thinking_elapsed.many"
+                ),
+                language,
+                placeholder=resolved_placeholder,
+                seconds=elapsed_seconds,
+            )
         else:
-            edit_content = placeholder_text
+            edit_content = resolved_placeholder
         if edit_content != last_sent_text:
             await edit_text(
                 placeholder,
@@ -213,11 +230,16 @@ async def stream_response(
             else ()
         )
         if latest_thoughts and thought_seconds is not None:
-            suffix = "" if images else f"\n\n{EMPTY_RESPONSE_TEXT}"
+            suffix = (
+                ""
+                if images
+                else f"\n\n{translate('stream.empty', language)}"
+            )
             quote = render_thoughts_blockquote(
                 latest_thoughts,
                 budget=MAX_MESSAGE_LENGTH - len(suffix),
                 seconds=thought_seconds,
+                language=language,
             )
             if quote:
                 await edit_text(
@@ -240,7 +262,7 @@ async def stream_response(
             )
         await edit_text(
             placeholder,
-            EMPTY_RESPONSE_TEXT,
+            translate("stream.empty", language),
             parse_mode=None,
             sleep=sleep,
             flood_wait=flood_wait,
@@ -260,6 +282,7 @@ async def stream_response(
             latest_thoughts,
             budget=MAX_MESSAGE_LENGTH - len(rendered_chunks[0]) - len(separator),
             seconds=thought_seconds,
+            language=language,
         )
         if quote:
             rendered_chunks[0] = f"{quote}{separator}{rendered_chunks[0]}"

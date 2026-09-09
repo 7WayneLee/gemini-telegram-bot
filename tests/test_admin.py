@@ -225,10 +225,10 @@ async def test_health_reports_client_error_and_live_database(
         await handlers.health(update, SimpleNamespace())
 
         report = update.effective_message.reply_text.await_args.args[0]
-        assert "Client 狀態：degraded" in report
-        assert "接受請求：否" in report
-        assert "最近錯誤：transient (TimeoutError)" in report
-        assert "DB 狀態：healthy" in report
+        assert "Client status: degraded" in report
+        assert "Accepting requests: No" in report
+        assert "Last error: transient (TimeoutError)" in report
+        assert "Database status: healthy" in report
     finally:
         await database.close()
 
