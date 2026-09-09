@@ -15,6 +15,15 @@ API key — which makes cookie handling the part that actually matters.
 
 - **Streaming replies** with Markdown converted to Telegram HTML — code blocks,
   nested lists, long messages split without breaking formatting
+- **Readable tables and formulas** — Markdown tables become aligned monospace blocks
+  based on display width (CJK characters count as double-width), with wide cells
+  wrapped inside columns; tables with too many columns fall back to lists. Simple
+  LaTeX becomes readable text (`$O(N^2)$` → `O(N²)`, `\log` → `log`, `\le` → `≤`),
+  while complex expressions such as `\frac` and `\sum` are left intact rather than
+  partially converted
+- **Bilingual interface** in English (the default) and Traditional Chinese. The bot
+  automatically uses Chinese only when Telegram is set to Traditional Chinese; all
+  other language settings use English
 - **Images** sent as albums, passed to Telegram by URL where possible so they never
   transit your server
 - **File uploads** — send a photo or PDF and ask about it
@@ -196,11 +205,12 @@ Everything else has a safe default. Three worth knowing:
 | `/model` | Pick a model from an inline keyboard, listed dynamically |
 | `/gem` | Pick a gem to apply to the conversation |
 | `/temp` | Toggle temporary mode — nothing written to Gemini history |
-| `/think` | Toggle extended thinking for this chat (persisted per chat); replies include an expandable thought process and consume Gemini Advanced quota faster than normal mode |
+| `/language` | Switch the bot's own interface between English and Traditional Chinese (not the language of Gemini's replies); this chat's command menu switches to match |
+| `/think` | Toggle extended thinking for this chat (persisted per chat); replies include an expandable thought process with thinking time in seconds and consume Gemini Advanced quota faster than normal mode |
 | `/img <prompt>` | **Explicitly ask for generation.** Without that wording Gemini tends to return web search results instead of an AI-generated image |
 | `/research <topic>` | Submit a Deep Research task; returns a task id immediately |
 | `/research_status` | Status of this chat's research tasks |
-| `/status` | Model, session id, last cookie refresh, queue depth, usage, egress estimate |
+| `/status` | Model, session id, extended thinking on/off, last cookie refresh, queue depth, usage, egress estimate |
 | Plain text | Answered with streaming |
 | Photo / document | Passed to Gemini; the caption becomes the prompt |
 

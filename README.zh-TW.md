@@ -15,6 +15,12 @@ cookie 的處理才是這個專案真正的重點。
 
 - **串流回覆**，Markdown 轉成 Telegram HTML —— 程式碼區塊、巢狀清單、
   超長訊息切段而不破壞格式
+- **清楚易讀的表格與公式** —— Markdown 表格依顯示寬度轉為對齊的等寬區塊
+  （中日韓文字以雙寬計算），過寬的儲存格會在欄內換行；欄數過多時則退化為
+  條列。簡單 LaTeX 會轉為可讀文字（`$O(N^2)$` → `O(N²)`、`\log` → `log`、
+  `\le` → `≤`），`\frac`、`\sum` 等複雜式子則維持原樣，不做部分轉換
+- **雙語介面**支援英文（預設）與正體中文；只有 Telegram 語言設定為正體中文時
+  會自動使用中文，其餘一律使用英文
 - **圖片以相簿送出**，能直傳的就交給 Telegram 自己抓，不經過你的伺服器
 - **檔案上傳** —— 丟一張圖或 PDF 就能提問
 - **動態選擇模型與 gem**（`/model`、`/gem`）
@@ -181,11 +187,12 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `/model` | 以 inline keyboard 選擇模型，清單為動態取得 |
 | `/gem` | 選擇要套用於對話的 gem |
 | `/temp` | 切換暫時模式 —— 不寫入 Gemini 歷史 |
-| `/think` | 切換各聊天室獨立持久化的延伸思考；回覆會附上可展開的思考過程，Gemini Advanced 額度消耗速度比一般模式快 |
+| `/language` | 切換 bot 自身介面的語言（不影響 Gemini 回覆語言），可選英文或正體中文；選擇後，該聊天室的指令選單也會隨之切換 |
+| `/think` | 切換各聊天室獨立持久化的延伸思考；回覆會附上可展開的思考過程並顯示思考秒數，Gemini Advanced 額度消耗速度比一般模式快 |
 | `/img <prompt>` | **明確要求生成圖片。** 未明示時 Gemini 傾向回傳網路搜尋結果而非 AI 生成圖 |
 | `/research <topic>` | 送出 Deep Research 任務，立即回傳 task id |
 | `/research_status` | 該聊天室的研究任務狀態 |
-| `/status` | 模型、session id、cookie 最後刷新時間、佇列深度、用量、egress 估算 |
+| `/status` | 模型、session id、延伸思考開關狀態、cookie 最後刷新時間、佇列深度、用量、egress 估算 |
 | 純文字 | 以串流方式回覆 |
 | 圖片／文件 | 送給 Gemini，caption 作為 prompt |
 
