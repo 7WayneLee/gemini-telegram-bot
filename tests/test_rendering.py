@@ -1,4 +1,5 @@
 import json
+from html import unescape
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -21,7 +22,8 @@ _SPEC.loader.exec_module(_RENDERING)
 
 MAX_MESSAGE_LENGTH = _RENDERING.MAX_MESSAGE_LENGTH
 LIST_INDENT_CHARACTER = _RENDERING.LIST_INDENT_CHARACTER
-TABLE_MAX_WIDTH = _RENDERING.TABLE_MAX_WIDTH
+TABLE_MIN_COLUMN_WIDTH = _RENDERING.TABLE_MIN_COLUMN_WIDTH
+TABLE_TARGET_WIDTH = _RENDERING.TABLE_TARGET_WIDTH
 display_width = _RENDERING.display_width
 markdown_to_telegram_html = _RENDERING.markdown_to_telegram_html
 render_markdown = _RENDERING.render_markdown
@@ -146,17 +148,110 @@ def test_unclosed_code_fence_is_closed_in_html() -> None:
     )
 
 
-def test_latex_fragments_remain_copyable_code() -> None:
-    source = (
-        r"Inline $E = mc^2$ and display $$\int_0^1 x^2\,dx$$; price $5 and $10."
-        "\n$$\nx + y\n$$"
-    )
+def test_latex_superscript_example_becomes_readable_text() -> None:
+    """A ubiquitous complexity exponent should read naturally without code styling."""
+
+    assert markdown_to_telegram_html(r"$O(N^2)$") == "O(N²)"
+
+
+def test_latex_function_name_example_becomes_readable_text() -> None:
+    """Removing a safe function-name backslash eliminates common visual noise."""
+
+    assert markdown_to_telegram_html(r"$O(N \log N)$") == "O(N log N)"
+
+
+def test_latex_operator_example_becomes_readable_text() -> None:
+    """A lossless Unicode operator is clearer than Telegram-displayed LaTeX source."""
+
+    assert markdown_to_telegram_html(r"$a \le b$") == "a ≤ b"
+
+
+def test_latex_brackets_and_subscript_example_becomes_readable_text() -> None:
+    """Combining only allowlisted pieces must still produce one coherent expression."""
+
+    assert markdown_to_telegram_html(r"$\lceil \log_2 n \rceil$") == "⌈ log₂ n ⌉"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$a \le b$", "a ≤ b"),
+        (r"$a \ge b$", "a ≥ b"),
+        (r"$a \ne b$", "a ≠ b"),
+        (r"$a \times b$", "a × b"),
+        (r"$a \cdot b$", "a · b"),
+        (r"$a \approx b$", "a ≈ b"),
+        (r"$n \to \infty$", "n → ∞"),
+        (r"$a \pm b$", "a ± b"),
+        (r"$\lfloor x \rfloor$", "⌊ x ⌋"),
+        (r"$\lceil x \rceil$", "⌈ x ⌉"),
+        (r"$\log x + \ln x$", "log x + ln x"),
+        (r"$\max x + \min x$", "max x + min x"),
+        (r"$\sin x + \cos x + \tan x$", "sin x + cos x + tan x"),
+    ],
+)
+def test_every_allowlisted_latex_macro_has_a_lossless_conversion(
+    source: str,
+    expected: str,
+) -> None:
+    """An explicit allowlist needs coverage so later edits cannot silently widen or shrink it."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+def test_latex_scripts_require_one_unicode_supported_character() -> None:
+    """Unsupported or grouped scripts must reject the whole formula instead of approximating."""
+
+    assert markdown_to_telegram_html(r"$x^3 + y^n + z_n$") == "x³ + yⁿ + zₙ"
+    assert markdown_to_telegram_html(r"$x^q$") == r"<code>$x^q$</code>"
+    assert markdown_to_telegram_html(r"$x^{12}$") == r"<code>$x^{12}$</code>"
+
+
+def test_latex_fraction_example_remains_original_code() -> None:
+    """Rejecting grouped fractions wholesale prevents a misleading partial conversion."""
+
+    source = r"$\frac{n(n-1)}{2}$"
+
+    assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
+
+
+def test_latex_sum_example_remains_original_code() -> None:
+    """Unsupported large operators and grouped scripts must stay exact and copyable."""
+
+    source = r"$\sum_{i=1}^{n} i$"
+
+    assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
+
+
+def test_latex_conversion_is_all_or_nothing() -> None:
+    """One unsafe command must prevent safe neighbors from being partially rewritten."""
+
+    source = r"$a \le \sqrt n$"
+
+    assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
+    assert "≤" not in markdown_to_telegram_html(source)
+
+
+def test_dollars_inside_inline_code_are_not_latex() -> None:
+    """Code examples need literal dollar signs and source syntax preserved byte for byte."""
+
+    assert markdown_to_telegram_html(r"`$O(N^2)$`") == r"<code>$O(N^2)$</code>"
+
+
+def test_safe_display_math_converts_but_unsafe_display_math_stays_code() -> None:
+    """The safety decision should apply consistently to both inline and display delimiters."""
+
+    source = "$$\nx + y\n$$ and " + r"$$\int_0^1 x^2\,dx$$"
 
     assert markdown_to_telegram_html(source) == (
-        "Inline <code>$E = mc^2$</code> and display "
-        r"<code>$$\int_0^1 x^2\,dx$$</code>; price $5 and $10."
-        "\n<code>$$\nx + y\n$$</code>"
+        "\nx + y\n and " + r"<code>$$\int_0^1 x^2\,dx$$</code>"
     )
+
+
+def test_currency_like_dollars_are_not_mistaken_for_math() -> None:
+    """Conservative delimiter detection prevents ordinary prices from being rewritten."""
+
+    assert markdown_to_telegram_html("price $5 and $10.") == "price $5 and $10."
 
 
 def test_display_width_counts_ascii_and_east_asian_characters() -> None:
@@ -215,23 +310,105 @@ def test_table_separator_is_replaced_by_a_solid_rule() -> None:
     assert "────  ─────" in rendered
 
 
-def test_wide_table_falls_back_to_inline_rendered_list_items() -> None:
-    """Wide tables need a mobile-friendly layout without losing cell emphasis."""
+def test_wide_table_wraps_cells_and_keeps_display_column_starts_aligned() -> None:
+    """Wrapped CJK rows must retain exact visual column starts in Telegram monospace."""
 
-    wide_heading = "Description " * 6
     source = (
-        f"| Algorithm | {wide_heading} |\n"
+        "| 演算法特性 | 時間複雜度 | 核心行為模式 |\n"
+        "| --- | --- | --- |\n"
+        "| 基礎 Quick Sort | $O(N^2)$ | 發生最壞情況，產生極度不平衡的分割。 |\n"
+        "| 優化 Quick Sort | $O(N \\log N)$ | 避開極值，維持高效分割。 |\n"
+    )
+
+    rendered = markdown_to_telegram_html(source)
+    content = unescape(rendered.removeprefix("<pre>").removesuffix("</pre>\n"))
+    lines = content.splitlines()
+
+    assert rendered.startswith("<pre>")
+    assert "<code>" not in rendered
+    assert "O(N²)" in content
+    assert "O(N log" in content
+    assert all(display_width(line) <= TABLE_TARGET_WIDTH for line in lines)
+
+    def text_at_display_column(line: str, column: int) -> str:
+        position = 0
+        for index, character in enumerate(line):
+            if position == column:
+                return line[index:]
+            position += display_width(character)
+        return "" if position <= column else pytest.fail("column splits a wide glyph")
+
+    second_column_fragments = ("時間複雜", "度", "O(N²)", "O(N log", "N)")
+    third_column_fragments = (
+        "核心行為模式",
+        "發生最壞情況，產生極",
+        "度不平衡的分割。",
+        "避開極值，維持高效分",
+        "割。",
+    )
+    for fragment in second_column_fragments:
+        assert any(text_at_display_column(line, 10).startswith(fragment) for line in lines)
+    for fragment in third_column_fragments:
+        assert any(text_at_display_column(line, 20).startswith(fragment) for line in lines)
+
+
+def test_chinese_table_cell_wraps_between_characters() -> None:
+    """CJK has no required spaces, so character-boundary wrapping avoids overflow."""
+
+    chinese = "天地玄黃宇宙洪荒日月盈昴辰宿列張寒來暑往"
+    source = (
+        "| 類型 | 說明 |\n"
         "| --- | --- |\n"
-        "| **Quicksort** | `O(n log n)` |\n"
+        f"| 中文 | {chinese} |\n"
+    )
+
+    content = unescape(
+        markdown_to_telegram_html(source)
+        .removeprefix("<pre>")
+        .removesuffix("</pre>\n")
+    )
+    lines = content.splitlines()
+
+    for fragment in (chinese[:15], chinese[15:]):
+        line = next(line for line in lines if fragment in line)
+        assert display_width(line[: line.index(fragment)]) == 10
+
+
+def test_latin_table_cell_prefers_whitespace_before_hard_wrap() -> None:
+    """Keeping Latin words whole makes wrapped prose substantially easier to scan."""
+
+    prose = "alpha beta gamma delta epsilons zeta"
+    source = (
+        "| Label | Description |\n"
+        "| --- | --- |\n"
+        f"| X | {prose} |\n"
+    )
+
+    content = unescape(
+        markdown_to_telegram_html(source)
+        .removeprefix("<pre>")
+        .removesuffix("</pre>\n")
+    )
+
+    assert "X         alpha beta gamma delta\n          epsilons zeta" in content
+    assert "epsilon\n" not in content
+
+
+def test_too_many_wide_columns_still_fall_back_to_list_items() -> None:
+    """Only an impossible minimum-width allocation should sacrifice table comparison."""
+
+    headings = [f"Column {index} heading" for index in range(1, 6)]
+    source = (
+        f"| {' | '.join(headings)} |\n"
+        f"| {' | '.join(['---'] * len(headings))} |\n"
+        "| first | second | third | fourth | fifth |\n"
     )
 
     rendered = markdown_to_telegram_html(source)
 
-    assert display_width("Algorithm") + 2 + display_width(wide_heading.strip()) > TABLE_MAX_WIDTH
-    assert rendered == (
-        f"<b>Quicksort</b>\n{LIST_INDENT_CHARACTER * 2}◦ "
-        f"{wide_heading.strip()}：<code>O(n log n)</code>\n"
-    )
+    assert len(headings) * TABLE_MIN_COLUMN_WIDTH + 2 * (len(headings) - 1) > TABLE_TARGET_WIDTH
+    assert rendered.startswith("first\n")
+    assert f"{LIST_INDENT_CHARACTER * 2}◦ Column 2 heading：second" in rendered
     assert "<pre>" not in rendered
 
 

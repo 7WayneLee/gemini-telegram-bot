@@ -1,9 +1,8 @@
 """Render Gemini Markdown for Telegram and split long source messages.
 
-The renderer deliberately keeps LaTeX source intact and wraps ``$...$`` and
-``$$...$$`` expressions in ``<code>``.  Telegram cannot typeset LaTeX, and a
-Unicode approximation would be lossy (especially for matrices and custom
-commands); showing the original expression is deterministic and copyable.
+The renderer converts a deliberately small, lossless subset of LaTeX to
+readable Unicode.  Every other ``$...$`` or ``$$...$$`` expression remains
+intact in ``<code>`` so unsupported syntax is never only partly transformed.
 
 Only the Python standard library is used.  Every function in this module is
 pure: no Telegram objects, network access, or process-wide state are involved.
@@ -19,7 +18,8 @@ from urllib.parse import urlsplit
 
 
 MAX_MESSAGE_LENGTH = 4000
-TABLE_MAX_WIDTH = 60
+TABLE_TARGET_WIDTH = 40
+TABLE_MIN_COLUMN_WIDTH = 8
 UNORDERED_LIST_BULLETS = ("•", "◦", "▪")
 LIST_INDENT_CHARACTER = "\u2007"
 LIST_INDENT_CHARACTERS_PER_LEVEL = 2
@@ -45,6 +45,125 @@ _TRAILING_BLANK_LINES_RE = re.compile(r"(?:\r?\n[ \t]*)+$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r":?[ \t]*-{3,}[ \t]*:?")
 _SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto", "tg"})
+_LATEX_MACROS = {
+    "approx": "≈",
+    "cdot": "·",
+    "cos": "cos",
+    "ge": "≥",
+    "infty": "∞",
+    "lceil": "⌈",
+    "le": "≤",
+    "lfloor": "⌊",
+    "ln": "ln",
+    "log": "log",
+    "max": "max",
+    "min": "min",
+    "ne": "≠",
+    "pm": "±",
+    "rceil": "⌉",
+    "rfloor": "⌋",
+    "sin": "sin",
+    "tan": "tan",
+    "times": "×",
+    "to": "→",
+}
+_SUPERSCRIPTS = {
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+    "+": "⁺",
+    "-": "⁻",
+    "=": "⁼",
+    "(": "⁽",
+    ")": "⁾",
+    "a": "ᵃ",
+    "b": "ᵇ",
+    "c": "ᶜ",
+    "d": "ᵈ",
+    "e": "ᵉ",
+    "f": "ᶠ",
+    "g": "ᵍ",
+    "h": "ʰ",
+    "i": "ⁱ",
+    "j": "ʲ",
+    "k": "ᵏ",
+    "l": "ˡ",
+    "m": "ᵐ",
+    "n": "ⁿ",
+    "o": "ᵒ",
+    "p": "ᵖ",
+    "r": "ʳ",
+    "s": "ˢ",
+    "t": "ᵗ",
+    "u": "ᵘ",
+    "v": "ᵛ",
+    "w": "ʷ",
+    "x": "ˣ",
+    "y": "ʸ",
+    "z": "ᶻ",
+    "A": "ᴬ",
+    "B": "ᴮ",
+    "D": "ᴰ",
+    "E": "ᴱ",
+    "G": "ᴳ",
+    "H": "ᴴ",
+    "I": "ᴵ",
+    "J": "ᴶ",
+    "K": "ᴷ",
+    "L": "ᴸ",
+    "M": "ᴹ",
+    "N": "ᴺ",
+    "O": "ᴼ",
+    "P": "ᴾ",
+    "R": "ᴿ",
+    "T": "ᵀ",
+    "U": "ᵁ",
+    "V": "ⱽ",
+    "W": "ᵂ",
+}
+_SUBSCRIPTS = {
+    "0": "₀",
+    "1": "₁",
+    "2": "₂",
+    "3": "₃",
+    "4": "₄",
+    "5": "₅",
+    "6": "₆",
+    "7": "₇",
+    "8": "₈",
+    "9": "₉",
+    "+": "₊",
+    "-": "₋",
+    "=": "₌",
+    "(": "₍",
+    ")": "₎",
+    "a": "ₐ",
+    "e": "ₑ",
+    "h": "ₕ",
+    "i": "ᵢ",
+    "j": "ⱼ",
+    "k": "ₖ",
+    "l": "ₗ",
+    "m": "ₘ",
+    "n": "ₙ",
+    "o": "ₒ",
+    "p": "ₚ",
+    "r": "ᵣ",
+    "s": "ₛ",
+    "t": "ₜ",
+    "x": "ₓ",
+}
+_LATEX_PLAIN_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 "
+    "\t\r\n()[]+-*/,.=<>"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +460,56 @@ def _render_link(text: str, position: int, *, image: bool) -> tuple[str, int] | 
     return f'<a href="{escape(url, quote=True)}">{label}</a>', target_end + 1
 
 
+def _latex_span(text: str, position: int) -> tuple[str, int] | None:
+    """Return one complete math expression and its end, without guessing currency."""
+
+    if text.startswith("$$", position):
+        closing = _find_unescaped(text, "$$", position + 2)
+        if closing >= 0 and text[position + 2 : closing].strip():
+            return text[position + 2 : closing], closing + 2
+        return None
+
+    if text[position] != "$":
+        return None
+    closing = _find_unescaped(text, "$", position + 1)
+    while closing >= 0 and closing + 1 < len(text) and text[closing + 1] == "$":
+        closing = _find_unescaped(text, "$", closing + 2)
+    if closing < 0:
+        return None
+    formula = text[position + 1 : closing]
+    if not formula or formula[0].isspace() or formula[-1].isspace():
+        return None
+    return formula, closing + 1
+
+
+def _convert_simple_latex(formula: str) -> str | None:
+    """Convert a safe expression, or reject the whole expression on any unknown syntax."""
+
+    converted: list[str] = []
+    position = 0
+    while position < len(formula):
+        character = formula[position]
+        if character == "\\":
+            match = re.match(r"\\([A-Za-z]+)", formula[position:])
+            if match is None or match.group(1) not in _LATEX_MACROS:
+                return None
+            converted.append(_LATEX_MACROS[match.group(1)])
+            position += len(match.group(0))
+            continue
+        if character in {"^", "_"}:
+            replacements = _SUPERSCRIPTS if character == "^" else _SUBSCRIPTS
+            if position + 1 >= len(formula) or formula[position + 1] not in replacements:
+                return None
+            converted.append(replacements[formula[position + 1]])
+            position += 2
+            continue
+        if character not in _LATEX_PLAIN_CHARACTERS:
+            return None
+        converted.append(character)
+        position += 1
+    return "".join(converted)
+
+
 def _render_inline(text: str) -> str:
     rendered: list[str] = []
     position = 0
@@ -371,23 +540,17 @@ def _render_inline(text: str) -> str:
                 position = closing + 1
                 continue
 
-        if text.startswith("$$", position):
-            closing = _find_unescaped(text, "$$", position + 2)
-            if closing >= 0 and text[position + 2 : closing].strip():
-                rendered.append(f"<code>{escape(text[position : closing + 2], quote=False)}</code>")
-                position = closing + 2
+        if text[position] == "$":
+            span = _latex_span(text, position)
+            if span is not None:
+                formula, end = span
+                converted = _convert_simple_latex(formula)
+                if converted is None:
+                    rendered.append(f"<code>{escape(text[position:end], quote=False)}</code>")
+                else:
+                    rendered.append(escape(converted, quote=False))
+                position = end
                 continue
-
-        if text[position] == "$" and not text.startswith("$$", position):
-            closing = _find_unescaped(text, "$", position + 1)
-            while closing >= 0 and closing + 1 < len(text) and text[closing + 1] == "$":
-                closing = _find_unescaped(text, "$", closing + 2)
-            if closing >= 0:
-                formula = text[position + 1 : closing]
-                if formula and not formula[0].isspace() and not formula[-1].isspace():
-                    rendered.append(f"<code>{escape(text[position : closing + 1], quote=False)}</code>")
-                    position = closing + 1
-                    continue
 
         if text.startswith("**", position):
             closing = _find_emphasis_close(text, position + 2, "**")
@@ -497,17 +660,140 @@ def _table_column_widths(rows: tuple[tuple[str, ...], ...]) -> tuple[int, ...]:
     )
 
 
+def _normalise_table_cell(cell: str) -> str:
+    """Apply safe math conversion while keeping code spans literal in a pre table."""
+
+    normalised: list[str] = []
+    position = 0
+    while position < len(cell):
+        if cell[position] == "\\" and position + 1 < len(cell):
+            normalised.append(cell[position : position + 2])
+            position += 2
+            continue
+        if cell[position] == "`":
+            closing = _find_unescaped(cell, "`", position + 1)
+            if closing >= 0:
+                normalised.append(cell[position : closing + 1])
+                position = closing + 1
+                continue
+        if cell[position] == "$":
+            span = _latex_span(cell, position)
+            if span is not None:
+                formula, end = span
+                converted = _convert_simple_latex(formula)
+                normalised.append(cell[position:end] if converted is None else converted)
+                position = end
+                continue
+        normalised.append(cell[position])
+        position += 1
+    return "".join(normalised)
+
+
+def _fit_table_column_widths(
+    natural_widths: tuple[int, ...],
+) -> tuple[int, ...] | None:
+    gaps_width = 2 * (len(natural_widths) - 1)
+    if sum(natural_widths) + gaps_width <= TABLE_TARGET_WIDTH:
+        return natural_widths
+
+    available = TABLE_TARGET_WIDTH - gaps_width
+    if available < len(natural_widths) * TABLE_MIN_COLUMN_WIDTH:
+        # Only tables with so many columns that the target cannot give every
+        # column its minimum readable width use the legacy list fallback.
+        return None
+
+    allocated: list[int | None] = [None] * len(natural_widths)
+    free = list(range(len(natural_widths)))
+    remaining = available
+    while True:
+        total_weight = sum(natural_widths[index] for index in free)
+        constrained = [
+            index
+            for index in free
+            if natural_widths[index] * remaining
+            < TABLE_MIN_COLUMN_WIDTH * total_weight
+        ]
+        if not constrained:
+            break
+        for index in constrained:
+            allocated[index] = TABLE_MIN_COLUMN_WIDTH
+            remaining -= TABLE_MIN_COLUMN_WIDTH
+            free.remove(index)
+
+    total_weight = sum(natural_widths[index] for index in free)
+    for index in free:
+        allocated[index] = remaining * natural_widths[index] // total_weight
+    leftover = available - sum(width for width in allocated if width is not None)
+    by_remainder = sorted(
+        free,
+        key=lambda index: (remaining * natural_widths[index] % total_weight, -index),
+        reverse=True,
+    )
+    for index in by_remainder[:leftover]:
+        assert allocated[index] is not None
+        allocated[index] += 1
+
+    return tuple(width for width in allocated if width is not None)
+
+
+def _wrap_table_cell(cell: str, width: int) -> tuple[str, ...]:
+    """Wrap by display cells, preferring word boundaries when one is available."""
+
+    if not cell:
+        return ("",)
+
+    lines: list[str] = []
+    remaining = cell
+    while display_width(remaining) > width:
+        used = 0
+        cut = 0
+        for cut, character in enumerate(remaining, start=1):
+            character_width = display_width(character)
+            if used + character_width > width:
+                cut -= 1
+                break
+            used += character_width
+        if cut <= 0:
+            cut = 1
+
+        whitespace = next(
+            (
+                index
+                for index in range(cut - 1, 0, -1)
+                if remaining[index].isspace()
+            ),
+            None,
+        )
+        if whitespace is not None:
+            lines.append(remaining[:whitespace].rstrip())
+            remaining = remaining[whitespace:].lstrip()
+        else:
+            lines.append(remaining[:cut])
+            remaining = remaining[cut:].lstrip()
+    lines.append(remaining)
+    return tuple(lines)
+
+
 def _render_pre_table(
     rows: tuple[tuple[str, ...], ...],
     widths: tuple[int, ...],
 ) -> str:
     rendered_rows: list[str] = []
     for index, row in enumerate(rows):
-        padded = [
-            cell + " " * (width - display_width(cell))
+        wrapped = [
+            _wrap_table_cell(cell, width)
             for cell, width in zip(row, widths, strict=True)
         ]
-        rendered_rows.append("  ".join(padded).rstrip())
+        for line_index in range(max(len(lines) for lines in wrapped)):
+            cells = [
+                lines[line_index] if line_index < len(lines) else ""
+                for lines in wrapped
+            ]
+            padded = [
+                cell + " " * (width - display_width(cell))
+                for cell, width in zip(cells, widths, strict=True)
+            ]
+            rendered_rows.append("  ".join(padded).rstrip())
         if index == 0:
             rendered_rows.append("  ".join("─" * width for width in widths))
     content = "\n".join(rendered_rows)
@@ -533,11 +819,14 @@ def _render_list_table(rows: tuple[tuple[str, ...], ...]) -> str:
 
 
 def _render_table_block(block: _TableBlock) -> str:
-    widths = _table_column_widths(block.rows)
-    table_width = sum(widths) + 2 * (len(widths) - 1)
+    rows = tuple(
+        tuple(_normalise_table_cell(cell) for cell in row)
+        for row in block.rows
+    )
+    widths = _fit_table_column_widths(_table_column_widths(rows))
     rendered = (
-        _render_pre_table(block.rows, widths)
-        if table_width <= TABLE_MAX_WIDTH
+        _render_pre_table(rows, widths)
+        if widths is not None
         else _render_list_table(block.rows)
     )
     return rendered + ("\n" if block.raw.endswith(("\n", "\r")) else "")
@@ -555,8 +844,9 @@ def markdown_to_telegram_html(markdown: str) -> str:
 
     Unsupported Markdown and raw HTML are retained as escaped plain text.  A
     fenced block is always closed in the output, including when Gemini emits
-    an unfinished fence.  LaTeX is wrapped in ``<code>`` rather than converted
-    to Unicode so no mathematical meaning is silently discarded.
+    an unfinished fence.  Simple LaTeX is converted only when the complete
+    expression belongs to a lossless allowlist; all other math stays copyable
+    as its original source in ``<code>``.
     """
 
     rendered: list[str] = []
@@ -713,7 +1003,8 @@ __all__ = [
     "LIST_INDENT_CHARACTERS_PER_LEVEL",
     "MAX_MESSAGE_LENGTH",
     "ORPHAN_ARTIFACT_SUFFIX_RE",
-    "TABLE_MAX_WIDTH",
+    "TABLE_MIN_COLUMN_WIDTH",
+    "TABLE_TARGET_WIDTH",
     "UNORDERED_LIST_BULLETS",
     "display_width",
     "markdown_to_telegram_html",
