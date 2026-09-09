@@ -619,9 +619,10 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     async def generate() -> Any:
         yield output
 
-    client = SimpleNamespace(
-        generate_content_stream=MagicMock(return_value=generate()),
+    session.send_message_stream = MagicMock(
+        return_value=generate(),
     )
+    client = SimpleNamespace()
 
     async def execute(operation: Any) -> Any:
         return await operation(client)
@@ -666,6 +667,11 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     with caplog.at_level(logging.DEBUG, logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(update, SimpleNamespace())
 
+    session.send_message_stream.assert_called_once_with(
+        "generate an image",
+        temporary=False,
+        extended_thinking=False,
+    )
     message.reply_text.assert_awaited_once_with(PLACEHOLDER_TEXT)
     placeholder.edit_text.assert_not_awaited()
     placeholder.delete.assert_awaited_once_with()

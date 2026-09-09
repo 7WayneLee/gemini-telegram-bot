@@ -58,7 +58,7 @@ async def _cancel(task: asyncio.Future[Any] | None) -> None:
 
 async def stream_response(
     message: Any,
-    client: Any,
+    session: Any,
     prompt: str,
     *,
     placeholder_text: str = PLACEHOLDER_TEXT,
@@ -71,10 +71,10 @@ async def stream_response(
 ) -> StreamResult:
     """Stream a Gemini response into a Telegram placeholder message.
 
-    ``client`` is the application's existing singleton Gemini client.  Its
-    ``generate_content_stream`` method is consumed directly according to the
-    pinned upstream contract: each item has incremental ``text_delta`` and the
-    complete response-so-far in ``text``.
+    ``session`` is the current upstream ``ChatSession``.  Its
+    ``send_message_stream`` method forwards session-owned model and Gem state;
+    each yielded item has incremental ``text_delta`` and the complete
+    response-so-far in ``text``.
 
     An intermediate edit happens after either ``edit_interval`` seconds or
     ``edit_character_threshold`` accumulated delta characters, whichever
@@ -104,30 +104,50 @@ async def stream_response(
     latest_thoughts = ""
     latest_output: Any | None = None
     last_sent_text = placeholder_text
+    extended_thinking = bool(generate_kwargs.get("extended_thinking", False))
+    thoughts_started_at: float | None = None
+    answer_started_at: float | None = None
 
-    stream = client.generate_content_stream(prompt, **generate_kwargs)
+    stream = session.send_message_stream(prompt, **generate_kwargs)
     iterator = stream.__aiter__()
     next_chunk: asyncio.Future[Any] | None = asyncio.ensure_future(anext(iterator))
     timer: asyncio.Future[Any] | None = None
 
     async def edit_plain_text() -> None:
         nonlocal last_edit_at, last_sent_text, pending_characters
-        if latest_text != last_sent_text:
+        if latest_text:
+            edit_content = latest_text
+        elif (
+            extended_thinking
+            and latest_thoughts
+            and thoughts_started_at is not None
+        ):
+            elapsed_seconds = int(max(0.0, clock() - thoughts_started_at))
+            edit_content = f"{placeholder_text} {elapsed_seconds} 秒"
+        else:
+            edit_content = placeholder_text
+        if edit_content != last_sent_text:
             await edit_text(
                 placeholder,
-                latest_text,
+                edit_content,
                 parse_mode=None,
                 sleep=sleep,
                 flood_wait=flood_wait,
             )
-            last_sent_text = latest_text
+            last_sent_text = edit_content
         pending_characters = 0
         last_edit_at = clock()
 
     try:
         while next_chunk is not None:
             can_edit = bool(latest_text) and len(latest_text) <= MAX_MESSAGE_LENGTH
-            if can_edit and pending_characters:
+            showing_thoughts = (
+                extended_thinking
+                and bool(latest_thoughts)
+                and not latest_text
+                and thoughts_started_at is not None
+            )
+            if (can_edit and pending_characters) or showing_thoughts:
                 remaining = edit_interval - (clock() - last_edit_at)
                 if remaining <= 0:
                     await edit_plain_text()
@@ -157,7 +177,13 @@ async def stream_response(
             latest_text = chunk.text
             # Reasoning arrives before the answer and is absent on models that
             # do not support it, so read it defensively and keep the last value.
-            latest_thoughts = getattr(chunk, "thoughts", None) or latest_thoughts
+            chunk_thoughts = getattr(chunk, "thoughts", None)
+            observed_at = clock()
+            if chunk_thoughts and thoughts_started_at is None:
+                thoughts_started_at = observed_at
+            latest_thoughts = chunk_thoughts or latest_thoughts
+            if latest_text and answer_started_at is None:
+                answer_started_at = observed_at
             pending_characters += len(chunk.text_delta)
 
             can_edit = bool(latest_text) and len(latest_text) <= MAX_MESSAGE_LENGTH
@@ -170,6 +196,15 @@ async def stream_response(
         await _cancel(timer)
         await _cancel(next_chunk)
 
+    thought_seconds = (
+        max(
+            0.0,
+            (answer_started_at if answer_started_at is not None else clock())
+            - thoughts_started_at,
+        )
+        if extended_thinking and thoughts_started_at is not None
+        else None
+    )
     rendered_chunks = render_markdown_chunks(latest_text)
     if not rendered_chunks:
         images = (
@@ -177,6 +212,26 @@ async def stream_response(
             if latest_output is not None
             else ()
         )
+        if latest_thoughts and thought_seconds is not None:
+            suffix = "" if images else f"\n\n{EMPTY_RESPONSE_TEXT}"
+            quote = render_thoughts_blockquote(
+                latest_thoughts,
+                budget=MAX_MESSAGE_LENGTH - len(suffix),
+                seconds=thought_seconds,
+            )
+            if quote:
+                await edit_text(
+                    placeholder,
+                    f"{quote}{suffix}",
+                    parse_mode=ParseMode.HTML,
+                    sleep=sleep,
+                    flood_wait=flood_wait,
+                )
+                return StreamResult(
+                    text=latest_text,
+                    output=latest_output,
+                    thoughts=latest_thoughts,
+                )
         if images:
             return StreamResult(
                 text=latest_text,
@@ -204,6 +259,7 @@ async def stream_response(
         quote = render_thoughts_blockquote(
             latest_thoughts,
             budget=MAX_MESSAGE_LENGTH - len(rendered_chunks[0]) - len(separator),
+            seconds=thought_seconds,
         )
         if quote:
             rendered_chunks[0] = f"{quote}{separator}{rendered_chunks[0]}"

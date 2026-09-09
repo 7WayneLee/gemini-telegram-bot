@@ -328,6 +328,26 @@ def test_thoughts_are_wrapped_in_an_expandable_blockquote() -> None:
     )
 
 
+def test_thoughts_seconds_title_is_the_first_expandable_line() -> None:
+    rendered = _RENDERING.render_thoughts_blockquote(
+        "Reasoning",
+        budget=100,
+        seconds=18.9,
+    )
+
+    assert rendered == (
+        "<blockquote expandable>思考過程（18 秒）\nReasoning</blockquote>"
+    )
+
+
+def test_thoughts_none_seconds_preserves_existing_output() -> None:
+    assert _RENDERING.render_thoughts_blockquote(
+        "Reasoning",
+        budget=100,
+        seconds=None,
+    ) == "<blockquote expandable>Reasoning</blockquote>"
+
+
 def test_thoughts_escape_html_special_characters() -> None:
     """Escaping prevents reasoning text from corrupting Telegram's HTML markup."""
 
@@ -369,6 +389,23 @@ def test_thoughts_are_truncated_with_note_inside_budget() -> None:
 
     rendered = _RENDERING.render_thoughts_blockquote("x" * 100, budget=budget)
 
+    assert rendered.endswith(f"{note}{closing}")
+    assert len(rendered) <= budget
+
+
+def test_thoughts_with_seconds_are_truncated_inside_budget() -> None:
+    opening, closing = "<blockquote expandable>", "</blockquote>"
+    title = "思考過程（18 秒）\n"
+    note = _RENDERING.THOUGHTS_TRUNCATION_NOTE
+    budget = len(opening) + len(title) + len(closing) + len(note) + 12
+
+    rendered = _RENDERING.render_thoughts_blockquote(
+        "x" * 100,
+        budget=budget,
+        seconds=18.9,
+    )
+
+    assert rendered.startswith(f"{opening}{title}")
     assert rendered.endswith(f"{note}{closing}")
     assert len(rendered) <= budget
 

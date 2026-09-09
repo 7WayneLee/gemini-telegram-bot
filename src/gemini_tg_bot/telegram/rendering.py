@@ -537,9 +537,15 @@ __all__ = [
 
 
 THOUGHTS_TRUNCATION_NOTE = "…（思考過程過長，已截斷）"
+THOUGHTS_TITLE = "思考過程"
 
 
-def render_thoughts_blockquote(thoughts: str, *, budget: int) -> str:
+def render_thoughts_blockquote(
+    thoughts: str,
+    *,
+    budget: int,
+    seconds: float | None = None,
+) -> str:
     """Wrap reasoning in a collapsed blockquote that fits within ``budget``.
 
     Telegram renders ``<blockquote expandable>`` collapsed until tapped, which
@@ -547,7 +553,8 @@ def render_thoughts_blockquote(thoughts: str, *, budget: int) -> str:
     result shares one message with the answer so the two cannot be separated by
     other traffic, which is why the caller has to pass a character budget: the
     reasoning is supplementary, so it is truncated rather than allowed to push
-    the answer into another message.
+    the answer into another message.  When ``seconds`` is supplied, the first
+    line identifies the elapsed thinking time even while the quote is collapsed.
     """
 
     text = thoughts.strip()
@@ -555,13 +562,18 @@ def render_thoughts_blockquote(thoughts: str, *, budget: int) -> str:
         return ""
 
     opening, closing = "<blockquote expandable>", "</blockquote>"
-    overhead = len(opening) + len(closing)
+    title = (
+        f"{THOUGHTS_TITLE}（{int(max(0.0, seconds))} 秒）\n"
+        if seconds is not None
+        else ""
+    )
+    overhead = len(opening) + len(title) + len(closing)
     if budget <= overhead:
         return ""
 
     body = escape(text, quote=False)
     if len(body) + overhead <= budget:
-        return f"{opening}{body}{closing}"
+        return f"{opening}{title}{body}{closing}"
 
     note = escape(THOUGHTS_TRUNCATION_NOTE, quote=False)
     room = budget - overhead - len(note)
@@ -575,4 +587,4 @@ def render_thoughts_blockquote(thoughts: str, *, budget: int) -> str:
         trimmed = trimmed[:-1]
     if not trimmed:
         return ""
-    return f"{opening}{escape(trimmed, quote=False)}{note}{closing}"
+    return f"{opening}{title}{escape(trimmed, quote=False)}{note}{closing}"

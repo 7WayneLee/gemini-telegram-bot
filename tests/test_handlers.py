@@ -192,7 +192,7 @@ def _client_service(client: Any) -> MagicMock:
     return service
 
 
-class _StreamingClient:
+class _StreamingSession:
     def __init__(self, outputs: list[Any]) -> None:
         self._outputs = outputs
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -201,7 +201,7 @@ class _StreamingClient:
         for output in self._outputs:
             yield output
 
-    def generate_content_stream(self, prompt: str, **kwargs: Any) -> Any:
+    def send_message_stream(self, prompt: str, **kwargs: Any) -> Any:
         self.calls.append((prompt, kwargs))
         return self._generate()
 
@@ -407,11 +407,10 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
         ],
         chosen=0,
     )
-    client = _StreamingClient([output])
+    session = _StreamingSession([output])
     media_handler = MagicMock(spec=MediaHandler)
-    session = SimpleNamespace()
     registry.get_or_create.return_value = session
-    handlers, _ = handlers_factory(client, media_handler=media_handler)
+    handlers, _ = handlers_factory(media_handler=media_handler)
     update = _update(text="/img 台北 101 的水彩畫")
     delivery_order: list[str] = []
 
@@ -430,10 +429,10 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
         SimpleNamespace(args=["台北", "101", "的水彩畫"]),
     )
 
-    assert client.calls == [
+    assert session.calls == [
         (
             f"{IMAGE_GENERATION_PREFIX}\n\n台北 101 的水彩畫",
-            {"chat": session, "temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": False},
         )
     ]
     media_handler.send_output_images.assert_awaited_once_with(
@@ -466,11 +465,9 @@ async def test_real_generated_image_fixture_deletes_placeholder_before_media(
     fixture_path = Path(__file__).parent / "fixtures" / "image-generated.json"
     output = ModelOutput.model_validate_json(fixture_path.read_text(encoding="utf-8"))
     media_handler = MagicMock(spec=MediaHandler)
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(
-        _StreamingClient([output]),
-        media_handler=media_handler,
-    )
+    session = _StreamingSession([output])
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory(media_handler=media_handler)
     update = _update(text="/img cat")
     delivery_order: list[str] = []
 
@@ -621,27 +618,26 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
-    session = SimpleNamespace()
     output = SimpleNamespace(
         text="**hello**\n\nworld",
         text_delta="**hello**\n\nworld",
         images=(),
     )
-    client = _StreamingClient([output])
+    session = _StreamingSession([output])
     registry.get_state.return_value = _state(temporary=True)
     registry.get_or_create.return_value = session
     usage_dao = AsyncMock(spec=UsageLogDAO)
-    handlers, service = handlers_factory(client, usage_dao=usage_dao)
+    handlers, service = handlers_factory(usage_dao=usage_dao)
     update = _update(text="question")
 
     await handlers.text_message(update, SimpleNamespace())
 
     registry.get_or_create.assert_awaited_once_with(202)
     service.execute.assert_awaited_once()
-    assert client.calls == [
+    assert session.calls == [
         (
             "question",
-            {"chat": session, "temporary": True, "extended_thinking": False},
+            {"temporary": True, "extended_thinking": False},
         )
     ]
     registry.persist.assert_awaited_once_with(202, session)
@@ -663,19 +659,16 @@ async def test_unformatted_stream_skips_final_edit_and_records_success(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
-    session = SimpleNamespace()
     text = "好" * EDIT_CHARACTER_THRESHOLD
     output = SimpleNamespace(
         text=text,
         text_delta=text,
         images=(),
     )
+    session = _StreamingSession([output])
     registry.get_or_create.return_value = session
     usage_dao = AsyncMock(spec=UsageLogDAO)
-    handlers, _ = handlers_factory(
-        _StreamingClient([output]),
-        usage_dao=usage_dao,
-    )
+    handlers, _ = handlers_factory(usage_dao=usage_dao)
     update = _update(text="question")
     update.effective_message.placeholder.edit_text.side_effect = [
         None,
@@ -701,11 +694,7 @@ async def test_text_reports_bounded_flood_control_and_releases_slot(
     queue = RequestQueue(max_concurrency=1, user_rate_limit_per_min=10)
     usage_dao = AsyncMock(spec=UsageLogDAO)
     registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(
-        _StreamingClient([]),
-        usage_dao=usage_dao,
-        request_queue=queue,
-    )
+    handlers, _ = handlers_factory(usage_dao=usage_dao, request_queue=queue)
     update = _update(text="question")
     update.effective_message.reply_text.side_effect = [
         RetryAfter(MAX_FLOOD_WAIT_SECONDS + 1),
@@ -735,7 +724,6 @@ async def test_text_reports_queue_acquire_timeout(
     )
     usage_dao = AsyncMock(spec=UsageLogDAO)
     handlers, service = handlers_factory(
-        _StreamingClient([]),
         usage_dao=usage_dao,
         request_queue=queue,
     )
@@ -883,11 +871,10 @@ async def test_text_stream_cleans_artifacts_and_sends_final_output_images(
         ],
         chosen=0,
     )
-    client = _StreamingClient([output])
-    session = SimpleNamespace()
+    session = _StreamingSession([output])
     registry.get_state.return_value = _state(temporary=False)
     registry.get_or_create.return_value = session
-    handlers, _ = handlers_factory(client)
+    handlers, _ = handlers_factory()
     update = _update(text="generate an image")
     delivery_order: list[str] = []
 
@@ -949,8 +936,9 @@ async def test_text_stream_merges_rendered_text_into_image_caption(
         ],
         chosen=0,
     )
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(_StreamingClient([output]))
+    session = _StreamingSession([output])
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
     update = _update(text="generate")
 
     await handlers.text_message(update, SimpleNamespace())
@@ -986,8 +974,9 @@ async def test_text_stream_over_caption_limit_keeps_separate_text_message(
         ],
         chosen=0,
     )
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(_StreamingClient([output]))
+    session = _StreamingSession([output])
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
     update = _update(text="generate")
 
     await handlers.text_message(update, SimpleNamespace())
@@ -1253,16 +1242,18 @@ async def test_enabled_thinking_reaches_the_upstream_call(
 ) -> None:
     """The persisted switch has to arrive as the upstream keyword argument."""
 
-    client = _StreamingClient(
+    session = _StreamingSession(
         [SimpleNamespace(text="ok", text_delta="ok", images=())]
     )
     registry.get_state.return_value = _state(extended_thinking=True)
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(client)
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
 
     await handlers.text_message(_update(text="question"), SimpleNamespace())
 
-    assert client.calls[0][1]["extended_thinking"] is True
+    assert session.calls == [
+        ("question", {"temporary": False, "extended_thinking": True})
+    ]
 
 
 async def test_enabled_thinking_logs_model_and_thought_character_count(
@@ -1271,7 +1262,7 @@ async def test_enabled_thinking_logs_model_and_thought_character_count(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     thoughts = "SENSITIVE_THOUGHTS_SENTINEL"
-    client = _StreamingClient(
+    session = _StreamingSession(
         [
             SimpleNamespace(
                 text="ok",
@@ -1285,8 +1276,8 @@ async def test_enabled_thinking_logs_model_and_thought_character_count(
         model="thinking-capable-model",
         extended_thinking=True,
     )
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(client)
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
 
     with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(_update(text="question"), SimpleNamespace())
@@ -1301,15 +1292,15 @@ async def test_enabled_thinking_logs_when_no_thoughts_are_returned(
     registry: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client = _StreamingClient(
+    session = _StreamingSession(
         [SimpleNamespace(text="ok", text_delta="ok", images=(), thoughts=None)]
     )
     registry.get_state.return_value = _state(
         model=None,
         extended_thinking=True,
     )
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(client)
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
 
     with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(_update(text="question"), SimpleNamespace())
@@ -1323,7 +1314,7 @@ async def test_disabled_thinking_does_not_log_thought_observability(
     registry: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client = _StreamingClient(
+    session = _StreamingSession(
         [
             SimpleNamespace(
                 text="ok",
@@ -1334,8 +1325,8 @@ async def test_disabled_thinking_does_not_log_thought_observability(
         ]
     )
     registry.get_state.return_value = _state(extended_thinking=False)
-    registry.get_or_create.return_value = SimpleNamespace()
-    handlers, _ = handlers_factory(client)
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
 
     with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(_update(text="question"), SimpleNamespace())

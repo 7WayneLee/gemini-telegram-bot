@@ -783,11 +783,10 @@ class TelegramHandlers:
             async with self._request_queue.request(user_id) as permit:
                 session = await self._sessions.get_or_create(chat_id)
                 streamed = await self._service.execute(
-                    lambda client: stream_response(
+                    lambda _client: stream_response(
                         stream_message,
-                        client,
+                        session,
                         prompt,
-                        chat=session,
                         temporary=state.temporary,
                         extended_thinking=state.extended_thinking,
                         flood_wait=permit.wait_for_flood_control,
@@ -817,6 +816,9 @@ class TelegramHandlers:
                 stream_message.placeholder,
                 streamed.text,
                 streamed.output,
+                keep_placeholder=(
+                    state.extended_thinking and bool(streamed.thoughts)
+                ),
             )
             ok = True
         except RateLimitExceeded as error:
@@ -943,16 +945,23 @@ class TelegramHandlers:
         placeholder: Any | None,
         markdown: str,
         output: Any | None,
+        *,
+        keep_placeholder: bool = False,
     ) -> None:
         images = getattr(output, "images", ()) if output is not None else ()
         rendered_chunks = render_markdown_chunks(markdown)
         caption = _caption_from_chunks(rendered_chunks) if images else None
         if images and not rendered_chunks:
-            await _delete_placeholder(placeholder)
+            if not keep_placeholder:
+                await _delete_placeholder(placeholder)
             await self._reply_output_images(message, output, caption=None)
             return
         await self._reply_output_images(message, output, caption=caption)
-        if images and (caption is not None or not rendered_chunks):
+        if (
+            images
+            and (caption is not None or not rendered_chunks)
+            and not keep_placeholder
+        ):
             await _delete_placeholder(placeholder)
 
     async def _reply_output_images(

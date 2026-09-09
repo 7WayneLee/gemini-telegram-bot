@@ -228,6 +228,18 @@ class _DryRunSession:
     def __init__(self) -> None:
         self.cid = ""
         self.metadata = None
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def _generate(self) -> Any:
+        yield SimpleNamespace(
+            text="**dry-run ok**",
+            text_delta="**dry-run ok**",
+            images=(),
+        )
+
+    def send_message_stream(self, prompt: str, **kwargs: Any) -> Any:
+        self.calls.append((prompt, kwargs))
+        return self._generate()
 
 
 class _DryRunRegistry:
@@ -260,7 +272,7 @@ class _DryRunRegistry:
 
 class _DryRunService:
     def __init__(self) -> None:
-        self.client = _DryRunClient()
+        self.client = SimpleNamespace()
         self.execute_count = 0
         self.health = SimpleNamespace(
             state=SimpleNamespace(value="healthy"),
@@ -271,23 +283,6 @@ class _DryRunService:
         self.execute_count += 1
         result = operation(self.client)
         return await result if inspect.isawaitable(result) else result
-
-
-class _DryRunClient:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-
-    async def _generate(self) -> Any:
-        yield SimpleNamespace(
-            text="**dry-run ok**",
-            text_delta="**dry-run ok**",
-            images=(),
-        )
-
-    def generate_content_stream(self, prompt: str, **kwargs: Any) -> Any:
-        self.calls.append((prompt, kwargs))
-        return self._generate()
-
 
 class _DryRunResearch:
     def __init__(self) -> None:
@@ -390,11 +385,10 @@ async def _run_dry_run() -> None:
         usage = await UsageLogDAO(database.connection).list_for_chat(chat_id)
         assert fake_application.handlers[0][0] == -1
         assert service.execute_count == 1
-        assert service.client.calls == [
+        assert sessions.session.calls == [
             (
                 "dry-run request",
                 {
-                    "chat": sessions.session,
                     "temporary": False,
                     "extended_thinking": False,
                 },
