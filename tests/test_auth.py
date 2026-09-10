@@ -5,9 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import ApplicationHandlerStop
 
+from gemini_tg_bot.i18n import LANGUAGE_CHINESE, LANGUAGE_ENGLISH, translate
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import AdminNotificationDAO
 from gemini_tg_bot.telegram.auth import (
@@ -44,6 +45,7 @@ def _middleware(
     allowed_chat_ids: set[int] | None = None,
     admin_user_id: int = 9001,
     notify_admin: AsyncMock | None = None,
+    notification_language: str = LANGUAGE_ENGLISH,
 ) -> AuthMiddleware:
     return AuthMiddleware(
         admin_user_id=admin_user_id,
@@ -51,6 +53,7 @@ def _middleware(
         allowed_chat_ids=allowed_chat_ids or set(),
         access_overrides=SQLiteAccessOverrides(database.connection),
         notify_admin=notify_admin,
+        notification_language=notification_language,
     )
 
 
@@ -261,19 +264,34 @@ async def test_chat_database_override_precedes_configured_allowlist(tmp_path) ->
 
 @pytest.mark.parametrize(
     ("title", "expected_name"),
-    [("Project Crew", "Project Crew"), (None, "Unnamed group")],
+    [
+        ("Project Crew", "Project Crew"),
+        (None, "Unnamed group"),
+        ("<Ops > QA & Support>", "&lt;Ops &gt; QA &amp; Support&gt;"),
+    ],
+)
+@pytest.mark.parametrize(
+    "language",
+    [LANGUAGE_ENGLISH, LANGUAGE_CHINESE],
 )
 @pytest.mark.asyncio
 async def test_unapproved_group_notifies_admin_with_actionable_identity(
     tmp_path,
     title: str | None,
     expected_name: str,
+    language: str,
 ) -> None:
-    """The private page must identify and make even an unnamed group approvable."""
+    """Bilingual HTML alerts must be safe and preserve a copyable negative ID."""
 
     async with Database(tmp_path / "bot.sqlite3") as database:
+        if title is None and language == LANGUAGE_CHINESE:
+            expected_name = "未命名群組"
         notify_admin = AsyncMock()
-        middleware = _middleware(database, notify_admin=notify_admin)
+        middleware = _middleware(
+            database,
+            notify_admin=notify_admin,
+            notification_language=language,
+        )
         update = _update(
             404,
             chat_id=-1001,
@@ -285,9 +303,16 @@ async def test_unapproved_group_notifies_admin_with_actionable_identity(
             await middleware(update, SimpleNamespace())
 
         notification = notify_admin.await_args.args[0]
-        assert expected_name in notification
-        assert "-1001" in notification
-        assert "/allow_chat -1001" in notification
+        assert notification == translate(
+            "auth.group_access_request",
+            language,
+            chat_id=-1001,
+            title=expected_name,
+        )
+        assert "<code>/allow_chat -1001</code>" in notification
+        assert notify_admin.await_args.kwargs == {
+            "parse_mode": ParseMode.HTML,
+        }
         update.effective_message.reply_text.assert_not_awaited()
 
 
@@ -301,9 +326,13 @@ async def test_group_notification_reuses_durable_message_deduplication(
         dao = AdminNotificationDAO(database.connection)
         delivered = AsyncMock()
 
-        async def notify_admin(message: str) -> None:
+        async def notify_admin(
+            message: str,
+            *,
+            parse_mode: str | None = None,
+        ) -> None:
             if await dao.claim(message, now=100.0, cooldown_sec=900.0):
-                await delivered(message)
+                await delivered(message, parse_mode=parse_mode)
 
         middleware = AuthMiddleware(
             admin_user_id=9001,
@@ -322,7 +351,9 @@ async def test_group_notification_reuses_durable_message_deduplication(
                 await middleware(update, SimpleNamespace())
             update.effective_message.reply_text.assert_not_awaited()
 
-        delivered.assert_awaited_once()
+        assert delivered.await_count == 1
+        assert "<code>/allow_chat -1001</code>" in delivered.await_args.args[0]
+        assert delivered.await_args.kwargs == {"parse_mode": ParseMode.HTML}
 
 
 @pytest.mark.parametrize("chat_id", [0, 1, True, "-1001"])

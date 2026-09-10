@@ -47,6 +47,35 @@ DATABASE_PATH = Path("data/db/bot.sqlite3")
 ADMIN_NOTIFICATION_COOLDOWN_SEC = 900.0
 
 
+async def _send_admin_notification(
+    application: Application[Any, Any, Any, Any, Any, Any],
+    notifications: AdminNotificationDAO,
+    admin_user_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+) -> None:
+    """Deduplicate and deliver one administrator notification."""
+
+    if not await notifications.claim(
+        text,
+        now=time.time(),
+        cooldown_sec=ADMIN_NOTIFICATION_COOLDOWN_SEC,
+    ):
+        LOGGER.info(
+            "Suppressed an administrator notification repeated within %.0fs",
+            ADMIN_NOTIFICATION_COOLDOWN_SEC,
+        )
+        return
+    send_kwargs: dict[str, Any] = {
+        "chat_id": admin_user_id,
+        "text": text,
+    }
+    if parse_mode is not None:
+        send_kwargs["parse_mode"] = parse_mode
+    await application.bot.send_message(**send_kwargs)
+
+
 def _log_cookie_location(settings: Settings) -> None:
     """Record where the session actually lives, resolved to an absolute path.
 
@@ -79,20 +108,17 @@ async def _run_polling(settings: Settings) -> None:
 
     admin_notifications = AdminNotificationDAO(database.connection)
 
-    async def notify_admin(text: str) -> None:
-        if not await admin_notifications.claim(
+    async def notify_admin(
+        text: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        await _send_admin_notification(
+            application,
+            admin_notifications,
+            settings.admin_user_id,
             text,
-            now=time.time(),
-            cooldown_sec=ADMIN_NOTIFICATION_COOLDOWN_SEC,
-        ):
-            LOGGER.info(
-                "Suppressed an administrator notification repeated within %.0fs",
-                ADMIN_NOTIFICATION_COOLDOWN_SEC,
-            )
-            return
-        await application.bot.send_message(
-            chat_id=settings.admin_user_id,
-            text=text,
+            parse_mode=parse_mode,
         )
 
     async def notify_research(chat_id: int, text: str) -> None:

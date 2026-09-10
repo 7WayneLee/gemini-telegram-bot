@@ -23,6 +23,7 @@ import gemini_tg_bot.telegram.handlers as handlers_module
 from gemini_tg_bot.__main__ import (
     _initialize_and_start_polling,
     _log_cookie_location,
+    _send_admin_notification,
     _start_application,
 )
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME
@@ -34,7 +35,11 @@ from gemini_tg_bot.i18n import (
 )
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
-from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
+from gemini_tg_bot.storage.models import (
+    AdminNotificationDAO,
+    UsageLog,
+    UsageLogDAO,
+)
 from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
     GEM_LIST_UNAVAILABLE,
@@ -42,7 +47,10 @@ from gemini_tg_bot.telegram.handlers import (
     IMAGE_USAGE,
     MODEL_LIST_UNAVAILABLE,
     GROUP_COMMANDS,
+    GROUP_MENU_COMMANDS,
+    HELP_COMMAND,
     PUBLIC_BOT_COMMANDS,
+    PUBLIC_MENU_COMMANDS,
     EgressMeter,
     TelegramHandlers,
     _help_text,
@@ -81,6 +89,7 @@ except ModuleNotFoundError:
 
 
 NOW = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
+BOT_ID = 999
 
 _TELEGRAM_SEND_METHODS = {
     "answer",
@@ -162,6 +171,8 @@ def _update(
     language_code: str | None = None,
     message_id: int = 301,
     reply_to_message_id: int | None = None,
+    reply_to_user_id: int = BOT_ID,
+    reply_to_user_is_bot: bool = True,
 ) -> SimpleNamespace:
     placeholder = SimpleNamespace(
         message_id=message_id + 1,
@@ -172,7 +183,13 @@ def _update(
         message_id=message_id,
         text=text,
         reply_to_message=(
-            SimpleNamespace(message_id=reply_to_message_id)
+            SimpleNamespace(
+                message_id=reply_to_message_id,
+                from_user=SimpleNamespace(
+                    id=reply_to_user_id,
+                    is_bot=reply_to_user_is_bot,
+                ),
+            )
             if reply_to_message_id is not None
             else None
         ),
@@ -189,6 +206,10 @@ def _update(
         effective_message=message,
         callback_query=None,
     )
+
+
+def _bot_context() -> SimpleNamespace:
+    return SimpleNamespace(bot=SimpleNamespace(id=BOT_ID))
 
 
 def _callback_update(
@@ -360,7 +381,7 @@ async def test_every_non_private_chat_type_uses_the_safe_command_default(
 async def test_group_help_and_image_commands_remain_available(
     handlers_factory,
 ) -> None:
-    """The deliberately small group surface must still provide help and images."""
+    """Hiding /help from menus must not break its conventional manual alias."""
 
     handlers, _ = handlers_factory()
     start_update = _update(text="/start", chat_type=ChatType.GROUP)
@@ -402,7 +423,7 @@ def test_help_lists_exact_commands_for_chat_scope(
     expected = (
         GROUP_COMMANDS
         if group_only
-        else {item.command for item in PUBLIC_BOT_COMMANDS}
+        else PUBLIC_MENU_COMMANDS | {HELP_COMMAND}
     )
 
     assert _help_commands(help_text) == expected
@@ -660,7 +681,7 @@ async def test_group_img_uses_fixed_fresh_sessions_and_records_reply_threads(
 
         await handlers.img(first, SimpleNamespace(args=["first"]))
         await handlers.img(second, SimpleNamespace(args=["second"]))
-        await handlers.text_message(follow_up, SimpleNamespace())
+        await handlers.text_message(follow_up, _bot_context())
 
     assert client.resolve_model.call_args_list == [
         call("configured-group-model"),
@@ -706,7 +727,7 @@ async def test_group_reply_restores_and_extends_the_referenced_thread(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
-    """Recording every new answer lets a reply chain grow beyond one turn."""
+    """A reply authored by this bot must still extend its referenced thread."""
 
     output = SimpleNamespace(text="answer", text_delta="answer", images=())
     first_session = _StreamingSession([output])
@@ -731,7 +752,7 @@ async def test_group_reply_restores_and_extends_the_referenced_thread(
     )
 
     await handlers.gemini(first, SimpleNamespace(args=["begin"]))
-    await handlers.text_message(follow_up, SimpleNamespace())
+    await handlers.text_message(follow_up, _bot_context())
 
     assert registry.start_group_session.await_args_list == [
         call(-1001, None),
@@ -768,7 +789,7 @@ async def test_unknown_group_reply_starts_a_new_conversation_without_notice(
         reply_to_message_id=999,
     )
 
-    await handlers.text_message(update, SimpleNamespace())
+    await handlers.text_message(update, _bot_context())
 
     registry.start_group_session.assert_awaited_once_with(-1001, 999)
     assert [
@@ -824,7 +845,7 @@ async def test_failed_group_restore_notifies_then_retries_fresh(
         fresh_placeholder,
     ]
 
-    await handlers.text_message(update, SimpleNamespace())
+    await handlers.text_message(update, _bot_context())
 
     assert registry.start_group_session.await_args_list == [
         call(-1001, 450),
@@ -842,13 +863,46 @@ async def test_failed_group_restore_notifies_then_retries_fresh(
     )
 
 
+@pytest.mark.parametrize(
+    ("reply_to_user_id", "reply_to_user_is_bot"),
+    [(202, False), (BOT_ID + 1, True)],
+    ids=["other-user", "other-bot"],
+)
+async def test_group_text_reply_to_another_sender_is_completely_ignored(
+    handlers_factory,
+    registry: AsyncMock,
+    reply_to_user_id: int,
+    reply_to_user_is_bot: bool,
+) -> None:
+    """Admin-mode visibility must not make the bot interrupt people or bots."""
+
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    handlers, service = handlers_factory(usage_dao=usage_dao)
+    update = _update(
+        text="not addressed to this bot",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=reply_to_user_id,
+        reply_to_user_is_bot=reply_to_user_is_bot,
+    )
+
+    await handlers.text_message(update, _bot_context())
+
+    registry.start_group_session.assert_not_awaited()
+    service.execute.assert_not_awaited()
+    usage_dao.add.assert_not_awaited()
+    update.effective_message.reply_text.assert_not_awaited()
+
+
 async def test_unthreaded_group_text_is_ignored(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
     """Privacy-mode semantics expose only explicit commands and bot replies."""
 
-    handlers, service = handlers_factory()
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    handlers, service = handlers_factory(usage_dao=usage_dao)
     update = _update(
         text="ambient group message",
         chat_id=-1001,
@@ -859,6 +913,7 @@ async def test_unthreaded_group_text_is_ignored(
 
     registry.start_group_session.assert_not_awaited()
     service.execute.assert_not_awaited()
+    usage_dao.add.assert_not_awaited()
     update.effective_message.reply_text.assert_not_awaited()
 
 
@@ -935,7 +990,7 @@ async def test_group_media_reply_uses_fixed_settings_and_extends_thread(
         reply_to_message_id=600,
     )
 
-    await handlers.media_message(update, SimpleNamespace())
+    await handlers.media_message(update, _bot_context())
 
     registry.start_group_session.assert_awaited_once_with(-1001, 600)
     session.send_message.assert_awaited_once_with(
@@ -951,6 +1006,44 @@ async def test_group_media_reply_uses_fixed_settings_and_extends_thread(
     )
     registry.persist_group_session.assert_awaited_once_with(-1001, 302, session)
     registry.get_state.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("reply_to_user_id", "reply_to_user_is_bot"),
+    [(202, False), (BOT_ID + 1, True)],
+    ids=["other-user", "other-bot"],
+)
+async def test_group_media_reply_to_another_sender_is_completely_ignored(
+    handlers_factory,
+    registry: AsyncMock,
+    reply_to_user_id: int,
+    reply_to_user_is_bot: bool,
+) -> None:
+    """Media must use the same exact-bot reply boundary as plain group text."""
+
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    media_handler = MagicMock(spec=MediaHandler)
+    handlers, service = handlers_factory(
+        usage_dao=usage_dao,
+        media_handler=media_handler,
+    )
+    update = _update(
+        text="caption",
+        chat_id=-1001,
+        chat_type=ChatType.SUPERGROUP,
+        reply_to_message_id=800,
+        reply_to_user_id=reply_to_user_id,
+        reply_to_user_is_bot=reply_to_user_is_bot,
+    )
+    update.effective_message.document = SimpleNamespace(file_id="document")
+
+    await handlers.media_message(update, _bot_context())
+
+    media_handler.prepare_upload.assert_not_called()
+    registry.start_group_session.assert_not_awaited()
+    service.execute.assert_not_awaited()
+    usage_dao.add.assert_not_awaited()
+    update.effective_message.reply_text.assert_not_awaited()
 
 
 async def test_group_gate_stops_even_an_unregistered_command(
@@ -1516,6 +1609,8 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
+    """Exact group reply checks must leave ordinary private text unchanged."""
+
     output = SimpleNamespace(
         text="**hello**\n\nworld",
         text_delta="**hello**\n\nworld",
@@ -2090,13 +2185,14 @@ def test_registration_places_auth_in_first_group(
         for command in getattr(registered.args[0], "commands", ())
     }
     assert "language" in registered_commands
+    assert {"start", "help"} <= registered_commands
     assert "lang" not in registered_commands
     assert {"img", "research", "research_status"} <= registered_commands
     assert {"allow_chat", "deny_chat"} <= registered_commands
 
 
 async def test_startup_registers_public_command_menu() -> None:
-    """Group suggestions must shrink without changing the full default menu."""
+    """Both Telegram menus must hide /help while preserving the /start entry."""
 
     application = SimpleNamespace(
         bot=SimpleNamespace(set_my_commands=AsyncMock()),
@@ -2116,7 +2212,6 @@ async def test_startup_registers_public_command_menu() -> None:
     registered_commands = {item.command for item in PUBLIC_BOT_COMMANDS}
     assert registered_commands == {
         "start",
-        "help",
         "gemini",
         "new",
         "model",
@@ -2129,6 +2224,7 @@ async def test_startup_registers_public_command_menu() -> None:
         "research_status",
         "status",
     }
+    assert "help" not in registered_commands
     assert registered_commands.isdisjoint(
         {
             "setcookie",
@@ -2140,12 +2236,40 @@ async def test_startup_registers_public_command_menu() -> None:
         }
     )
     assert GROUP_COMMANDS == {"start", "help", "img", "gemini"}
-    assert {item.command for item in menu_calls[1].args[0]} == GROUP_COMMANDS
+    assert GROUP_MENU_COMMANDS == {"start", "img", "gemini"}
+    assert {item.command for item in menu_calls[1].args[0]} == GROUP_MENU_COMMANDS
+    assert "help" not in {item.command for item in menu_calls[1].args[0]}
     assert isinstance(
         menu_calls[1].kwargs["scope"],
         BotCommandScopeAllGroupChats,
     )
     application.start.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("parse_mode", [None, ParseMode.HTML])
+async def test_admin_notification_sender_preserves_the_requested_parse_mode(
+    parse_mode: str | None,
+) -> None:
+    """HTML must be opt-in so safe group markup cannot break plain alerts."""
+
+    notifications = AsyncMock(spec=AdminNotificationDAO)
+    notifications.claim.return_value = True
+    application = SimpleNamespace(
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await _send_admin_notification(
+        application,
+        notifications,
+        9001,
+        "admin alert",
+        parse_mode=parse_mode,
+    )
+
+    expected_kwargs = {"chat_id": 9001, "text": "admin alert"}
+    if parse_mode is not None:
+        expected_kwargs["parse_mode"] = parse_mode
+    application.bot.send_message.assert_awaited_once_with(**expected_kwargs)
 
 
 async def test_startup_never_registers_zh_hant_command_menu(caplog) -> None:

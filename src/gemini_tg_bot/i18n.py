@@ -481,12 +481,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: (
             "An unapproved group tried to use the bot.\n"
             "Group: {title}\nChat ID: {chat_id}\n"
-            "Approve it with /allow_chat {chat_id}."
+            "Approve it with <code>/allow_chat {chat_id}</code>."
         ),
         LANGUAGE_CHINESE: (
             "未核准的群組嘗試使用 bot。\n"
             "群組：{title}\n聊天 ID：{chat_id}\n"
-            "可使用 /allow_chat {chat_id} 核准。"
+            "可使用 <code>/allow_chat {chat_id}</code> 核准。"
         ),
     },
     "health.none": {

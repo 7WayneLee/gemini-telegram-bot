@@ -77,9 +77,11 @@ MODEL_CALLBACK_PREFIX = "model:"
 GEM_CALLBACK_PREFIX = "gem:"
 LANGUAGE_CALLBACK_PREFIX = "lang:"
 
-_PUBLIC_COMMAND_KEYS = (
+HELP_COMMAND = "help"
+
+_AVAILABLE_PUBLIC_COMMAND_KEYS = (
     ("start", "command.start.description"),
-    ("help", "command.help.description"),
+    (HELP_COMMAND, "command.help.description"),
     ("gemini", "command.gemini.description"),
     ("new", "command.new.description"),
     ("model", "command.model.description"),
@@ -93,29 +95,49 @@ _PUBLIC_COMMAND_KEYS = (
     ("status", "command.status.description"),
 )
 
-GROUP_COMMANDS = frozenset({"start", "help", "img", "gemini"})
+# Available command sets drive handler access and help text.  Their derived menu
+# sets hide the /help alias without making that established command unavailable.
+PUBLIC_MENU_COMMANDS = frozenset(
+    command
+    for command, _description_key in _AVAILABLE_PUBLIC_COMMAND_KEYS
+    if command != HELP_COMMAND
+)
+GROUP_COMMANDS = frozenset({"start", HELP_COMMAND, "img", "gemini"})
+GROUP_MENU_COMMANDS = GROUP_COMMANDS - {HELP_COMMAND}
+
+
+def _available_commands_for_language(language: str) -> tuple[BotCommand, ...]:
+    return tuple(
+        BotCommand(command, translate(description_key, language))
+        for command, description_key in _AVAILABLE_PUBLIC_COMMAND_KEYS
+    )
 
 
 def _commands_for_language(language: str) -> tuple[BotCommand, ...]:
     return tuple(
-        BotCommand(command, translate(description_key, language))
-        for command, description_key in _PUBLIC_COMMAND_KEYS
+        command
+        for command in _available_commands_for_language(language)
+        if command.command in PUBLIC_MENU_COMMANDS
     )
 
 
 def _group_commands_for_language(language: str) -> tuple[BotCommand, ...]:
     return tuple(
         command
-        for command in _commands_for_language(language)
-        if command.command in GROUP_COMMANDS
+        for command in _available_commands_for_language(language)
+        if command.command in GROUP_MENU_COMMANDS
     )
 
 
 def _help_text(language: str, *, group_only: bool = False) -> str:
     commands = (
-        _group_commands_for_language(language)
+        tuple(
+            command
+            for command in _available_commands_for_language(language)
+            if command.command in GROUP_COMMANDS
+        )
         if group_only
-        else _commands_for_language(language)
+        else _available_commands_for_language(language)
     )
     footer_key = "help.footer_group" if group_only else "help.footer"
     return "\n".join(
@@ -1267,6 +1289,15 @@ class TelegramHandlers:
         if identity is None:
             return
         user_id, chat_id, message = identity
+        is_group = _is_group_update(update)
+        group_parent_message_id: int | None = None
+        if is_group:
+            group_parent_message_id = _own_bot_reply_message_id(
+                message,
+                context,
+            )
+            if group_parent_message_id is None:
+                return
         if user_id in self._awaiting_cookie_users:
             await self.setcookie_value(update, context)
             return
@@ -1277,16 +1308,6 @@ class TelegramHandlers:
         prompt = message.text
         if not prompt:
             return
-
-        is_group = _is_group_update(update)
-        group_parent_message_id: int | None = None
-        if is_group:
-            replied_to = getattr(message, "reply_to_message", None)
-            if replied_to is None:
-                return
-            replied_to_id = getattr(replied_to, "message_id", None)
-            if isinstance(replied_to_id, int):
-                group_parent_message_id = replied_to_id
 
         await self._stream_prompt(
             identity,
@@ -1493,7 +1514,6 @@ class TelegramHandlers:
     ) -> None:
         """Send one size-checked photo/document through the current session."""
 
-        del context
         identity = _message_identity(update)
         if identity is None:
             return
@@ -1501,12 +1521,12 @@ class TelegramHandlers:
         is_group = _is_group_update(update)
         group_parent_message_id: int | None = None
         if is_group:
-            replied_to = getattr(message, "reply_to_message", None)
-            if replied_to is None:
+            group_parent_message_id = _own_bot_reply_message_id(
+                message,
+                context,
+            )
+            if group_parent_message_id is None:
                 return
-            replied_to_id = getattr(replied_to, "message_id", None)
-            if isinstance(replied_to_id, int):
-                group_parent_message_id = replied_to_id
         started = time.monotonic()
         if is_group:
             language = LANGUAGE_ENGLISH
@@ -2152,6 +2172,25 @@ def _message_identity(update: Update) -> tuple[int, int, Any] | None:
 def _is_group_update(update: Update) -> bool:
     chat = update.effective_chat
     return getattr(chat, "type", ChatType.PRIVATE) != ChatType.PRIVATE
+
+
+def _own_bot_reply_message_id(
+    message: Any,
+    context: CallbackContext,
+) -> int | None:
+    """Return the replied-to message ID only when this bot authored it."""
+
+    replied_to = getattr(message, "reply_to_message", None)
+    if replied_to is None:
+        return None
+    replied_to_user = getattr(replied_to, "from_user", None)
+    replied_to_user_id = getattr(replied_to_user, "id", None)
+    bot = getattr(context, "bot", None)
+    bot_id = getattr(bot, "id", None)
+    if replied_to_user_id != bot_id or not isinstance(bot_id, int):
+        return None
+    replied_to_id = getattr(replied_to, "message_id", None)
+    return replied_to_id if isinstance(replied_to_id, int) else None
 
 
 def _telegram_language_code(update: Update) -> str | None:

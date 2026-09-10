@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Iterable
+from html import escape
+from typing import Protocol
 
 import aiosqlite
 from telegram import Update
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import ApplicationHandlerStop, CallbackContext
 
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
@@ -28,6 +30,17 @@ CREATE TABLE IF NOT EXISTS telegram_user_access (
     allowed INTEGER NOT NULL CHECK (allowed IN (0, 1))
 )
 """
+
+
+class AdminNotifier(Protocol):
+    """Deliver admin text with an optional Telegram parse mode."""
+
+    def __call__(
+        self,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> Awaitable[None]: ...
 
 
 def _validate_user_id(user_id: int) -> int:
@@ -147,7 +160,7 @@ class AuthMiddleware:
         allowed_user_ids: Iterable[int] = (),
         allowed_chat_ids: Iterable[int] = (),
         access_overrides: SQLiteAccessOverrides,
-        notify_admin: Callable[[str], Awaitable[None]] | None = None,
+        notify_admin: AdminNotifier | None = None,
         notification_language: str = DEFAULT_LANGUAGE,
     ) -> None:
         self._admin_user_id = _validate_user_id(admin_user_id)
@@ -263,7 +276,7 @@ class AuthMiddleware:
     ) -> None:
         if self._notify_admin is None:
             return
-        group_name = (
+        raw_group_name = (
             title.strip()
             if isinstance(title, str) and title.strip()
             else translate(
@@ -271,6 +284,7 @@ class AuthMiddleware:
                 self._notification_language,
             )
         )
+        group_name = escape(raw_group_name, quote=False)
         notification = translate(
             "auth.group_access_request",
             self._notification_language,
@@ -278,7 +292,10 @@ class AuthMiddleware:
             title=group_name,
         )
         try:
-            await self._notify_admin(notification)
+            await self._notify_admin(
+                notification,
+                parse_mode=ParseMode.HTML,
+            )
         except Exception as error:
             LOGGER.error(
                 "Unable to notify administrator about group access (%s)",
