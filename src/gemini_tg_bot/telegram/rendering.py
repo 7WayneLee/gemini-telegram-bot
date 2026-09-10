@@ -30,8 +30,14 @@ GOOGLEUSERCONTENT_ARTIFACT_RE = re.compile(
     r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*"
 )
 ORPHAN_ARTIFACT_SUFFIX_RE = re.compile(r"(?m)^[ \t]*_\d+[ \t]*$\n?")
+# Agent tags arrive self-closing (``<Tag/>``) and as pairs (``<Tag ...>`` with a
+# matching ``</Tag>``).  Only the tags are matched, never the text between an
+# opening and a closing tag, because upstream sometimes wraps real content in
+# them.  Requiring an upper-case initial keeps ordinary HTML such as ``<b>`` and
+# arithmetic comparisons such as ``a < b > c`` untouched.
 AGENT_TAG_RE = re.compile(
-    r'<[A-Z][A-Za-z0-9_]*(?:\s+[A-Za-z_][\w.-]*\s*=\s*"[^"]*")*\s*/>'
+    r"</[A-Z][A-Za-z0-9_]*\s*>"
+    r'|<[A-Z][A-Za-z0-9_]*(?:\s+[A-Za-z_][\w.-]*\s*=\s*"[^"]*")*\s*/?>'
 )
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")
@@ -72,7 +78,57 @@ _LATEX_MACROS = {
     "tan": "tan",
     "times": "×",
     "to": "→",
+    # Degrees, ellipses, and primes appear constantly in trigonometry answers.
+    "cdots": "⋯",
+    "circ": "°",
+    "degree": "°",
+    "ldots": "…",
+    "prime": "′",
+    # Greek letters with an exact Unicode counterpart.  Anything without one
+    # (``\varepsilon`` and friends) stays outside the safe set on purpose.
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "zeta": "ζ",
+    "eta": "η",
+    "theta": "θ",
+    "iota": "ι",
+    "kappa": "κ",
+    "lambda": "λ",
+    "mu": "μ",
+    "nu": "ν",
+    "xi": "ξ",
+    "pi": "π",
+    "rho": "ρ",
+    "sigma": "σ",
+    "tau": "τ",
+    "upsilon": "υ",
+    "phi": "φ",
+    "chi": "χ",
+    "psi": "ψ",
+    "omega": "ω",
+    "Gamma": "Γ",
+    "Delta": "Δ",
+    "Theta": "Θ",
+    "Lambda": "Λ",
+    "Xi": "Ξ",
+    "Pi": "Π",
+    "Sigma": "Σ",
+    "Upsilon": "Υ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
+    "Omega": "Ω",
 }
+# Glyphs that already sit on the superscript line, so ``90^\circ`` needs the
+# glyph itself rather than a lookup in _SUPERSCRIPTS.
+_LATEX_RAISED_MACROS = {
+    "circ": "°",
+    "degree": "°",
+    "prime": "′",
+}
+_LATEX_FRACTION_OPERATORS = frozenset("+-*/=<>±×·≈≤≥≠→")
 _SUPERSCRIPTS = {
     "0": "⁰",
     "1": "¹",
@@ -488,6 +544,68 @@ def _latex_span(text: str, position: int) -> tuple[str, int] | None:
     return formula, closing + 1
 
 
+def _matching_brace(formula: str, start: int) -> int:
+    """Return the index of the ``}`` closing the group opened before ``start``."""
+
+    depth = 1
+    position = start
+    while position < len(formula):
+        character = formula[position]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return position
+        position += 1
+    return -1
+
+
+def _latex_group(formula: str, position: int) -> tuple[str, int] | None:
+    """Return the contents of the brace group at ``position`` and the index after it."""
+
+    if position >= len(formula) or formula[position] != "{":
+        return None
+    end = _matching_brace(formula, position + 1)
+    if end < 0:
+        return None
+    return formula[position + 1 : end], end + 1
+
+
+def _convert_fraction(formula: str, position: int) -> tuple[str, int] | None:
+    """Convert ``\frac{X}{Y}`` to ``X/Y`` when both sides are themselves safe.
+
+    A nested fraction has no unambiguous single-line form, so it stays outside
+    the safe set and rejects the whole expression.  A side carrying an operator
+    or a space gains parentheses because ``a+b/c`` would otherwise read as a
+    different expression than the source.
+    """
+
+    sides: list[str] = []
+    for _ in range(2):
+        group = _latex_group(formula, position)
+        if group is None:
+            return None
+        raw, position = group
+        if "\\frac" in raw:
+            return None
+        side = _convert_simple_latex(raw)
+        if not side:
+            return None
+        sides.append(side)
+
+    numerator, denominator = (
+        f"({side})"
+        if any(
+            character.isspace() or character in _LATEX_FRACTION_OPERATORS
+            for character in side
+        )
+        else side
+        for side in sides
+    )
+    return f"{numerator}/{denominator}", position
+
+
 def _convert_simple_latex(formula: str) -> str | None:
     """Convert a safe expression, or reject the whole expression on any unknown syntax."""
 
@@ -497,12 +615,39 @@ def _convert_simple_latex(formula: str) -> str | None:
         character = formula[position]
         if character == "\\":
             match = re.match(r"\\([A-Za-z]+)", formula[position:])
-            if match is None or match.group(1) not in _LATEX_MACROS:
+            if match is None:
                 return None
-            converted.append(_LATEX_MACROS[match.group(1)])
-            position += len(match.group(0))
+            name = match.group(1)
+            after_macro = position + len(match.group(0))
+            if name == "text":
+                # ``\text`` carries prose, including CJK, that the plain
+                # character set deliberately excludes.  Only its braces are
+                # dropped, and only when it holds no further markup.
+                group = _latex_group(formula, after_macro)
+                if group is None or any(brace in group[0] for brace in "\\{}"):
+                    return None
+                converted.append(group[0])
+                position = group[1]
+                continue
+            if name == "frac":
+                fraction = _convert_fraction(formula, after_macro)
+                if fraction is None:
+                    return None
+                converted.append(fraction[0])
+                position = fraction[1]
+                continue
+            if name not in _LATEX_MACROS:
+                return None
+            converted.append(_LATEX_MACROS[name])
+            position = after_macro
             continue
         if character in {"^", "_"}:
+            if character == "^":
+                raised = re.match(r"\\([A-Za-z]+)", formula[position + 1 :])
+                if raised is not None and raised.group(1) in _LATEX_RAISED_MACROS:
+                    converted.append(_LATEX_RAISED_MACROS[raised.group(1)])
+                    position += 1 + len(raised.group(0))
+                    continue
             replacements = _SUPERSCRIPTS if character == "^" else _SUBSCRIPTS
             if position + 1 >= len(formula) or formula[position + 1] not in replacements:
                 return None

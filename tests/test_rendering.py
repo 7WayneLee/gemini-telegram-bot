@@ -213,10 +213,80 @@ def test_latex_scripts_require_one_unicode_supported_character() -> None:
     assert markdown_to_telegram_html(r"$x^{12}$") == r"<code>$x^{12}$</code>"
 
 
-def test_latex_fraction_example_remains_original_code() -> None:
-    """Rejecting grouped fractions wholesale prevents a misleading partial conversion."""
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$\theta$", "\u03b8"),
+        (r"$\sin\theta$", "sin\u03b8"),
+        (r"$90^\circ$", "90\u00b0"),
+        (r"$2\pi$", "2\u03c0"),
+        (r"$\frac{\text{對邊}}{\text{斜邊}}$", "對邊/斜邊"),
+        (
+            r"$\sin^2\theta + \cos^2\theta = 1$",
+            "sin\u00b2\u03b8 + cos\u00b2\u03b8 = 1",
+        ),
+    ],
+)
+def test_production_trigonometry_expressions_convert_to_unicode(
+    source: str,
+    expected: str,
+) -> None:
+    """These exact expressions reached real users as raw LaTeX because the safe set was too narrow."""
 
-    source = r"$\frac{n(n-1)}{2}$"
+    assert markdown_to_telegram_html(source) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$\alpha \beta \gamma \delta \epsilon$", "\u03b1 \u03b2 \u03b3 \u03b4 \u03b5"),
+        (r"$\zeta \eta \iota \kappa \lambda$", "\u03b6 \u03b7 \u03b9 \u03ba \u03bb"),
+        (r"$\mu \nu \xi \rho \sigma$", "\u03bc \u03bd \u03be \u03c1 \u03c3"),
+        (r"$\tau \upsilon \phi \chi \psi \omega$", "\u03c4 \u03c5 \u03c6 \u03c7 \u03c8 \u03c9"),
+        (r"$\Gamma \Delta \Theta \Lambda \Xi$", "\u0393 \u0394 \u0398 \u039b \u039e"),
+        (r"$\Pi \Sigma \Upsilon \Phi \Psi \Omega$", "\u03a0 \u03a3 \u03a5 \u03a6 \u03a8 \u03a9"),
+        (r"$\degree$", "\u00b0"),
+        (r"$x\prime$", "x\u2032"),
+        (r"$1, 2, \cdots, n$", "1, 2, \u22ef, n"),
+        (r"$1, 2, \ldots, n$", "1, 2, \u2026, n"),
+        (r"$\text{speed}$", "speed"),
+    ],
+)
+def test_every_newly_allowlisted_latex_macro_has_a_lossless_conversion(
+    source: str,
+    expected: str,
+) -> None:
+    """Widening the safe set only helps if each addition stays pinned to one exact glyph."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+def test_latex_fraction_becomes_a_single_line_quotient() -> None:
+    """A slash reads as the same quantity, so keeping simple fractions as code was pure noise."""
+
+    assert markdown_to_telegram_html(r"$\frac{n(n-1)}{2}$") == "(n(n-1))/2"
+    assert markdown_to_telegram_html(r"$\frac{x}{y}$") == "x/y"
+
+
+def test_latex_fraction_parenthesises_any_side_holding_an_operator() -> None:
+    """Without the parentheses ``\frac{a+b}{c}`` would flatten into the different value ``a+b/c``."""
+
+    assert markdown_to_telegram_html(r"$\frac{a+b}{c}$") == "(a+b)/c"
+    assert markdown_to_telegram_html(r"$\frac{a}{b - c}$") == "a/(b - c)"
+
+
+def test_nested_latex_fraction_remains_original_code() -> None:
+    """Stacked fractions have no unambiguous one-line form, so the source must stay copyable."""
+
+    source = r"$\frac{1}{\frac{a}{b}}$"
+
+    assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
+
+
+def test_latex_text_macro_rejects_further_markup() -> None:
+    """``\text`` may carry prose only; nested groups would need rules the safe set does not have."""
+
+    source = r"$\text{a \theta b}$"
 
     assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
 
@@ -727,6 +797,72 @@ def test_unknown_agent_tag_is_removed_but_lowercase_html_is_untouched() -> None:
     source = '<Suggestion foo="bar"/>\n<widget foo="bar"/>'
 
     assert markdown_to_telegram_html(source) == '&lt;widget foo="bar"/&gt;'
+
+
+def test_paired_agent_tags_from_production_are_removed_completely() -> None:
+    """This exact pair reached real users as escaped markup at the end of an answer."""
+
+    source = (
+        "最後一段內容。\n"
+        "\n"
+        '<ElicitationsGroup message="想要進一步了解哪一部分？">\n'
+        "\n"
+        "</ElicitationsGroup>\n"
+    )
+
+    assert markdown_to_telegram_html(source) == "最後一段內容。"
+
+
+def test_self_closing_agent_tag_is_still_removed() -> None:
+    """The paired form was added alongside the self-closing form, not in place of it."""
+
+    source = 'before\n<FollowUp label="suggestion" query="unused"/>\nafter'
+
+    assert markdown_to_telegram_html(source) == "before\n\nafter"
+
+
+def test_text_between_paired_agent_tags_is_preserved() -> None:
+    """Upstream sometimes wraps real content in a tag, so dropping the span would lose the answer."""
+
+    source = '<Notice level="info">這段文字有意義</Notice>'
+
+    assert markdown_to_telegram_html(source) == "這段文字有意義"
+
+
+def test_lowercase_html_tags_are_untouched_by_the_paired_tag_pattern() -> None:
+    """Matching lower-case names would delete the user's own literal HTML examples."""
+
+    source = "<b>bold</b> and <code>snippet</code>"
+
+    assert markdown_to_telegram_html(source) == (
+        "&lt;b&gt;bold&lt;/b&gt; and &lt;code&gt;snippet&lt;/code&gt;"
+    )
+
+
+def test_paired_agent_tag_inside_code_fence_is_preserved_verbatim() -> None:
+    """A fence is quoted source; silently editing it would corrupt what the user asked about."""
+
+    source = (
+        "```html\n"
+        '<ElicitationsGroup message="x">\n'
+        "body\n"
+        "</ElicitationsGroup>\n"
+        "```\n"
+    )
+
+    assert markdown_to_telegram_html(source) == (
+        '<pre><code class="language-html">'
+        '&lt;ElicitationsGroup message="x"&gt;\n'
+        "body\n"
+        "&lt;/ElicitationsGroup&gt;\n"
+        "</code></pre>"
+    )
+
+
+def test_arithmetic_comparison_is_not_mistaken_for_an_agent_tag() -> None:
+    """Chained comparisons are ordinary prose; eating them would silently change the maths."""
+
+    assert markdown_to_telegram_html("a < b > c") == "a &lt; b &gt; c"
 
 
 def test_headings_are_bold_and_horizontal_rules_are_removed() -> None:
