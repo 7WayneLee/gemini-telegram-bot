@@ -413,6 +413,84 @@ def test_help_lists_exact_commands_for_chat_scope(
         ) in help_text
 
 
+@pytest.mark.parametrize(
+    ("language", "expected_footer", "private_footer"),
+    [
+        (
+            LANGUAGE_ENGLISH,
+            "Reply to the bot's message to continue the current conversation.",
+            "Send text directly to continue the current conversation.",
+        ),
+        (
+            LANGUAGE_CHINESE,
+            "回覆機器人的訊息即可延續目前對話。",
+            "直接傳送文字即可延續目前對話。",
+        ),
+    ],
+)
+def test_group_help_explains_how_to_continue_a_conversation(
+    language: str,
+    expected_footer: str,
+    private_footer: str,
+) -> None:
+    """Privacy-mode users need reply guidance that Telegram can deliver."""
+
+    help_text = _help_text(language, group_only=True)
+
+    assert help_text.endswith(expected_footer)
+    assert private_footer not in help_text
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            LANGUAGE_ENGLISH,
+            "Available commands:\n"
+            "/start — Show usage instructions\n"
+            "/help — Show usage instructions\n"
+            "/gemini — Ask Gemini in a new conversation\n"
+            "/new — Start a new conversation\n"
+            "/model — Choose a Gemini model\n"
+            "/gem — Choose a Gem\n"
+            "/temp — Toggle temporary chat mode\n"
+            "/think — Toggle Extended Thinking\n"
+            "/language — Choose interface language\n"
+            "/img — Generate an image\n"
+            "/research — Submit a Deep Research task\n"
+            "/research_status — View Deep Research task status\n"
+            "/status — View current status\n\n"
+            "Send text directly to continue the current conversation.",
+        ),
+        (
+            LANGUAGE_CHINESE,
+            "可用指令：\n"
+            "/start — 顯示使用說明\n"
+            "/help — 顯示使用說明\n"
+            "/gemini — 以新對話詢問 Gemini\n"
+            "/new — 開始新的對話\n"
+            "/model — 選擇 Gemini 模型\n"
+            "/gem — 選擇 Gem\n"
+            "/temp — 切換暫時對話模式\n"
+            "/think — 切換 Extended Thinking\n"
+            "/language — 選擇介面語言\n"
+            "/img — 生成圖片\n"
+            "/research — 提交 Deep Research 任務\n"
+            "/research_status — 查看 Deep Research 任務狀態\n"
+            "/status — 查看目前狀態\n\n"
+            "直接傳送文字即可延續目前對話。",
+        ),
+    ],
+)
+def test_private_help_output_remains_unchanged(
+    language: str,
+    expected: str,
+) -> None:
+    """Group-specific guidance must not alter established private-chat help."""
+
+    assert _help_text(language) == expected
+
+
 def test_group_help_reads_group_commands_at_render_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

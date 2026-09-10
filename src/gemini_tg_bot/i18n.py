@@ -70,6 +70,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         LANGUAGE_CHINESE: "直接傳送文字即可延續目前對話。",
     },
+    "help.footer_group": {
+        LANGUAGE_ENGLISH: (
+            "Reply to the bot's message to continue the current conversation."
+        ),
+        LANGUAGE_CHINESE: "回覆機器人的訊息即可延續目前對話。",
+    },
     "command.start.description": {
         LANGUAGE_ENGLISH: "Show usage instructions",
         LANGUAGE_CHINESE: "顯示使用說明",

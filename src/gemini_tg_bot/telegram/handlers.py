@@ -117,12 +117,13 @@ def _help_text(language: str, *, group_only: bool = False) -> str:
         if group_only
         else _commands_for_language(language)
     )
+    footer_key = "help.footer_group" if group_only else "help.footer"
     return "\n".join(
         (
             translate("help.heading", language),
             *(f"/{item.command} — {item.description}" for item in commands),
             "",
-            translate("help.footer", language),
+            translate(footer_key, language),
         )
     )
 
