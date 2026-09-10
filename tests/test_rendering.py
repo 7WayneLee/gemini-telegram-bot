@@ -206,11 +206,48 @@ def test_every_allowlisted_latex_macro_has_a_lossless_conversion(
 
 
 def test_latex_scripts_require_one_unicode_supported_character() -> None:
-    """Unsupported or grouped scripts must reject the whole formula instead of approximating."""
+    """A script character with no Unicode form must reject the formula instead of approximating."""
 
     assert markdown_to_telegram_html(r"$x^3 + y^n + z_n$") == "x³ + yⁿ + zₙ"
     assert markdown_to_telegram_html(r"$x^q$") == r"<code>$x^q$</code>"
-    assert markdown_to_telegram_html(r"$x^{12}$") == r"<code>$x^{12}$</code>"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$e^{12}$", "e¹²"),
+        (r"$x_{12}$", "x₁₂"),
+        (r"$x^{2n}$", "x²ⁿ"),
+        (r"$H_{2}O$", "H₂O"),
+        (r"$x^{-1}$", "x⁻¹"),
+        (r"$e^{a}$", "eᵃ"),
+    ],
+)
+def test_latex_braced_scripts_convert_when_every_character_has_a_form(
+    source: str,
+    expected: str,
+) -> None:
+    """Exponents longer than one digit are the common case, so brace groups had to stop rejecting."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        r"$e^{q}$",
+        r"$x_{q}$",
+        r"$e^{2q}$",
+        r"$x^{a^{b}}$",
+        r"$x^{}$",
+    ],
+)
+def test_latex_braced_script_rejects_whole_formula_when_any_character_lacks_a_form(
+    source: str,
+) -> None:
+    """A half-raised group would misstate the exponent, so the group is all-or-nothing."""
+
+    assert markdown_to_telegram_html(source) == f"<code>{source}</code>"
 
 
 @pytest.mark.parametrize(
@@ -356,6 +393,112 @@ def test_safe_display_math_converts_but_unsafe_display_math_stays_code() -> None
     assert markdown_to_telegram_html(source) == (
         "\nx + y\n and " + r"<code>$$\int_0^1 x^2\,dx$$</code>"
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$$x = \cos\theta, \quad y = \sin\theta$$", "x = cos\u03b8, y = sin\u03b8"),
+        (
+            r"$$\tan\theta = \frac{y}{x} \quad (x \neq 0)$$",
+            "tan\u03b8 = y/x (x \u2260 0)",
+        ),
+        (
+            r"$$\cos(\alpha \pm \beta) = \cos\alpha\cos\beta \mp \sin\alpha\sin\beta$$",
+            "cos(\u03b1 \u00b1 \u03b2) = cos\u03b1cos\u03b2 \u2213 sin\u03b1sin\u03b2",
+        ),
+    ],
+)
+def test_production_display_math_converts_to_unicode(source: str, expected: str) -> None:
+    """These exact display formulas reached real users as raw LaTeX after inline math was fixed."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+def test_production_display_math_with_greek_exponent_remains_original_code() -> None:
+    """Unicode has no superscript theta, and a lookalike would misstate Euler's formula.
+
+    Approximating is worse than leaving the source visible: a reader who copies
+    ``e^{i\u03b8}`` back out would get a different expression than the one Gemini
+    wrote.  Rejecting keeps the formula exact and copyable.
+    """
+
+    source = r"$$e^{i\theta} = \cos\theta + i\sin\theta$$"
+
+    assert markdown_to_telegram_html(source) == f"<code>{source}</code>"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$a \quad b$", "a b"),
+        (r"$a \qquad b$", "a b"),
+        (r"$a \quad \quad b$", "a b"),
+        (r"$a\,b$", "a b"),
+        (r"$a\;b$", "a b"),
+        (r"$a\:b$", "a b"),
+        (r"$a\!b$", "ab"),
+    ],
+)
+def test_latex_spacing_macros_collapse_to_a_single_space(
+    source: str,
+    expected: str,
+) -> None:
+    """A spacing command left as literal text is noise, and left as three spaces is a visible gap."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+@pytest.mark.parametrize(
+    ("shorthand", "spelled_out"),
+    [
+        (r"$a \ne b$", r"$a \neq b$"),
+        (r"$a \le b$", r"$a \leq b$"),
+        (r"$a \ge b$", r"$a \geq b$"),
+    ],
+)
+def test_latex_operator_synonyms_render_identically(
+    shorthand: str,
+    spelled_out: str,
+) -> None:
+    """Gemini picks either spelling freely, so knowing only one of a pair rejected whole formulas."""
+
+    assert markdown_to_telegram_html(shorthand) == markdown_to_telegram_html(spelled_out)
+    assert markdown_to_telegram_html(spelled_out) != f"<code>{spelled_out}</code>"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$a \neq b$", "a \u2260 b"),
+        (r"$a \leq b$", "a \u2264 b"),
+        (r"$a \geq b$", "a \u2265 b"),
+        (r"$a \mp b$", "a \u2213 b"),
+        (r"$a \div b$", "a \u00f7 b"),
+        (r"$a \equiv b$", "a \u2261 b"),
+        (r"$a \sim b$", "a \u223c b"),
+        (r"$a \propto b$", "a \u221d b"),
+    ],
+)
+def test_every_display_math_macro_has_a_lossless_conversion(
+    source: str,
+    expected: str,
+) -> None:
+    """Widening the safe set only helps if each addition stays pinned to one exact glyph."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+def test_widening_the_safe_set_leaves_the_existing_rejections_unchanged() -> None:
+    """Brace groups and spacing must not become a back door around the all-or-nothing rule."""
+
+    assert markdown_to_telegram_html(r"$e^2$") == "e²"
+    assert markdown_to_telegram_html(r"$\sum_{i=1}^{n} i$") == r"<code>$\sum_{i=1}^{n} i$</code>"
+    assert (
+        markdown_to_telegram_html(r"$\frac{1}{\frac{a}{b}}$")
+        == r"<code>$\frac{1}{\frac{a}{b}}$</code>"
+    )
+    assert markdown_to_telegram_html(r"`$e^{12}$`") == r"<code>$e^{12}$</code>"
 
 
 def test_currency_like_dollars_are_not_mistaken_for_math() -> None:

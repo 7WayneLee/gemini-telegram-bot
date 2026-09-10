@@ -136,6 +136,30 @@ _LATEX_MACROS = {
     "Phi": "Φ",
     "Psi": "Ψ",
     "Omega": "Ω",
+    # Synonyms and partners of operators the safe set already knew.  A display
+    # formula that reached production used ``\neq`` and ``\mp`` while only
+    # ``\ne`` and ``\pm`` were listed, so the whole line stayed raw.
+    "neq": "≠",
+    "leq": "≤",
+    "geq": "≥",
+    "mp": "∓",
+    "div": "÷",
+    "equiv": "≡",
+    "sim": "∼",
+    "propto": "∝",
+    # Spacing commands carry no meaning of their own; they become one ordinary
+    # space and the surrounding run is collapsed back to a single one.
+    "quad": " ",
+    "qquad": " ",
+}
+# Spacing commands whose name is punctuation rather than letters, so the
+# ``\[A-Za-z]+`` scan never sees them.  ``\!`` is negative space, which has no
+# single-line equivalent at all and therefore contributes nothing.
+_LATEX_PUNCTUATION_SPACING = {
+    ",": " ",
+    ";": " ",
+    ":": " ",
+    "!": "",
 }
 # Glyphs that already sit on the superscript line, so ``90^\circ`` needs the
 # glyph itself rather than a lookup in _SUPERSCRIPTS.
@@ -144,7 +168,8 @@ _LATEX_RAISED_MACROS = {
     "degree": "°",
     "prime": "′",
 }
-_LATEX_FRACTION_OPERATORS = frozenset("+-*/=<>±×·≈≤≥≠→")
+_LATEX_FRACTION_OPERATORS = frozenset("+-*/=<>±∓×÷·≈≤≥≠≡∼∝→")
+_LATEX_HORIZONTAL_SPACE_RE = re.compile(r"[ \t]+")
 _SUPERSCRIPTS = {
     "0": "⁰",
     "1": "¹",
@@ -649,6 +674,39 @@ def _convert_fraction(formula: str, position: int) -> tuple[str, int] | None:
     return f"{numerator}/{denominator}", position
 
 
+def _convert_script_group(
+    formula: str,
+    position: int,
+    raised: bool,
+) -> tuple[str, int] | None:
+    r"""Convert ``^{...}`` or ``_{...}`` only when every character has a real script form.
+
+    Unicode covers the digits and only part of the alphabet, so the group is
+    rewritten only when each of its characters has an exact counterpart; one
+    missing character rejects the whole expression instead of producing a
+    half-raised group.  ``e^{i\theta}`` is the case that forced the rule: no
+    Unicode superscript theta exists, and a lookalike glyph would silently
+    change what the expression says, so it stays copyable source instead.
+
+    A nested group has no flat form at all and is rejected before the lookup.
+    """
+
+    group = _latex_group(formula, position)
+    if group is None:
+        return None
+    raw, end = group
+    if "{" in raw or "}" in raw:
+        return None
+    inner = _convert_simple_latex(raw)
+    if not inner:
+        return None
+    replacements = _SUPERSCRIPTS if raised else _SUBSCRIPTS
+    scripted = [replacements.get(character) for character in inner]
+    if any(character is None for character in scripted):
+        return None
+    return "".join(scripted), end
+
+
 def _convert_simple_latex(formula: str) -> str | None:
     """Convert a safe expression, or reject the whole expression on any unknown syntax."""
 
@@ -657,6 +715,13 @@ def _convert_simple_latex(formula: str) -> str | None:
     while position < len(formula):
         character = formula[position]
         if character == "\\":
+            spacing = _LATEX_PUNCTUATION_SPACING.get(
+                formula[position + 1 : position + 2]
+            )
+            if spacing is not None:
+                converted.append(spacing)
+                position += 2
+                continue
             match = re.match(r"\\([A-Za-z]+)", formula[position:])
             if match is None:
                 return None
@@ -691,6 +756,13 @@ def _convert_simple_latex(formula: str) -> str | None:
                     converted.append(_LATEX_RAISED_MACROS[raised.group(1)])
                     position += 1 + len(raised.group(0))
                     continue
+            if position + 1 < len(formula) and formula[position + 1] == "{":
+                group = _convert_script_group(formula, position + 1, character == "^")
+                if group is None:
+                    return None
+                converted.append(group[0])
+                position = group[1]
+                continue
             replacements = _SUPERSCRIPTS if character == "^" else _SUBSCRIPTS
             if position + 1 >= len(formula) or formula[position + 1] not in replacements:
                 return None
@@ -701,7 +773,10 @@ def _convert_simple_latex(formula: str) -> str | None:
             return None
         converted.append(character)
         position += 1
-    return "".join(converted)
+    # ``\quad`` almost always sits between two spaces already, so without this
+    # the rendered formula would carry a three-space gap the source never had.
+    # Only horizontal runs collapse: display math keeps its own line breaks.
+    return _LATEX_HORIZONTAL_SPACE_RE.sub(" ", "".join(converted))
 
 
 def _render_inline(text: str) -> str:
