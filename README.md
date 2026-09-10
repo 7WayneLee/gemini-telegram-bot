@@ -30,6 +30,8 @@ API key — which makes cookie handling the part that actually matters.
 - **Dynamic model and gem selection** via `/model` and `/gem`
 - **Deep Research** as a background task that survives a restart
 - **Allowlist by default** — an unconfigured bot talks to nobody
+- **Group chats** — add the bot to a group, authorise it per chat rather than per
+  user, and it answers there with a fixed set of settings
 - **Cookie recovery from chat** — refresh credentials with `/setcookie`, no SSH, no
   restart
 - **Runs in ~150 MB** on a small shared VM
@@ -192,6 +194,15 @@ Everything else has a safe default. Three worth knowing:
 | `ENABLE_VIDEO_GENERATION` | `false` | A single clip can be tens of MB |
 | `ENABLE_AUDIO_GENERATION` | `false` | Same |
 
+Group mode adds four more:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ALLOWED_CHAT_IDS` | empty | Comma-separated group chat ids (negative numbers). Empty means no group is approved |
+| `GROUP_MODEL` | `flash` | The model groups always use, resolved dynamically from upstream rather than hardcoded |
+| `GROUP_THREAD_RETENTION_DAYS` | `30` | How long group thread records are kept, in days |
+| `GROUP_THREAD_MAX_PER_CHAT` | `200` | Maximum threads kept per group |
+
 ---
 
 ## Commands
@@ -200,7 +211,8 @@ Everything else has a safe default. Three worth knowing:
 
 | Command | Behaviour |
 |---|---|
-| `/start`, `/help` | Show available commands |
+| `/start`, `/help` | Show available commands. `/help` is not in the command menu, but still works |
+| `/gemini <question>` | Start a new conversation with this question. Sent as a reply, the quoted message is included as context |
 | `/new` | End the current conversation and start a fresh one |
 | `/model` | Pick a model from an inline keyboard, listed dynamically |
 | `/gem` | Pick a gem to apply to the conversation |
@@ -221,7 +233,55 @@ Everything else has a safe default. Three worth knowing:
 | `/setcookie` | Accept new cookies interactively and hot-restart the client without restarting the process. The message is deleted on receipt |
 | `/allow <user_id>` | Add to the allowlist, effective immediately |
 | `/deny <user_id>` | Remove from the allowlist. Deny beats the static list |
+| `/allow_chat <chat_id>` | Approve a group, effective immediately. Direct messages only |
+| `/deny_chat <chat_id>` | Revoke a group's approval, effective immediately. Direct messages only |
 | `/health` | Client health, recent errors, database status |
+
+---
+
+## Group chats
+
+The bot can be added to a group. A group does not behave like a direct message, and
+the differences are deliberate.
+
+### Direct messages compared with groups
+
+| | Direct message | Group |
+|---|---|---|
+| Conversation | One continuous conversation. Plain text continues it, `/new` resets it | One question at a time. `/gemini <question>` always starts a new conversation; **replying to one of the bot's messages** continues that conversation. Plain text does not reach the bot |
+| Settings | Model, gem, temporary mode, extended thinking and interface language are all adjustable | Fixed and not changeable: the model is `GROUP_MODEL`, the interface is English, extended thinking is off, and no gem is applied |
+| Available commands | All of them | `/gemini`, `/img`, `/help` |
+
+### Why a group needs a command or a reply
+
+Telegram's privacy mode is on by default, so in a group the bot receives only the
+messages addressed to it: commands explicitly directed at that bot, and replies to
+that bot's own messages. Plain text and a bare @mention never arrive.
+
+This project keeps privacy mode on deliberately. Turning it off would give the bot
+every message in the group, and this bot holds a full Google login session.
+
+In a group, prefer the `/gemini@yourbotname` form. Telegram guarantees delivery only
+for commands explicitly addressed to a bot; a command without the `@` suffix is
+guaranteed only while that bot was the last bot to post in the group.
+
+### Authorising a group
+
+Groups are authorised per chat, separately from the personal allowlist:
+
+- In an approved group, members do not need to be in `ALLOWED_USER_IDS`
+- In a group that is not approved, the bot does not reply at all, and sends the admin
+  a direct message containing that group's chat id
+- The admin approves a group with `/allow_chat <id>` and revokes it with
+  `/deny_chat <id>`, in a direct message. Both take effect immediately
+- **Approving a group grants access to anyone who can be added to that group.** Group
+  membership is controlled by the group's own admins, not by this bot
+
+### Admin commands work only in direct messages
+
+`/setcookie` and the other admin commands do nothing in a group. Run one there and the
+reply is exactly the one a non-admin receives, so nobody can use it to work out who the
+admin is.
 
 ---
 
