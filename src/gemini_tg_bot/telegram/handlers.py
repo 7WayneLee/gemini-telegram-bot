@@ -190,6 +190,20 @@ IMAGE_GENERATION_PREFIX = (
     "Do not search for or return existing web images:"
 )
 
+# Everything below is scaffolding sent to Gemini, not user interface copy, so
+# it stays English-only and deliberately outside the i18n catalogue.  Wiring it
+# to the interface language would make the model's behaviour drift whenever a
+# chat switches language, which is both unpredictable and impossible to test.
+# Please do not "helpfully" translate or internationalize these strings.
+QUOTED_CONTEXT_MAX_CHARS = 2000
+QUOTED_CONTEXT_TRUNCATION_SUFFIX = " [truncated]"
+QUOTED_CONTEXT_HEADER = "Quoted message:"
+QUOTED_CONTEXT_HEADER_WITH_SENDER = "Quoted message from {sender}:"
+QUOTED_QUESTION_LABEL = "Question:"
+QUOTED_REQUEST_LABEL = "Request:"
+QUOTED_DEFAULT_QUESTION = "Explain the quoted message."
+QUOTED_DEFAULT_IMAGE_REQUEST = "Generate an image based on the quoted message."
+
 
 class _StreamingMessageProxy:
     """Capture sent answers while delegating Telegram reply operations."""
@@ -756,8 +770,13 @@ class TelegramHandlers:
         identity = _message_identity(update)
         if identity is None:
             return
-        prompt = _command_prompt(context)
         _, chat_id, message = identity
+        prompt = _prompt_with_quoted_context(
+            _command_prompt(context),
+            message,
+            label=QUOTED_REQUEST_LABEL,
+            default_prompt=QUOTED_DEFAULT_IMAGE_REQUEST,
+        )
         language = await self._chat_language(update, chat_id)
         if prompt is None:
             await send_text_or_busy(
@@ -783,7 +802,12 @@ class TelegramHandlers:
         _, chat_id, message = identity
         is_group = _is_group_update(update)
         language = await self._chat_language(update, chat_id)
-        prompt = _command_prompt(context)
+        prompt = _prompt_with_quoted_context(
+            _command_prompt(context),
+            message,
+            label=QUOTED_QUESTION_LABEL,
+            default_prompt=QUOTED_DEFAULT_QUESTION,
+        )
         if prompt is None:
             await send_text_or_busy(
                 message,
@@ -2191,6 +2215,65 @@ def _own_bot_reply_message_id(
         return None
     replied_to_id = getattr(replied_to, "message_id", None)
     return replied_to_id if isinstance(replied_to_id, int) else None
+
+
+def _quoted_message_text(message: Any) -> str | None:
+    """Return the replied-to message's text, falling back to its caption."""
+
+    replied_to = getattr(message, "reply_to_message", None)
+    if replied_to is None:
+        return None
+    for attribute in ("text", "caption"):
+        value = getattr(replied_to, attribute, None)
+        if isinstance(value, str) and value.strip():
+            quoted = value.strip()
+            break
+    else:
+        # Stickers, voice notes, and similar messages carry no readable text.
+        return None
+    if len(quoted) > QUOTED_CONTEXT_MAX_CHARS:
+        quoted = (
+            quoted[:QUOTED_CONTEXT_MAX_CHARS]
+            + QUOTED_CONTEXT_TRUNCATION_SUFFIX
+        )
+    return quoted
+
+
+def _quoted_sender_name(message: Any) -> str | None:
+    """Return a display name for whoever wrote the replied-to message."""
+
+    replied_to = getattr(message, "reply_to_message", None)
+    sender = getattr(replied_to, "from_user", None)
+    for attribute in ("full_name", "first_name", "username", "title"):
+        value = getattr(sender, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _prompt_with_quoted_context(
+    prompt: str | None,
+    message: Any,
+    *,
+    label: str,
+    default_prompt: str,
+) -> str | None:
+    """Fold a replied-to message into the prompt as clearly delimited context.
+
+    Returns ``None`` only when there is neither a prompt nor quoted content,
+    which is the one case that still deserves the usage reply.
+    """
+
+    quoted = _quoted_message_text(message)
+    if quoted is None:
+        return prompt
+    sender = _quoted_sender_name(message)
+    header = (
+        QUOTED_CONTEXT_HEADER_WITH_SENDER.format(sender=sender)
+        if sender
+        else QUOTED_CONTEXT_HEADER
+    )
+    return f"{header}\n{quoted}\n\n{label} {prompt or default_prompt}"
 
 
 def _telegram_language_code(update: Update) -> str | None:

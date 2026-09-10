@@ -51,6 +51,12 @@ from gemini_tg_bot.telegram.handlers import (
     HELP_COMMAND,
     PUBLIC_BOT_COMMANDS,
     PUBLIC_MENU_COMMANDS,
+    QUOTED_CONTEXT_MAX_CHARS,
+    QUOTED_CONTEXT_TRUNCATION_SUFFIX,
+    QUOTED_DEFAULT_IMAGE_REQUEST,
+    QUOTED_DEFAULT_QUESTION,
+    QUOTED_QUESTION_LABEL,
+    QUOTED_REQUEST_LABEL,
     EgressMeter,
     TelegramHandlers,
     _help_text,
@@ -173,6 +179,9 @@ def _update(
     reply_to_message_id: int | None = None,
     reply_to_user_id: int = BOT_ID,
     reply_to_user_is_bot: bool = True,
+    reply_to_text: str | None = None,
+    reply_to_caption: str | None = None,
+    reply_to_sender_name: str | None = None,
 ) -> SimpleNamespace:
     placeholder = SimpleNamespace(
         message_id=message_id + 1,
@@ -185,9 +194,12 @@ def _update(
         reply_to_message=(
             SimpleNamespace(
                 message_id=reply_to_message_id,
+                text=reply_to_text,
+                caption=reply_to_caption,
                 from_user=SimpleNamespace(
                     id=reply_to_user_id,
                     is_bot=reply_to_user_is_bot,
+                    full_name=reply_to_sender_name,
                 ),
             )
             if reply_to_message_id is not None
@@ -1448,6 +1460,422 @@ async def test_img_without_prompt_replies_with_usage(handlers_factory) -> None:
     service.execute.assert_not_awaited()
     media_handler.send_output_images.assert_not_awaited()
 
+
+def _text_session() -> _StreamingSession:
+    output = SimpleNamespace(text="answer", text_delta="answer", images=())
+    return _StreamingSession([output])
+
+
+def _sent_texts(update: SimpleNamespace) -> list[Any]:
+    return [
+        awaited.args[0]
+        for awaited in update.effective_message.reply_text.await_args_list
+        if awaited.args
+    ]
+
+
+async def test_group_gemini_reply_carries_the_quoted_message_as_context(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """A bare "why" is meaningless unless the quoted claim travels with it;
+    without the quote Gemini answers the question in the abstract."""
+
+    session = _text_session()
+    registry.start_group_session.return_value = (session, False)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/gemini why",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Alice",
+        reply_to_text="The build only fails on ARM runners.",
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["why"]))
+
+    assert session.calls == [
+        (
+            "Quoted message from Alice:\n"
+            "The build only fails on ARM runners.\n"
+            "\n"
+            f"{QUOTED_QUESTION_LABEL} why",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+
+
+async def test_img_reply_carries_the_quoted_message_as_context(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Image prompts are refined by quoting a description, so /img must see
+    the quoted text as well as the refinement the user typed."""
+
+    session = _text_session()
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/img in the same style",
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Bob",
+        reply_to_text="A neon skyline at dusk.",
+    )
+
+    await handlers.img(
+        update,
+        SimpleNamespace(args=["in", "the", "same", "style"]),
+    )
+
+    assert session.calls == [
+        (
+            f"{IMAGE_GENERATION_PREFIX}\n\n"
+            "Quoted message from Bob:\n"
+            "A neon skyline at dusk.\n"
+            "\n"
+            f"{QUOTED_REQUEST_LABEL} in the same style",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+
+
+async def test_gemini_quoting_own_answer_still_opens_a_new_conversation(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """/gemini always means "start over"; quoting our own answer may only
+    supply context, never silently reopen the thread it came from."""
+
+    session = _text_session()
+    registry.start_group_session.return_value = (session, False)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/gemini why",
+        chat_id=-1001,
+        chat_type=ChatType.SUPERGROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=BOT_ID,
+        reply_to_sender_name="Gemini Bot",
+        reply_to_text="Because the cache starts cold.",
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["why"]))
+
+    registry.start_group_session.assert_awaited_once_with(-1001, None)
+    assert session.calls == [
+        (
+            "Quoted message from Gemini Bot:\n"
+            "Because the cache starts cold.\n"
+            "\n"
+            f"{QUOTED_QUESTION_LABEL} why",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+
+
+async def test_gemini_reply_to_a_caption_uses_the_caption(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Photos and documents carry their words in the caption; ignoring it
+    would make every reply to an uploaded file lose its context."""
+
+    session = _text_session()
+    registry.start_group_session.return_value = (session, False)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/gemini summarise this",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_caption="Quarterly egress report, September.",
+    )
+
+    await handlers.gemini(
+        update,
+        SimpleNamespace(args=["summarise", "this"]),
+    )
+
+    assert session.calls == [
+        (
+            "Quoted message:\n"
+            "Quarterly egress report, September.\n"
+            "\n"
+            f"{QUOTED_QUESTION_LABEL} summarise this",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+
+
+async def test_gemini_reply_without_text_or_caption_sends_only_the_question(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Stickers and voice notes have nothing readable to quote, so the
+    scaffolding must not wrap the question around an empty block."""
+
+    session = _text_session()
+    registry.start_group_session.return_value = (session, False)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/gemini why",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Alice",
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["why"]))
+
+    assert session.calls == [
+        ("why", {"temporary": False, "extended_thinking": False})
+    ]
+
+
+async def test_long_quoted_message_is_truncated_before_reaching_upstream(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """One pasted wall of text must not crowd out the user's own question or
+    blow past the upstream prompt budget."""
+
+    session = _text_session()
+    registry.start_group_session.return_value = (session, False)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/gemini why",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Alice",
+        reply_to_text="y" * (QUOTED_CONTEXT_MAX_CHARS + 500),
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["why"]))
+
+    sent_prompt = session.calls[0][0]
+    assert (
+        "y" * QUOTED_CONTEXT_MAX_CHARS + QUOTED_CONTEXT_TRUNCATION_SUFFIX
+    ) in sent_prompt
+    assert "y" * (QUOTED_CONTEXT_MAX_CHARS + 1) not in sent_prompt
+    assert len(sent_prompt) <= (
+        QUOTED_CONTEXT_MAX_CHARS + len(QUOTED_CONTEXT_TRUNCATION_SUFFIX) + 100
+    )
+
+
+async def test_gemini_and_img_without_a_reply_send_the_bare_prompt(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """The overwhelmingly common case is an unquoted command; it must reach
+    Gemini byte-for-byte as it did before quoting existed."""
+
+    gemini_session = _text_session()
+    img_session = _text_session()
+    registry.start_new.return_value = gemini_session
+    registry.get_or_create.return_value = img_session
+    handlers, _ = handlers_factory()
+
+    await handlers.gemini(
+        _update(text="/gemini why"),
+        SimpleNamespace(args=["why"]),
+    )
+    await handlers.img(
+        _update(text="/img a red bicycle"),
+        SimpleNamespace(args=["a", "red", "bicycle"]),
+    )
+
+    assert gemini_session.calls == [
+        ("why", {"temporary": False, "extended_thinking": False})
+    ]
+    assert img_session.calls == [
+        (
+            f"{IMAGE_GENERATION_PREFIX}\n\na red bicycle",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+
+
+async def test_bare_commands_with_a_quote_treat_the_quote_as_the_request(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Replying with a bare /gemini clearly means "deal with this"; answering
+    with usage text there would be pedantic and useless."""
+
+    gemini_session = _text_session()
+    img_session = _text_session()
+    registry.start_new.return_value = gemini_session
+    registry.get_or_create.return_value = img_session
+    handlers, _ = handlers_factory()
+    quoted = dict(
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Cara",
+        reply_to_text="Egress stayed under one gigabyte all month.",
+    )
+    gemini_update = _update(text="/gemini", **quoted)
+    img_update = _update(text="/img", **quoted)
+
+    await handlers.gemini(gemini_update, SimpleNamespace(args=[]))
+    await handlers.img(img_update, SimpleNamespace(args=[]))
+
+    assert gemini_session.calls == [
+        (
+            "Quoted message from Cara:\n"
+            "Egress stayed under one gigabyte all month.\n"
+            "\n"
+            f"{QUOTED_QUESTION_LABEL} {QUOTED_DEFAULT_QUESTION}",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+    assert img_session.calls == [
+        (
+            f"{IMAGE_GENERATION_PREFIX}\n\n"
+            "Quoted message from Cara:\n"
+            "Egress stayed under one gigabyte all month.\n"
+            "\n"
+            f"{QUOTED_REQUEST_LABEL} {QUOTED_DEFAULT_IMAGE_REQUEST}",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+    assert translate("gemini.usage", LANGUAGE_ENGLISH) not in _sent_texts(
+        gemini_update
+    )
+    assert IMAGE_USAGE not in _sent_texts(img_update)
+
+
+async def test_bare_commands_without_a_quote_still_explain_their_usage(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """With neither a quote nor arguments there is nothing to work with, so
+    the help text remains the only sensible answer."""
+
+    handlers, service = handlers_factory()
+
+    gemini_update = _update(text="/gemini")
+    img_update = _update(text="/img")
+    await handlers.gemini(gemini_update, SimpleNamespace(args=[]))
+    await handlers.img(img_update, SimpleNamespace(args=[]))
+
+    assert _sent_texts(gemini_update) == [
+        translate("gemini.usage", LANGUAGE_ENGLISH)
+    ]
+    assert _sent_texts(img_update) == [IMAGE_USAGE]
+    service.execute.assert_not_awaited()
+    registry.start_new.assert_not_awaited()
+    registry.get_or_create.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "language",
+    [LANGUAGE_ENGLISH, LANGUAGE_CHINESE],
+    ids=["english", "chinese"],
+)
+async def test_quoting_scaffolding_stays_english_in_every_interface_language(
+    handlers_factory,
+    registry: AsyncMock,
+    language: str,
+) -> None:
+    """The scaffolding is instruction text for the model, not interface copy;
+    letting it follow the chat language would make behaviour drift."""
+
+    session = _text_session()
+    registry.get_state.return_value = _state(language=language)
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="/gemini why",
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Alice",
+        reply_to_text="The build only fails on ARM runners.",
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["why"]))
+
+    assert session.calls == [
+        (
+            "Quoted message from Alice:\n"
+            "The build only fails on ARM runners.\n"
+            "\n"
+            f"{QUOTED_QUESTION_LABEL} why",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+
+
+async def test_group_text_reply_to_another_sender_stays_ignored_when_quotable(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Quoting context is opt-in through a command; plain group chatter that
+    happens to quote someone must still never wake the bot up."""
+
+    usage_dao = AsyncMock(spec=UsageLogDAO)
+    handlers, service = handlers_factory(usage_dao=usage_dao)
+    update = _update(
+        text="agreed, that is odd",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_sender_name="Alice",
+        reply_to_text="The build only fails on ARM runners.",
+    )
+
+    await handlers.text_message(update, _bot_context())
+
+    registry.start_group_session.assert_not_awaited()
+    service.execute.assert_not_awaited()
+    usage_dao.add.assert_not_awaited()
+    update.effective_message.reply_text.assert_not_awaited()
+
+
+async def test_group_text_reply_to_this_bot_continues_without_scaffolding(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Replying to our own answer is an ongoing conversation: the thread is
+    resumed and the message travels verbatim, with no quoting scaffolding."""
+
+    session = _text_session()
+    registry.start_group_session.return_value = (session, True)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="and what about the cache?",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=BOT_ID,
+        reply_to_sender_name="Gemini Bot",
+        reply_to_text="Because the cache starts cold.",
+    )
+
+    await handlers.text_message(update, _bot_context())
+
+    registry.start_group_session.assert_awaited_once_with(-1001, 700)
+    assert session.calls == [
+        (
+            "and what about the cache?",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
 
 async def test_real_generated_image_fixture_deletes_placeholder_before_media(
     handlers_factory,
