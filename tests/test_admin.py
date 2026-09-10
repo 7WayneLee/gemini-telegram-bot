@@ -10,11 +10,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import SecretStr
+from telegram.constants import ChatType
 
 from gemini_tg_bot.config import Settings
 from gemini_tg_bot.gemini import service as service_module
 from gemini_tg_bot.gemini.errors import ErrorKind
 from gemini_tg_bot.gemini.service import GeminiService, ServiceState
+from gemini_tg_bot.i18n import LANGUAGE_ENGLISH, translate
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.telegram.auth import AuthMiddleware, SQLiteAccessOverrides
@@ -34,6 +36,8 @@ def _update(
     text: str,
     *,
     user_id: int = ADMIN_USER_ID,
+    chat_id: int | None = None,
+    chat_type: str = ChatType.PRIVATE,
     delete: AsyncMock | None = None,
 ) -> SimpleNamespace:
     message = SimpleNamespace(
@@ -43,7 +47,10 @@ def _update(
     )
     return SimpleNamespace(
         effective_user=SimpleNamespace(id=user_id),
-        effective_chat=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(
+            id=user_id if chat_id is None else chat_id,
+            type=chat_type,
+        ),
         effective_message=message,
         callback_query=None,
     )
@@ -109,6 +116,76 @@ async def test_admin_commands_reject_an_allowed_non_admin(tmp_path: Path) -> Non
         await database.close()
 
 
+async def test_group_setcookie_hides_whether_the_sender_is_an_admin(
+    tmp_path: Path,
+) -> None:
+    """Identical denials prevent group members from probing the admin identity."""
+
+    non_admin_id = 7001
+    database, auth, handlers, service = await _admin_stack(
+        tmp_path,
+        allowed_user_ids={non_admin_id},
+    )
+    try:
+        auth.is_admin = MagicMock(wraps=auth.is_admin)
+        admin_update = _update(
+            "/setcookie",
+            chat_id=-1001,
+            chat_type=ChatType.GROUP,
+        )
+        non_admin_update = _update(
+            "/setcookie",
+            user_id=non_admin_id,
+            chat_id=-1001,
+            chat_type=ChatType.GROUP,
+        )
+
+        await handlers.setcookie(admin_update, SimpleNamespace())
+        await handlers.setcookie(non_admin_update, SimpleNamespace())
+
+        admin_reply = admin_update.effective_message.reply_text.await_args.args[0]
+        non_admin_reply = (
+            non_admin_update.effective_message.reply_text.await_args.args[0]
+        )
+        assert admin_reply == non_admin_reply == translate(
+            "command.private_only",
+            LANGUAGE_ENGLISH,
+        )
+        assert handlers._awaiting_cookie_users == set()
+        auth.is_admin.assert_not_called()
+        service.reinit.assert_not_awaited()
+    finally:
+        await database.close()
+
+
+@pytest.mark.parametrize("command", ["allow", "deny", "health"])
+async def test_other_admin_commands_are_private_only(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """Every administrative entry point must share the same group boundary."""
+
+    database, auth, handlers, _ = await _admin_stack(tmp_path)
+    try:
+        update = _update(
+            f"/{command} 7002",
+            chat_id=-1001,
+            chat_type=ChatType.SUPERGROUP,
+        )
+
+        await getattr(handlers, command)(
+            update,
+            SimpleNamespace(args=["7002"]),
+        )
+
+        update.effective_message.reply_text.assert_awaited_once_with(
+            translate("command.private_only", LANGUAGE_ENGLISH)
+        )
+        assert await auth.is_allowed(7002) is False
+    finally:
+        await database.close()
+
+
 async def test_allow_and_deny_persist_and_take_effect_immediately(
     tmp_path: Path,
 ) -> None:
@@ -138,6 +215,8 @@ async def test_allow_and_deny_persist_and_take_effect_immediately(
 async def test_setcookie_deletes_message_then_hot_restarts_without_process_restart(
     tmp_path: Path,
 ) -> None:
+    """The private admin flow must keep its deletion-first singleton restart."""
+
     events: list[str] = []
     service = _mock_service()
 

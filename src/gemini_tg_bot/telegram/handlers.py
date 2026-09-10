@@ -14,14 +14,16 @@ from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
 from telegram import (
     BotCommand,
+    BotCommandScopeAllGroupChats,
     BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackContext,
     CallbackQueryHandler,
     CommandHandler,
@@ -90,11 +92,21 @@ _PUBLIC_COMMAND_KEYS = (
     ("status", "command.status.description"),
 )
 
+GROUP_COMMANDS = frozenset({"start", "help", "img"})
+
 
 def _commands_for_language(language: str) -> tuple[BotCommand, ...]:
     return tuple(
         BotCommand(command, translate(description_key, language))
         for command, description_key in _PUBLIC_COMMAND_KEYS
+    )
+
+
+def _group_commands_for_language(language: str) -> tuple[BotCommand, ...]:
+    return tuple(
+        command
+        for command in _commands_for_language(language)
+        if command.command in GROUP_COMMANDS
     )
 
 
@@ -263,11 +275,38 @@ class TelegramHandlers:
 
         await self.start(update, context)
 
+    async def command_gate(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """Stop commands outside the deliberately small group surface."""
+
+        del context
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        chat = update.effective_chat
+        chat_type = getattr(chat, "type", ChatType.PRIVATE)
+        command = _command_name(message.text)
+        if chat_type == ChatType.PRIVATE:
+            return
+        if command in GROUP_COMMANDS:
+            return
+        language = await self._chat_language(update, chat_id)
+        await send_text_or_busy(
+            message,
+            translate("command.private_only", language),
+            language=language,
+        )
+        raise ApplicationHandlerStop
+
     async def new(self, update: Update, context: CallbackContext) -> None:
         """Reset conversation identifiers while preserving user settings."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -287,7 +326,7 @@ class TelegramHandlers:
         """Dynamically list currently available upstream models."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         user_id, chat_id, message = identity
@@ -364,7 +403,7 @@ class TelegramHandlers:
         """Dynamically list the account's visible Gems."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         user_id, chat_id, message = identity
@@ -434,7 +473,7 @@ class TelegramHandlers:
         """Toggle the persisted temporary-conversation setting."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -456,7 +495,7 @@ class TelegramHandlers:
         """Toggle the persisted extended-thinking setting for this chat."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -484,7 +523,7 @@ class TelegramHandlers:
         """Offer the supported per-chat interface languages."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -522,7 +561,7 @@ class TelegramHandlers:
         """Report session, queue, refresh, usage, and egress state."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -614,7 +653,7 @@ class TelegramHandlers:
     async def research(self, update: Update, context: CallbackContext) -> None:
         """Submit Deep Research work and return its task id immediately."""
 
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -689,7 +728,7 @@ class TelegramHandlers:
         """List persisted Deep Research task states for the current chat."""
 
         del context
-        identity = _message_identity(update)
+        identity = await self._require_private_command(update)
         if identity is None:
             return
         _, chat_id, message = identity
@@ -1649,6 +1688,16 @@ class TelegramHandlers:
         if identity is None:
             return None
         user_id, chat_id, message = identity
+        chat = update.effective_chat
+        chat_type = getattr(chat, "type", ChatType.PRIVATE)
+        if chat_type != ChatType.PRIVATE:
+            language = await self._chat_language(update, chat_id)
+            await send_text_or_busy(
+                message,
+                translate("command.private_only", language),
+                language=language,
+            )
+            return None
         language = await self._chat_language(update, chat_id)
         if self._auth is None:
             await send_text_or_busy(
@@ -1665,6 +1714,25 @@ class TelegramHandlers:
             await send_text_or_busy(
                 message,
                 translate("admin.only", language),
+                language=language,
+            )
+            return None
+        return identity
+
+    async def _require_private_command(
+        self,
+        update: Update,
+    ) -> tuple[int, int, Any] | None:
+        identity = _message_identity(update)
+        if identity is None:
+            return None
+        chat = update.effective_chat
+        chat_type = getattr(chat, "type", ChatType.PRIVATE)
+        if chat_type != ChatType.PRIVATE:
+            language = await self._chat_language(update, identity[1])
+            await send_text_or_busy(
+                identity[2],
+                translate("command.private_only", language),
                 language=language,
             )
             return None
@@ -1691,24 +1759,39 @@ def register_handlers(
 
     handlers.bind_auth(auth)
     application.add_handler(TypeHandler(Update, auth), group=-1)
-    application.add_handler(CommandHandler(["start", "help"], handlers.start))
-    application.add_handler(CommandHandler("new", handlers.new))
-    application.add_handler(CommandHandler("model", handlers.model))
-    application.add_handler(CommandHandler("gem", handlers.gem))
-    application.add_handler(CommandHandler("temp", handlers.temp))
-    application.add_handler(CommandHandler("think", handlers.think))
-    application.add_handler(CommandHandler("language", handlers.language))
-    application.add_handler(CommandHandler("status", handlers.status))
-    application.add_handler(CommandHandler("img", handlers.img))
-    application.add_handler(CommandHandler("research", handlers.research))
     application.add_handler(
-        CommandHandler("research_status", handlers.research_status)
+        MessageHandler(filters.COMMAND, handlers.command_gate),
+        group=0,
+    )
+    application.add_handler(
+        CommandHandler(["start", "help"], handlers.start),
+        group=1,
+    )
+    application.add_handler(CommandHandler("new", handlers.new), group=1)
+    application.add_handler(CommandHandler("model", handlers.model), group=1)
+    application.add_handler(CommandHandler("gem", handlers.gem), group=1)
+    application.add_handler(CommandHandler("temp", handlers.temp), group=1)
+    application.add_handler(CommandHandler("think", handlers.think), group=1)
+    application.add_handler(
+        CommandHandler("language", handlers.language),
+        group=1,
+    )
+    application.add_handler(CommandHandler("status", handlers.status), group=1)
+    application.add_handler(CommandHandler("img", handlers.img), group=1)
+    application.add_handler(
+        CommandHandler("research", handlers.research),
+        group=1,
+    )
+    application.add_handler(
+        CommandHandler("research_status", handlers.research_status),
+        group=1,
     )
     application.add_handler(
         CommandHandler(
             ["setcookie", "allow", "deny", "health"],
             handlers.admin_command,
-        )
+        ),
+        group=1,
     )
     application.add_handler(
         CallbackQueryHandler(
@@ -1744,6 +1827,20 @@ async def register_command_menu(
     except Exception as error:
         LOGGER.warning(
             "Unable to register default Telegram command menu (%s)",
+            type(error).__name__,
+        )
+
+    # Telegram command menus are client-side suggestions, not access control;
+    # the command handlers above enforce the private-chat boundary server-side.
+    try:
+        await call_telegram(
+            application.bot.set_my_commands,
+            _group_commands_for_language(LANGUAGE_ENGLISH),
+            scope=BotCommandScopeAllGroupChats(),
+        )
+    except Exception as error:
+        LOGGER.warning(
+            "Unable to register group Telegram command menu (%s)",
             type(error).__name__,
         )
 

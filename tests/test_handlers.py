@@ -14,9 +14,10 @@ import pytest
 from gemini_webapi import ModelOutput
 from gemini_webapi.constants import AccountStatus
 from pydantic import SecretStr
-from telegram import BotCommandScopeChat
-from telegram.constants import MediaGroupLimit, ParseMode
+from telegram import BotCommandScopeAllGroupChats, BotCommandScopeChat
+from telegram.constants import ChatType, MediaGroupLimit, ParseMode
 from telegram.error import BadRequest, RetryAfter
+from telegram.ext import ApplicationHandlerStop
 
 from gemini_tg_bot.__main__ import (
     _initialize_and_start_polling,
@@ -38,6 +39,7 @@ from gemini_tg_bot.telegram.handlers import (
     IMAGE_GENERATION_PREFIX,
     IMAGE_USAGE,
     MODEL_LIST_UNAVAILABLE,
+    GROUP_COMMANDS,
     PUBLIC_BOT_COMMANDS,
     EgressMeter,
     TelegramHandlers,
@@ -145,6 +147,7 @@ def _update(
     text: str = "hello",
     user_id: int = 101,
     chat_id: int = 202,
+    chat_type: str = ChatType.PRIVATE,
     language_code: str | None = None,
 ) -> SimpleNamespace:
     placeholder = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
@@ -159,7 +162,7 @@ def _update(
     )
     return SimpleNamespace(
         effective_user=SimpleNamespace(id=user_id, language_code=language_code),
-        effective_chat=SimpleNamespace(id=chat_id),
+        effective_chat=SimpleNamespace(id=chat_id, type=chat_type),
         effective_message=message,
         callback_query=None,
     )
@@ -277,6 +280,94 @@ async def test_help_and_new_commands(
     assert update.effective_message.reply_text.await_args.args[0] == translate(
         "new.started",
         LANGUAGE_ENGLISH,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "model",
+        "gem",
+        "temp",
+        "think",
+        "language",
+        "new",
+        "status",
+        "research",
+        "research_status",
+    ],
+)
+async def test_private_only_commands_are_inert_in_groups(
+    handlers_factory,
+    command: str,
+) -> None:
+    """A hidden group command must not mutate state or reach Gemini."""
+
+    handlers, service = handlers_factory()
+    update = _update(text=f"/{command}", chat_type=ChatType.GROUP)
+
+    await getattr(handlers, command)(update, SimpleNamespace(args=[]))
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("command.private_only", LANGUAGE_ENGLISH)
+    )
+    service.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "chat_type",
+    [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL],
+)
+async def test_every_non_private_chat_type_uses_the_safe_command_default(
+    handlers_factory,
+    chat_type: str,
+) -> None:
+    """Supergroups, channels, and future group forms must not bypass the gate."""
+
+    handlers, _ = handlers_factory()
+    update = _update(text="/new", chat_type=chat_type)
+
+    await handlers.new(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("command.private_only", LANGUAGE_ENGLISH)
+    )
+
+
+async def test_group_help_and_image_commands_remain_available(
+    handlers_factory,
+) -> None:
+    """The deliberately small group surface must still provide help and images."""
+
+    handlers, _ = handlers_factory()
+    help_update = _update(text="/help", chat_type=ChatType.GROUP)
+    image_update = _update(text="/img", chat_type=ChatType.GROUP)
+
+    await handlers.command_gate(help_update, SimpleNamespace())
+    await handlers.help(help_update, SimpleNamespace())
+    await handlers.command_gate(image_update, SimpleNamespace())
+    await handlers.img(image_update, SimpleNamespace(args=[]))
+
+    help_text = help_update.effective_message.reply_text.await_args.args[0]
+    assert help_text.startswith(translate("help.heading", LANGUAGE_ENGLISH))
+    image_update.effective_message.reply_text.assert_awaited_once_with(
+        translate("image.usage", LANGUAGE_ENGLISH)
+    )
+
+
+async def test_group_gate_stops_even_an_unregistered_command(
+    handlers_factory,
+) -> None:
+    """A deny-by-default gate keeps future commands private until opted in."""
+
+    handlers, _ = handlers_factory()
+    update = _update(text="/future_command", chat_type=ChatType.GROUP)
+
+    with pytest.raises(ApplicationHandlerStop):
+        await handlers.command_gate(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("command.private_only", LANGUAGE_ENGLISH)
     )
 
 
@@ -1356,7 +1447,9 @@ def test_registration_places_auth_in_first_group(
 
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
-    assert len(calls) == 15
+    assert calls[1].kwargs == {"group": 0}
+    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:14])
+    assert len(calls) == 16
     registered_commands = {
         command
         for registered in calls
@@ -1368,7 +1461,7 @@ def test_registration_places_auth_in_first_group(
 
 
 async def test_startup_registers_public_command_menu() -> None:
-    """One default menu must cover users without a dedicated chat menu."""
+    """Group suggestions must shrink without changing the full default menu."""
 
     application = SimpleNamespace(
         bot=SimpleNamespace(set_my_commands=AsyncMock()),
@@ -1378,7 +1471,8 @@ async def test_startup_registers_public_command_menu() -> None:
     await _start_application(application)
 
     menu_calls = application.bot.set_my_commands.await_args_list
-    assert menu_calls == [call(PUBLIC_BOT_COMMANDS)]
+    assert len(menu_calls) == 2
+    assert menu_calls[0] == call(PUBLIC_BOT_COMMANDS)
     assert next(
         item.description
         for item in menu_calls[0].args[0]
@@ -1402,6 +1496,12 @@ async def test_startup_registers_public_command_menu() -> None:
     assert registered_commands.isdisjoint(
         {"setcookie", "allow", "deny", "health"}
     )
+    assert GROUP_COMMANDS == {"start", "help", "img"}
+    assert {item.command for item in menu_calls[1].args[0]} == GROUP_COMMANDS
+    assert isinstance(
+        menu_calls[1].kwargs["scope"],
+        BotCommandScopeAllGroupChats,
+    )
     application.start.assert_awaited_once_with()
 
 
@@ -1421,7 +1521,8 @@ async def test_startup_never_registers_zh_hant_command_menu(caplog) -> None:
     with caplog.at_level("WARNING"):
         await _start_application(application)
 
-    set_my_commands.assert_awaited_once_with(PUBLIC_BOT_COMMANDS)
+    assert set_my_commands.await_args_list[0] == call(PUBLIC_BOT_COMMANDS)
+    assert set_my_commands.await_count == 2
     assert "BadRequest" not in caplog.text
 
 
@@ -1463,8 +1564,29 @@ async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
         await _start_application(application)
 
     application.start.assert_awaited_once_with()
-    assert application.bot.set_my_commands.await_count == 1
+    assert application.bot.set_my_commands.await_count == 2
     assert "Unable to register default Telegram command menu (RuntimeError)" in (
+        caplog.text
+    )
+
+
+async def test_group_command_menu_failure_only_logs_a_warning(caplog) -> None:
+    """An optional group menu outage must never keep the bot from starting."""
+
+    application = SimpleNamespace(
+        bot=SimpleNamespace(
+            set_my_commands=AsyncMock(
+                side_effect=[None, RuntimeError("group menu offline")]
+            )
+        ),
+        start=AsyncMock(),
+    )
+
+    with caplog.at_level("WARNING"):
+        await _start_application(application)
+
+    application.start.assert_awaited_once_with()
+    assert "Unable to register group Telegram command menu (RuntimeError)" in (
         caplog.text
     )
 

@@ -26,6 +26,22 @@ def test_every_message_has_both_supported_languages() -> None:
         assert set(translations) == expected, key
 
 
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (LANGUAGE_ENGLISH, "This command is only available in private chats."),
+        (LANGUAGE_CHINESE, "此指令僅限私訊使用。"),
+    ],
+)
+def test_private_command_boundary_is_clear_in_each_language(
+    language: str,
+    expected: str,
+) -> None:
+    """A rejected command must explain the safe private-chat path to every user."""
+
+    assert translate("command.private_only", language) == expected
+
+
 def test_user_facing_source_strings_are_catalog_backed() -> None:
     """UI text must not bypass i18n as the source tree evolves.
 

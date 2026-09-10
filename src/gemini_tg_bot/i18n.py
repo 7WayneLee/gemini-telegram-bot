@@ -118,6 +118,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "View current status",
         LANGUAGE_CHINESE: "查看目前狀態",
     },
+    "command.private_only": {
+        LANGUAGE_ENGLISH: "This command is only available in private chats.",
+        LANGUAGE_CHINESE: "此指令僅限私訊使用。",
+    },
     "language.english": {
         LANGUAGE_ENGLISH: "English",
         LANGUAGE_CHINESE: "English",
