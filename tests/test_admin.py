@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import SecretStr
 from telegram.constants import ChatType
+from telegram.ext import ApplicationHandlerStop
 
 from gemini_tg_bot.config import Settings
 from gemini_tg_bot.gemini import service as service_module
@@ -72,6 +73,7 @@ async def _admin_stack(
     tmp_path: Path,
     *,
     allowed_user_ids: set[int] | None = None,
+    allowed_chat_ids: set[int] | None = None,
     service: MagicMock | None = None,
 ) -> tuple[Database, AuthMiddleware, TelegramHandlers, MagicMock]:
     database = Database(tmp_path / "admin.sqlite3")
@@ -79,6 +81,7 @@ async def _admin_stack(
     auth = AuthMiddleware(
         admin_user_id=ADMIN_USER_ID,
         allowed_user_ids=allowed_user_ids or set(),
+        allowed_chat_ids=allowed_chat_ids or set(),
         access_overrides=SQLiteAccessOverrides(database.connection),
     )
     mocked_service = service or _mock_service()
@@ -208,6 +211,71 @@ async def test_allow_and_deny_persist_and_take_effect_immediately(
             access_overrides=SQLiteAccessOverrides(database.connection),
         )
         assert await reloaded.is_allowed(7002) is False
+    finally:
+        await database.close()
+
+
+async def test_allow_chat_and_deny_chat_take_effect_without_restart(
+    tmp_path: Path,
+) -> None:
+    """Admin chat decisions must change group access in the running process."""
+
+    database, auth, handlers, _ = await _admin_stack(tmp_path)
+    try:
+        chat_id = -1001
+        member_id = 7002
+        group_update = _update(
+            "/start",
+            user_id=member_id,
+            chat_id=chat_id,
+            chat_type=ChatType.GROUP,
+        )
+
+        await handlers.allow_chat(
+            _update(f"/allow_chat {chat_id}"),
+            SimpleNamespace(args=[str(chat_id)]),
+        )
+        await auth(group_update, SimpleNamespace())
+        assert await auth.is_allowed(member_id) is False
+
+        await handlers.deny_chat(
+            _update(f"/deny_chat {chat_id}"),
+            SimpleNamespace(args=[str(chat_id)]),
+        )
+        with pytest.raises(ApplicationHandlerStop):
+            await auth(group_update, SimpleNamespace())
+        group_update.effective_message.reply_text.assert_not_awaited()
+    finally:
+        await database.close()
+
+
+@pytest.mark.parametrize("command", ["allow_chat", "deny_chat"])
+async def test_chat_access_commands_are_private_only(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """Group members must not discover or exercise administrator privileges."""
+
+    database, auth, handlers, _ = await _admin_stack(
+        tmp_path,
+        allowed_chat_ids={-1001},
+    )
+    try:
+        update = _update(
+            f"/{command} -1002",
+            chat_id=-1001,
+            chat_type=ChatType.SUPERGROUP,
+        )
+
+        await getattr(handlers, command)(
+            update,
+            SimpleNamespace(args=["-1002"]),
+        )
+
+        update.effective_message.reply_text.assert_awaited_once_with(
+            translate("command.private_only", LANGUAGE_ENGLISH)
+        )
+        assert await auth.is_chat_allowed(-1002) is False
     finally:
         await database.close()
 

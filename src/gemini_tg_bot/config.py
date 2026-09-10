@@ -149,6 +149,10 @@ class Settings(BaseSettings):
         default_factory=set,
         validation_alias="ALLOWED_USER_IDS",
     )
+    allowed_chat_ids: Annotated[set[int], NoDecode] = Field(
+        default_factory=set,
+        validation_alias="ALLOWED_CHAT_IDS",
+    )
     gemini_secure_1psid: SecretStr = Field(
         validation_alias="GEMINI_SECURE_1PSID",
         min_length=1,
@@ -250,6 +254,50 @@ class Settings(BaseSettings):
             if user_id == 0:
                 raise ValueError("user IDs must be non-zero integers")
             parsed.add(user_id)
+        return parsed
+
+    @field_validator("allowed_chat_ids", mode="before")
+    @classmethod
+    def parse_allowed_chat_ids(cls, value: Any) -> set[int]:
+        """Accept comma-separated or JSON-array Telegram group chat IDs."""
+
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return set()
+            if value.startswith("["):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        "must be a comma-separated list or JSON array"
+                    ) from error
+            else:
+                value = [item.strip() for item in value.split(",")]
+
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            raise ValueError("must be a comma-separated list or JSON array")
+
+        parsed: set[int] = set()
+        for item in value:
+            if isinstance(item, bool):
+                raise ValueError("chat IDs must be negative integers")
+            if isinstance(item, int):
+                chat_id = item
+            elif isinstance(item, str):
+                try:
+                    chat_id = int(item)
+                except ValueError as error:
+                    raise ValueError(
+                        "chat IDs must be negative integers"
+                    ) from error
+            else:
+                raise ValueError("chat IDs must be negative integers")
+            if chat_id >= 0:
+                raise ValueError("chat IDs must be negative integers")
+            parsed.add(chat_id)
         return parsed
 
     @field_validator("gemini_proxy", "default_model", mode="before")

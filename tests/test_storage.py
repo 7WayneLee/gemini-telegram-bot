@@ -63,6 +63,10 @@ EXPECTED_SCHEMA = {
         ("user_id", "INTEGER", 0, None, 1),
         ("allowed", "INTEGER", 1, None, 0),
     ],
+    "telegram_chat_access": [
+        ("chat_id", "INTEGER", 0, None, 1),
+        ("allowed", "INTEGER", 1, None, 0),
+    ],
 }
 
 
@@ -387,15 +391,19 @@ async def test_notification_text_is_never_stored(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
-    """A column added by ALTER TABLE lands last, so the schema must agree.
+    """Fresh and upgraded databases must expose identical final columns.
 
     Declaring a migrated column anywhere but last in ``SCHEMA_SQL`` leaves a
     fresh database ordered differently from an upgraded one, which only shows up
-    against real data.
+    against real data. The v7 chat-access table needs the same parity guarantee.
     """
 
     async with Database(tmp_path / "fresh.sqlite3") as database:
         fresh = await _column_names(database, "chat_sessions")
+        fresh_chat_access = await _column_names(
+            database,
+            "telegram_chat_access",
+        )
 
     legacy = tmp_path / "legacy.sqlite3"
     connection = sqlite3.connect(legacy)
@@ -418,9 +426,15 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
 
     async with Database(legacy) as database:
         migrated = await _column_names(database, "chat_sessions")
+        migrated_chat_access = await _column_names(
+            database,
+            "telegram_chat_access",
+        )
 
     assert migrated == fresh
     assert fresh[-1] == "language"
+    assert migrated_chat_access == fresh_chat_access
+    assert fresh_chat_access == ["chat_id", "allowed"]
 
 
 async def _column_names(database: Database, table: str) -> list[str]:

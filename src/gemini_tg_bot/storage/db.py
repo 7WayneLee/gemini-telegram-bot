@@ -13,10 +13,11 @@ from .models import (
     CHAT_SESSION_LANGUAGE_COLUMN,
     CHAT_SESSION_THINKING_COLUMN,
     SCHEMA_SQL,
+    TELEGRAM_CHAT_ACCESS_SCHEMA_SQL,
 )
 
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 _TELEGRAM_ACCESS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_user_access (
@@ -44,6 +45,7 @@ async def migrate(connection: aiosqlite.Connection) -> None:
         4: _migrate_to_v4,
         5: _migrate_to_v5,
         6: _migrate_to_v6,
+        7: _migrate_to_v7,
     }
     for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
         await migrations[version](connection)
@@ -119,6 +121,14 @@ async def _migrate_to_v6(connection: aiosqlite.Connection) -> None:
     except BaseException:
         await connection.rollback()
         raise
+
+
+async def _migrate_to_v7(connection: aiosqlite.Connection) -> None:
+    await _run_schema_migration(
+        connection,
+        TELEGRAM_CHAT_ACCESS_SCHEMA_SQL,
+        version=7,
+    )
 
 
 async def _run_schema_migration(

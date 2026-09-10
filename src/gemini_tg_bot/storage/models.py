@@ -311,6 +311,14 @@ CREATE TABLE IF NOT EXISTS admin_notifications (
 """
 
 
+TELEGRAM_CHAT_ACCESS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS telegram_chat_access (
+    chat_id INTEGER PRIMARY KEY,
+    allowed INTEGER NOT NULL CHECK (allowed IN (0, 1))
+);
+"""
+
+
 class AdminNotificationDAO:
     """Suppress an administrator page that a restart would otherwise repeat.
 

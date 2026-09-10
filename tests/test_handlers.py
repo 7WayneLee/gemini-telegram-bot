@@ -371,6 +371,28 @@ async def test_group_gate_stops_even_an_unregistered_command(
     )
 
 
+@pytest.mark.parametrize("command", ["allow_chat", "deny_chat"])
+async def test_group_gate_stops_chat_access_admin_commands(
+    handlers_factory,
+    command: str,
+) -> None:
+    """Group approval commands must remain behind T9.1's private-only gate."""
+
+    handlers, _ = handlers_factory()
+    update = _update(
+        text=f"/{command} -1001",
+        chat_id=-1002,
+        chat_type=ChatType.SUPERGROUP,
+    )
+
+    with pytest.raises(ApplicationHandlerStop):
+        await handlers.command_gate(update, SimpleNamespace())
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("command.private_only", LANGUAGE_ENGLISH)
+    )
+
+
 @pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
 async def test_help_is_generated_for_the_stored_chat_language(
     handlers_factory,
@@ -1458,6 +1480,7 @@ def test_registration_places_auth_in_first_group(
     assert "language" in registered_commands
     assert "lang" not in registered_commands
     assert {"img", "research", "research_status"} <= registered_commands
+    assert {"allow_chat", "deny_chat"} <= registered_commands
 
 
 async def test_startup_registers_public_command_menu() -> None:
@@ -1494,7 +1517,14 @@ async def test_startup_registers_public_command_menu() -> None:
         "status",
     }
     assert registered_commands.isdisjoint(
-        {"setcookie", "allow", "deny", "health"}
+        {
+            "setcookie",
+            "allow",
+            "deny",
+            "allow_chat",
+            "deny_chat",
+            "health",
+        }
     )
     assert GROUP_COMMANDS == {"start", "help", "img"}
     assert {item.command for item in menu_calls[1].args[0]} == GROUP_COMMANDS

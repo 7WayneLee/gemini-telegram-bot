@@ -25,6 +25,7 @@ ENVIRONMENT_VARIABLES = {
     "TELEGRAM_BOT_TOKEN",
     "ADMIN_USER_ID",
     "ALLOWED_USER_IDS",
+    "ALLOWED_CHAT_IDS",
     "GEMINI_SECURE_1PSID",
     "GEMINI_SECURE_1PSIDTS",
     "GEMINI_COOKIE_PATH",
@@ -62,6 +63,7 @@ def test_required_values_and_safe_defaults() -> None:
     assert settings.gemini_secure_1psid.get_secret_value() == "FAKE_1PSID_FOR_TEST"
     assert settings.gemini_secure_1psidts.get_secret_value() == "FAKE_1PSIDTS_FOR_TEST"
     assert settings.allowed_user_ids == set()
+    assert settings.allowed_chat_ids == set()
     assert settings.max_concurrency == 1
     assert settings.enable_video_generation is False
     assert settings.enable_audio_generation is False
@@ -99,6 +101,36 @@ def test_allowed_user_ids_reject_invalid_values(raw_value: str) -> None:
         make_settings(ALLOWED_USER_IDS=raw_value)
 
 
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("-1001, -1002,-1001", {-1001, -1002}),
+        ('[-1001, "-1002"]', {-1001, -1002}),
+        ("", set()),
+    ],
+)
+def test_allowed_chat_ids_accept_negative_group_ids(
+    raw_value: str,
+    expected: set[int],
+) -> None:
+    """Both supported env syntaxes must preserve Telegram's negative group IDs."""
+
+    settings = make_settings(ALLOWED_CHAT_IDS=raw_value)
+
+    assert settings.allowed_chat_ids == expected
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    ["-1001,not-an-id", "[-1001", "0", "1", "true"],
+)
+def test_allowed_chat_ids_reject_non_group_values(raw_value: str) -> None:
+    """Malformed or non-negative IDs must not accidentally authorize a chat."""
+
+    with pytest.raises(ValidationError, match="chat IDs|comma-separated"):
+        make_settings(ALLOWED_CHAT_IDS=raw_value)
+
+
 def test_loads_dotenv_and_normalizes_optional_values(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -107,6 +139,7 @@ def test_loads_dotenv_and_normalizes_optional_values(tmp_path: Path) -> None:
                 "TELEGRAM_BOT_TOKEN=FAKE_TELEGRAM_BOT_TOKEN_FOR_TEST",
                 "ADMIN_USER_ID=123456789",
                 "ALLOWED_USER_IDS=101,202",
+                "ALLOWED_CHAT_IDS=-1001,-1002",
                 "GEMINI_SECURE_1PSID=FAKE_1PSID_FOR_TEST",
                 "GEMINI_SECURE_1PSIDTS=FAKE_1PSIDTS_FOR_TEST",
                 "GEMINI_COOKIE_PATH=/tmp/gemini-test-cookies",
@@ -122,6 +155,7 @@ def test_loads_dotenv_and_normalizes_optional_values(tmp_path: Path) -> None:
     settings = Settings(_env_file=env_file)
 
     assert settings.allowed_user_ids == {101, 202}
+    assert settings.allowed_chat_ids == {-1001, -1002}
     assert settings.gemini_cookie_path == Path("/tmp/gemini-test-cookies")
     assert settings.gemini_proxy is None
     assert settings.default_model is None

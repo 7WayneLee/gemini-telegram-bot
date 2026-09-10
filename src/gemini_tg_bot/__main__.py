@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import SecretStr
 from telegram import Update
+from telegram.constants import ChatType
 from telegram.ext import Application
 
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME, Settings
@@ -108,7 +109,10 @@ async def _run_polling(settings: Settings) -> None:
         auth = AuthMiddleware(
             admin_user_id=settings.admin_user_id,
             allowed_user_ids=settings.allowed_user_ids,
+            allowed_chat_ids=settings.allowed_chat_ids,
             access_overrides=SQLiteAccessOverrides(database.connection),
+            notify_admin=notify_admin,
+            notification_language=settings.default_language,
         )
         application = (
             Application.builder()
@@ -351,7 +355,7 @@ async def _run_dry_run() -> None:
         message = _DryRunMessage("dry-run request")
         update = SimpleNamespace(
             effective_user=SimpleNamespace(id=user_id),
-            effective_chat=SimpleNamespace(id=chat_id),
+            effective_chat=SimpleNamespace(id=chat_id, type=ChatType.PRIVATE),
             effective_message=message,
         )
         context = SimpleNamespace()
@@ -362,7 +366,7 @@ async def _run_dry_run() -> None:
         research_message = _DryRunMessage("/research dry-run topic")
         research_update = SimpleNamespace(
             effective_user=SimpleNamespace(id=user_id),
-            effective_chat=SimpleNamespace(id=chat_id),
+            effective_chat=SimpleNamespace(id=chat_id, type=ChatType.PRIVATE),
             effective_message=research_message,
         )
         research_context = SimpleNamespace(args=["dry-run", "topic"])
@@ -375,7 +379,7 @@ async def _run_dry_run() -> None:
         status_message = _DryRunMessage("/research_status")
         status_update = SimpleNamespace(
             effective_user=SimpleNamespace(id=user_id),
-            effective_chat=SimpleNamespace(id=chat_id),
+            effective_chat=SimpleNamespace(id=chat_id, type=ChatType.PRIVATE),
             effective_message=status_message,
         )
         await auth(status_update, context)  # type: ignore[arg-type]

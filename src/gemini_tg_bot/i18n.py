@@ -436,6 +436,38 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Denied user {user_id}.",
         LANGUAGE_CHINESE: "已拒絕使用者 {user_id}。",
     },
+    "admin.allow_chat_usage": {
+        LANGUAGE_ENGLISH: "Usage: /allow_chat <chat_id>",
+        LANGUAGE_CHINESE: "用法：/allow_chat <chat_id>",
+    },
+    "admin.deny_chat_usage": {
+        LANGUAGE_ENGLISH: "Usage: /deny_chat <chat_id>",
+        LANGUAGE_CHINESE: "用法：/deny_chat <chat_id>",
+    },
+    "admin.chat_allowed": {
+        LANGUAGE_ENGLISH: "Allowed group chat {chat_id}.",
+        LANGUAGE_CHINESE: "已允許群組 {chat_id}。",
+    },
+    "admin.chat_denied": {
+        LANGUAGE_ENGLISH: "Denied group chat {chat_id}.",
+        LANGUAGE_CHINESE: "已拒絕群組 {chat_id}。",
+    },
+    "auth.group_title_unknown": {
+        LANGUAGE_ENGLISH: "Unnamed group",
+        LANGUAGE_CHINESE: "未命名群組",
+    },
+    "auth.group_access_request": {
+        LANGUAGE_ENGLISH: (
+            "An unapproved group tried to use the bot.\n"
+            "Group: {title}\nChat ID: {chat_id}\n"
+            "Approve it with /allow_chat {chat_id}."
+        ),
+        LANGUAGE_CHINESE: (
+            "未核准的群組嘗試使用 bot。\n"
+            "群組：{title}\n聊天 ID：{chat_id}\n"
+            "可使用 /allow_chat {chat_id} 核准。"
+        ),
+    },
     "health.none": {
         LANGUAGE_ENGLISH: "None",
         LANGUAGE_CHINESE: "無",

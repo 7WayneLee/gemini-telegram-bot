@@ -784,6 +784,8 @@ class TelegramHandlers:
             "setcookie": self.setcookie,
             "allow": self.allow,
             "deny": self.deny,
+            "allow_chat": self.allow_chat,
+            "deny_chat": self.deny_chat,
             "health": self.health,
         }.get(command)
         if handler is not None:
@@ -979,6 +981,88 @@ class TelegramHandlers:
         await send_text_or_busy(
             message,
             translate("admin.denied", language, user_id=target_user_id),
+            language=language,
+        )
+
+    async def allow_chat(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """Persist a group-chat allow decision that takes effect immediately."""
+
+        identity = await self._require_admin(update)
+        if identity is None:
+            return
+        language = await self._chat_language(update, identity[1])
+        target_chat_id = _command_chat_id(context)
+        message = identity[2]
+        if target_chat_id is None:
+            await send_text_or_busy(
+                message,
+                translate("admin.allow_chat_usage", language),
+                language=language,
+            )
+            return
+        assert self._auth is not None
+        try:
+            await self._auth.allow_chat(target_chat_id)
+        except Exception as error:
+            _log_handler_error("group allowlist write", error)
+            await send_text_or_busy(
+                message,
+                translate("admin.allowlist_update_failed", language),
+                language=language,
+            )
+            return
+        await send_text_or_busy(
+            message,
+            translate(
+                "admin.chat_allowed",
+                language,
+                chat_id=target_chat_id,
+            ),
+            language=language,
+        )
+
+    async def deny_chat(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
+        """Persist a group-chat deny decision that takes effect immediately."""
+
+        identity = await self._require_admin(update)
+        if identity is None:
+            return
+        language = await self._chat_language(update, identity[1])
+        target_chat_id = _command_chat_id(context)
+        message = identity[2]
+        if target_chat_id is None:
+            await send_text_or_busy(
+                message,
+                translate("admin.deny_chat_usage", language),
+                language=language,
+            )
+            return
+        assert self._auth is not None
+        try:
+            await self._auth.deny_chat(target_chat_id)
+        except Exception as error:
+            _log_handler_error("group denylist write", error)
+            await send_text_or_busy(
+                message,
+                translate("admin.allowlist_update_failed", language),
+                language=language,
+            )
+            return
+        await send_text_or_busy(
+            message,
+            translate(
+                "admin.chat_denied",
+                language,
+                chat_id=target_chat_id,
+            ),
             language=language,
         )
 
@@ -1788,7 +1872,14 @@ def register_handlers(
     )
     application.add_handler(
         CommandHandler(
-            ["setcookie", "allow", "deny", "health"],
+            [
+                "setcookie",
+                "allow",
+                "deny",
+                "allow_chat",
+                "deny_chat",
+                "health",
+            ],
             handlers.admin_command,
         ),
         group=1,
@@ -1885,6 +1976,17 @@ def _command_user_id(context: CallbackContext) -> int | None:
     except (TypeError, ValueError):
         return None
     return user_id if user_id > 0 else None
+
+
+def _command_chat_id(context: CallbackContext) -> int | None:
+    args = getattr(context, "args", None)
+    if not isinstance(args, (list, tuple)) or len(args) != 1:
+        return None
+    try:
+        chat_id = int(args[0])
+    except (TypeError, ValueError):
+        return None
+    return chat_id if chat_id < 0 else None
 
 
 def _command_prompt(context: CallbackContext) -> str | None:
