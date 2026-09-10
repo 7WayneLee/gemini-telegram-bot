@@ -41,6 +41,7 @@ AGENT_TAG_RE = re.compile(
 )
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")
+_BACKTICK_RUN_RE = re.compile(r"`+")
 _LIST_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])\s+(?P<body>.*)$")
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(?P<body>.*?)(?:\s+#+)?$")
 _HORIZONTAL_RULE_RE = re.compile(r"(?m)^ {0,3}-{3,}[ \t]*\r?$")
@@ -78,6 +79,21 @@ _LATEX_MACROS = {
     "tan": "tan",
     "times": "×",
     "to": "→",
+    # The remaining function names.  A trigonometry answer introduces a
+    # function together with its reciprocal, so one missing name was enough to
+    # reject the whole expression.
+    "arccos": "arccos",
+    "arcsin": "arcsin",
+    "arctan": "arctan",
+    "cosh": "cosh",
+    "cot": "cot",
+    "csc": "csc",
+    "deg": "deg",
+    "exp": "exp",
+    "gcd": "gcd",
+    "sec": "sec",
+    "sinh": "sinh",
+    "tanh": "tanh",
     # Degrees, ellipses, and primes appear constantly in trigonometry answers.
     "cdots": "⋯",
     "circ": "°",
@@ -444,6 +460,33 @@ def _find_unescaped(text: str, needle: str, start: int) -> int:
     return -1
 
 
+def _inline_code_span(text: str, position: int) -> tuple[str, int] | None:
+    """Return the contents of the inline code span at ``position`` and the index after it.
+
+    A span opens on a run of backticks and closes on the next unescaped run of
+    the same length, so a doubled-backtick span protects its contents exactly
+    like a single-backtick one.  ``None`` means the run never closes, leaving
+    the backticks as literal text.
+
+    Every caller that must leave quoted source alone shares this one rule: two
+    independent notions of "inside inline code" would drift apart.
+    """
+
+    opening = _BACKTICK_RUN_RE.match(text, position)
+    if opening is None or _is_escaped(text, position):
+        return None
+    search = opening.end()
+    while True:
+        candidate = _BACKTICK_RUN_RE.search(text, search)
+        if candidate is None:
+            return None
+        if candidate.group() == opening.group() and not _is_escaped(
+            text, candidate.start()
+        ):
+            return text[opening.end() : candidate.start()], candidate.end()
+        search = candidate.end()
+
+
 def _find_emphasis_close(text: str, start: int, delimiter: str) -> int:
     position = start
     while position < len(text):
@@ -685,10 +728,11 @@ def _render_inline(text: str) -> str:
                 continue
 
         if text[position] == "`":
-            closing = _find_unescaped(text, "`", position + 1)
-            if closing >= 0:
-                rendered.append(f"<code>{escape(text[position + 1 : closing], quote=False)}</code>")
-                position = closing + 1
+            span = _inline_code_span(text, position)
+            if span is not None:
+                code, end = span
+                rendered.append(f"<code>{escape(code, quote=False)}</code>")
+                position = end
                 continue
 
         if text[position] == "$":
@@ -727,11 +771,41 @@ def _normalise_language(info: str) -> str:
     return language if _LANGUAGE_RE.fullmatch(language) else ""
 
 
+def _remove_agent_tags(block: str) -> tuple[str, list[re.Match[str]]]:
+    """Remove agent tags outside inline code and report the matches removed.
+
+    An inline code span is quoted source exactly like a fenced block, so a
+    question about ``<Component>`` has to keep its tag: stripping it left the
+    user looking at an empty ``<code></code>``.
+    """
+
+    kept: list[str] = []
+    removed: list[re.Match[str]] = []
+    position = 0
+    while position < len(block):
+        if block[position] == "`":
+            span = _inline_code_span(block, position)
+            if span is not None:
+                kept.append(block[position : span[1]])
+                position = span[1]
+                continue
+
+        if block[position] == "<":
+            match = AGENT_TAG_RE.match(block, position)
+            if match is not None:
+                removed.append(match)
+                position = match.end()
+                continue
+
+        kept.append(block[position])
+        position += 1
+    return "".join(kept), removed
+
+
 def _clean_text_block(block: str) -> tuple[str, bool]:
-    agent_matches = list(AGENT_TAG_RE.finditer(block))
-    cleaned, agent_tags = AGENT_TAG_RE.subn("", block)
+    cleaned, agent_matches = _remove_agent_tags(block)
     cleaned, horizontal_rules = _HORIZONTAL_RULE_RE.subn("", cleaned)
-    changed = bool(agent_tags or horizontal_rules)
+    changed = bool(agent_matches or horizontal_rules)
     if changed:
         if agent_matches and not block[: agent_matches[0].start()].strip():
             cleaned = cleaned.lstrip(" \t")
@@ -822,10 +896,10 @@ def _normalise_table_cell(cell: str) -> str:
             position += 2
             continue
         if cell[position] == "`":
-            closing = _find_unescaped(cell, "`", position + 1)
-            if closing >= 0:
-                normalised.append(cell[position : closing + 1])
-                position = closing + 1
+            span = _inline_code_span(cell, position)
+            if span is not None:
+                normalised.append(cell[position : span[1]])
+                position = span[1]
                 continue
         if cell[position] == "$":
             span = _latex_span(cell, position)
@@ -869,10 +943,10 @@ def _strip_table_cell_markdown(cell: str) -> str:
                     continue
 
         if cell[position] == "`":
-            closing = _find_unescaped(cell, "`", position + 1)
-            if closing >= 0:
-                plain.append(cell[position + 1 : closing])
-                position = closing + 1
+            span = _inline_code_span(cell, position)
+            if span is not None:
+                plain.append(span[0])
+                position = span[1]
                 continue
 
         if cell.startswith("~~", position):

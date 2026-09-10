@@ -299,6 +299,40 @@ def test_latex_sum_example_remains_original_code() -> None:
     assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"$\csc\theta = \frac{1}{\sin\theta}$", "csc\u03b8 = 1/sin\u03b8"),
+        (r"$\sec\theta$", "sec\u03b8"),
+        (r"$\cot\theta$", "cot\u03b8"),
+        (r"$\arcsin(x)$", "arcsin(x)"),
+        (r"$\arccos(x)$", "arccos(x)"),
+        (r"$\arctan(x)$", "arctan(x)"),
+        (r"$\sinh x$", "sinh x"),
+        (r"$\cosh x$", "cosh x"),
+        (r"$\tanh x$", "tanh x"),
+        (r"$\exp(x)$", "exp(x)"),
+        (r"$\deg(f)$", "deg(f)"),
+        (r"$\gcd(a, b)$", "gcd(a, b)"),
+    ],
+)
+def test_remaining_function_name_macros_convert_to_plain_names(
+    source: str,
+    expected: str,
+) -> None:
+    """A reciprocal pair rejected the whole formula while the safe set named only sin, cos, and tan."""
+
+    assert markdown_to_telegram_html(source) == expected
+
+
+def test_unlisted_function_macro_still_rejects_the_whole_expression() -> None:
+    """Widening the list of names must not turn the safe set into a guess about unknown commands."""
+
+    source = r"$\operatorname{sgn} x$"
+
+    assert markdown_to_telegram_html(source) == rf"<code>{source}</code>"
+
+
 def test_latex_conversion_is_all_or_nothing() -> None:
     """One unsafe command must prevent safe neighbors from being partially rewritten."""
 
@@ -855,6 +889,60 @@ def test_paired_agent_tag_inside_code_fence_is_preserved_verbatim() -> None:
         '&lt;ElicitationsGroup message="x"&gt;\n'
         "body\n"
         "&lt;/ElicitationsGroup&gt;\n"
+        "</code></pre>"
+    )
+
+
+def test_agent_tag_inside_inline_code_is_preserved() -> None:
+    """This exact line lost its tag in production, leaving the user an empty code span."""
+
+    source = "行內 `<Tag>` 不受影響"
+
+    assert markdown_to_telegram_html(source) == (
+        "行內 <code>&lt;Tag&gt;</code> 不受影響"
+    )
+
+
+def test_closing_and_self_closing_tags_inside_inline_code_are_preserved() -> None:
+    """Both agent-tag shapes are ordinary questions when quoted, so both must survive the strip."""
+
+    assert markdown_to_telegram_html("`</Closing>`") == "<code>&lt;/Closing&gt;</code>"
+    assert markdown_to_telegram_html("`<Self/>`") == "<code>&lt;Self/&gt;</code>"
+
+
+def test_doubled_backtick_span_also_protects_an_agent_tag() -> None:
+    """A code span may use several backticks; the protection follows the span, not one delimiter."""
+
+    assert markdown_to_telegram_html("``<Tag>``") == "<code>&lt;Tag&gt;</code>"
+
+
+def test_agent_tag_outside_inline_code_is_still_removed() -> None:
+    """Protecting quoted tags must not stop the real agent markup from being dropped."""
+
+    source = (
+        "`<Tag>` 這個標籤怎麼用？\n"
+        '<FollowUp label="x" query="y"/>'
+    )
+
+    assert markdown_to_telegram_html(source) == (
+        "<code>&lt;Tag&gt;</code> 這個標籤怎麼用？"
+    )
+
+
+def test_inline_code_and_fence_and_outside_tag_are_each_handled_correctly() -> None:
+    """One answer can quote a tag inline, quote it in a fence, and still end with real agent markup."""
+
+    source = (
+        "說明 `<Item>`：\n"
+        "```html\n"
+        '<Item id="1"/>\n'
+        "```\n"
+        '<FollowUp label="a" query="b"/>\n'
+    )
+
+    assert markdown_to_telegram_html(source) == (
+        "說明 <code>&lt;Item&gt;</code>：\n"
+        '<pre><code class="language-html">&lt;Item id="1"/&gt;\n'
         "</code></pre>"
     )
 
