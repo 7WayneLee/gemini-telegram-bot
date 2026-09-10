@@ -19,6 +19,9 @@ from gemini_tg_bot.i18n import DEFAULT_LANGUAGE
 
 LogLevel = Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
 RUNTIME_CREDENTIALS_FILENAME = "runtime-credentials.json"
+DEFAULT_GROUP_MODEL = "flash"
+DEFAULT_GROUP_THREAD_RETENTION_DAYS = 30
+DEFAULT_GROUP_THREAD_MAX_PER_CHAT = 200
 
 LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +175,21 @@ class Settings(BaseSettings):
     default_model: str | None = Field(
         default=None,
         validation_alias="DEFAULT_MODEL",
+    )
+    group_model: str = Field(
+        default=DEFAULT_GROUP_MODEL,
+        validation_alias="GROUP_MODEL",
+        min_length=1,
+    )
+    group_thread_retention_days: int = Field(
+        default=DEFAULT_GROUP_THREAD_RETENTION_DAYS,
+        validation_alias="GROUP_THREAD_RETENTION_DAYS",
+        gt=0,
+    )
+    group_thread_max_per_chat: int = Field(
+        default=DEFAULT_GROUP_THREAD_MAX_PER_CHAT,
+        validation_alias="GROUP_THREAD_MAX_PER_CHAT",
+        gt=0,
     )
     default_language: Literal["en", "zh-hant"] = Field(
         default=DEFAULT_LANGUAGE,

@@ -11,6 +11,8 @@ from gemini_tg_bot.storage.models import (
     AdminNotificationDAO,
     ChatSession,
     ChatSessionDAO,
+    GroupThread,
+    GroupThreadDAO,
     ResearchTask,
     ResearchTaskDAO,
     UsageLog,
@@ -66,6 +68,13 @@ EXPECTED_SCHEMA = {
     "telegram_chat_access": [
         ("chat_id", "INTEGER", 0, None, 1),
         ("allowed", "INTEGER", 1, None, 0),
+    ],
+    "group_threads": [
+        ("chat_id", "INTEGER", 1, None, 1),
+        ("bot_message_id", "INTEGER", 1, None, 2),
+        ("cid", "TEXT", 0, None, 0),
+        ("metadata_json", "TEXT", 0, None, 0),
+        ("created_at", "TEXT", 1, None, 0),
     ],
 }
 
@@ -271,6 +280,78 @@ async def test_chat_session_dao_round_trip_and_update(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_group_thread_dao_survives_reopen_with_null_metadata_slots(
+    tmp_path,
+) -> None:
+    """Replies after a process restart need the exact positional context."""
+
+    path = tmp_path / "bot.sqlite3"
+    original = GroupThread(
+        chat_id=-1001,
+        bot_message_id=51,
+        cid="thread-cid",
+        metadata=["first", None, "third", None],
+        created_at="2026-09-01T00:00:00+00:00",
+    )
+    async with Database(path) as database:
+        await GroupThreadDAO(database.connection).upsert(original)
+
+    async with Database(path) as database:
+        dao = GroupThreadDAO(database.connection)
+        assert await dao.get(-1001, 51) == original
+
+
+@pytest.mark.asyncio
+async def test_group_thread_cleanup_enforces_age_and_per_chat_limits(
+    tmp_path,
+) -> None:
+    """Bounded retention prevents busy groups from growing SQLite forever."""
+
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        dao = GroupThreadDAO(database.connection)
+        rows = (
+            GroupThread(
+                chat_id=-1001,
+                bot_message_id=1,
+                created_at="2026-07-01T00:00:00+00:00",
+            ),
+            GroupThread(
+                chat_id=-1001,
+                bot_message_id=2,
+                created_at="2026-09-01T00:00:00+00:00",
+            ),
+            GroupThread(
+                chat_id=-1001,
+                bot_message_id=3,
+                created_at="2026-09-02T00:00:00+00:00",
+            ),
+            GroupThread(
+                chat_id=-1001,
+                bot_message_id=4,
+                created_at="2026-09-03T00:00:00+00:00",
+            ),
+            GroupThread(
+                chat_id=-2002,
+                bot_message_id=2,
+                created_at="2026-09-01T00:00:00+00:00",
+            ),
+        )
+        for row in rows:
+            await dao.upsert(row)
+
+        assert await dao.cleanup(
+            older_than="2026-08-11T00:00:00+00:00",
+            max_per_chat=2,
+        ) == 2
+        assert [
+            row.bot_message_id for row in await dao.list_for_chat(-1001)
+        ] == [3, 4]
+        assert [
+            row.bot_message_id for row in await dao.list_for_chat(-2002)
+        ] == [2]
+
+
+@pytest.mark.asyncio
 async def test_research_and_usage_daos(tmp_path) -> None:
     async with Database(tmp_path / "bot.sqlite3") as database:
         research_dao = ResearchTaskDAO(database.connection)
@@ -395,7 +476,8 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
 
     Declaring a migrated column anywhere but last in ``SCHEMA_SQL`` leaves a
     fresh database ordered differently from an upgraded one, which only shows up
-    against real data. The v7 chat-access table needs the same parity guarantee.
+    against real data. The v7 chat-access and v8 group-thread tables need the
+    same parity guarantee.
     """
 
     async with Database(tmp_path / "fresh.sqlite3") as database:
@@ -404,6 +486,7 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
             database,
             "telegram_chat_access",
         )
+        fresh_group_threads = await _column_names(database, "group_threads")
 
     legacy = tmp_path / "legacy.sqlite3"
     connection = sqlite3.connect(legacy)
@@ -430,11 +513,20 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
             database,
             "telegram_chat_access",
         )
+        migrated_group_threads = await _column_names(database, "group_threads")
 
     assert migrated == fresh
     assert fresh[-1] == "language"
     assert migrated_chat_access == fresh_chat_access
     assert fresh_chat_access == ["chat_id", "allowed"]
+    assert migrated_group_threads == fresh_group_threads
+    assert fresh_group_threads == [
+        "chat_id",
+        "bot_message_id",
+        "cid",
+        "metadata_json",
+        "created_at",
+    ]
 
 
 async def _column_names(database: Database, table: str) -> list[str]:

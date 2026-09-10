@@ -4,21 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from gemini_webapi.client import ChatSession
+from gemini_webapi import ChatSession
 
+from gemini_tg_bot.config import (
+    DEFAULT_GROUP_MODEL,
+    DEFAULT_GROUP_THREAD_MAX_PER_CHAT,
+    DEFAULT_GROUP_THREAD_RETENTION_DAYS,
+)
 from gemini_tg_bot.gemini.service import GeminiService
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import (
     ChatSession as StoredChatSession,
     ChatSessionDAO,
+    GroupThread,
+    GroupThreadDAO,
 )
 
 
 _UNSET = object()
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,11 +48,58 @@ class ChatState:
 class ChatSessionRegistry:
     """Map Telegram chat IDs to Gemini sessions and persist their metadata."""
 
-    def __init__(self, service: GeminiService, database: Database) -> None:
+    def __init__(
+        self,
+        service: GeminiService,
+        database: Database,
+        *,
+        group_model: str | None = None,
+        group_thread_retention_days: int | None = None,
+        group_thread_max_per_chat: int | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
         self._service = service
         self._dao = ChatSessionDAO(database.connection)
+        self._group_threads = GroupThreadDAO(database.connection)
         self._sessions: dict[int, ChatSession] = {}
         self._lock = asyncio.Lock()
+        settings = getattr(service, "_settings", None)
+        self._group_model = group_model or getattr(
+            settings,
+            "group_model",
+            DEFAULT_GROUP_MODEL,
+        )
+        self._group_thread_retention_days = (
+            group_thread_retention_days
+            if group_thread_retention_days is not None
+            else getattr(
+                settings,
+                "group_thread_retention_days",
+                DEFAULT_GROUP_THREAD_RETENTION_DAYS,
+            )
+        )
+        self._group_thread_max_per_chat = (
+            group_thread_max_per_chat
+            if group_thread_max_per_chat is not None
+            else getattr(
+                settings,
+                "group_thread_max_per_chat",
+                DEFAULT_GROUP_THREAD_MAX_PER_CHAT,
+            )
+        )
+        if not self._group_model:
+            raise ValueError("group_model must not be empty")
+        if self._group_thread_retention_days <= 0:
+            raise ValueError("group_thread_retention_days must be positive")
+        if self._group_thread_max_per_chat <= 0:
+            raise ValueError("group_thread_max_per_chat must be positive")
+        self._now = now or (lambda: datetime.now(UTC))
+
+    @property
+    def group_model_name(self) -> str:
+        """Return the configured group model name used for usage records."""
+
+        return self._group_model
 
     async def get_state(self, chat_id: int) -> ChatState:
         """Return persisted state, or defaults for a chat not seen before."""
@@ -83,6 +140,75 @@ class ChatSessionRegistry:
                 )
             await self._dao.upsert(record)
             self._sessions.pop(chat_id, None)
+
+    async def start_new(self, chat_id: int) -> ChatSession:
+        """Start a fresh private conversation while preserving its settings."""
+
+        async with self._lock:
+            current = await self._dao.get(chat_id)
+            if current is None:
+                record = StoredChatSession(
+                    chat_id=chat_id,
+                    updated_at=_timestamp(self._now),
+                )
+            else:
+                record = dataclasses.replace(
+                    current,
+                    cid=None,
+                    metadata=None,
+                    updated_at=_timestamp(self._now),
+                )
+            await self._dao.upsert(record)
+            session = self._start_chat(record)
+            self._sessions[chat_id] = session
+            return session
+
+    async def start_group_session(
+        self,
+        chat_id: int,
+        bot_message_id: int | None = None,
+    ) -> tuple[ChatSession, bool]:
+        """Start a fixed-settings group session, restoring a known reply."""
+
+        async with self._lock:
+            thread = (
+                await self._group_threads.get(chat_id, bot_message_id)
+                if bot_message_id is not None
+                else None
+            )
+            return self._start_group_chat(thread), thread is not None
+
+    async def persist_group_session(
+        self,
+        chat_id: int,
+        bot_message_id: int,
+        session: ChatSession,
+    ) -> None:
+        """Attach a bot answer to the group conversation it continues."""
+
+        metadata = session.metadata
+        metadata_snapshot = None if metadata is None else list(metadata)
+        thread = GroupThread(
+            chat_id=chat_id,
+            bot_message_id=bot_message_id,
+            cid=session.cid,
+            metadata=metadata_snapshot,
+            created_at=_timestamp(self._now),
+        )
+        async with self._lock:
+            await self._group_threads.upsert(thread)
+
+    async def cleanup_group_threads(self) -> int:
+        """Apply the configured age and per-chat limits to reply contexts."""
+
+        cutoff = self._now().astimezone(UTC) - timedelta(
+            days=self._group_thread_retention_days
+        )
+        async with self._lock:
+            return await self._group_threads.cleanup(
+                older_than=cutoff.isoformat(),
+                max_per_chat=self._group_thread_max_per_chat,
+            )
 
     async def set_model(self, chat_id: int, model: str | None) -> None:
         """Set the model name, using ``None`` for the account default."""
@@ -168,6 +294,7 @@ class ChatSessionRegistry:
     async def restore_all(self) -> None:
         """Rebuild all in-memory sessions from their persisted metadata."""
 
+        await self.cleanup_group_threads()
         async with self._lock:
             records = await self._dao.list_all()
             restored = {
@@ -183,6 +310,27 @@ class ChatSessionRegistry:
             cid=(record.cid or "") if record is not None else "",
             model=record.model if record is not None else None,
             gem=record.gem_id if record is not None else None,
+        )
+
+    def _start_group_chat(self, thread: GroupThread | None) -> ChatSession:
+        """Construct one group session without consulting private-chat state."""
+
+        try:
+            model: Any = self._service.client.resolve_model(self._group_model)
+            if model is None:
+                raise ValueError("model resolver returned no model")
+        except Exception as error:
+            LOGGER.warning(
+                "Unable to resolve group model %r (%s); using account default",
+                self._group_model,
+                type(error).__name__,
+            )
+            model = None
+        return self._service.client.start_chat(
+            metadata=thread.metadata if thread is not None else None,
+            cid=(thread.cid or "") if thread is not None else "",
+            model=model,
+            gem=None,
         )
 
 
@@ -263,5 +411,6 @@ def _updated_record(
     )
 
 
-def _timestamp() -> str:
-    return datetime.now(UTC).isoformat()
+def _timestamp(now: Callable[[], datetime] | None = None) -> str:
+    current = now() if now is not None else datetime.now(UTC)
+    return current.astimezone(UTC).isoformat()

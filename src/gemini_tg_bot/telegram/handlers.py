@@ -80,6 +80,7 @@ LANGUAGE_CALLBACK_PREFIX = "lang:"
 _PUBLIC_COMMAND_KEYS = (
     ("start", "command.start.description"),
     ("help", "command.help.description"),
+    ("gemini", "command.gemini.description"),
     ("new", "command.new.description"),
     ("model", "command.model.description"),
     ("gem", "command.gem.description"),
@@ -92,7 +93,7 @@ _PUBLIC_COMMAND_KEYS = (
     ("status", "command.status.description"),
 )
 
-GROUP_COMMANDS = frozenset({"start", "help", "img"})
+GROUP_COMMANDS = frozenset({"start", "help", "img", "gemini"})
 
 
 def _commands_for_language(language: str) -> tuple[BotCommand, ...]:
@@ -161,15 +162,34 @@ IMAGE_GENERATION_PREFIX = (
     "Generate an original AI image based on the following request. "
     "Do not search for or return existing web images:"
 )
-class _StreamingMessageProxy:
-    """Capture the placeholder while delegating Telegram reply operations."""
 
-    def __init__(self, message: Any) -> None:
+
+class _StreamingMessageProxy:
+    """Capture sent answers while delegating Telegram reply operations."""
+
+    def __init__(self, message: Any, *, quote: bool = False) -> None:
         self._message = message
+        self._quote = quote
         self.placeholder: Any | None = None
+        self.sent_messages: list[Any] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._message, name)
 
     def reply_text(self, *args: Any, **kwargs: Any) -> Any:
         operation = self._message.reply_text
+        return self._capture_reply(operation, *args, **kwargs)
+
+    def reply_photo(self, *args: Any, **kwargs: Any) -> Any:
+        operation = self._message.reply_photo
+        return self._capture_reply(operation, *args, **kwargs)
+
+    def reply_document(self, *args: Any, **kwargs: Any) -> Any:
+        operation = self._message.reply_document
+        return self._capture_reply(operation, *args, **kwargs)
+
+    def reply_media_group(self, *args: Any, **kwargs: Any) -> Any:
+        operation = self._message.reply_media_group
         return self._capture_reply(operation, *args, **kwargs)
 
     async def _capture_reply(
@@ -178,9 +198,15 @@ class _StreamingMessageProxy:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        if self._quote:
+            kwargs.setdefault("do_quote", True)
         reply = await operation(*args, **kwargs)
         if self.placeholder is None:
             self.placeholder = reply
+        if isinstance(reply, (list, tuple)):
+            self.sent_messages.extend(reply)
+        elif reply is not None:
+            self.sent_messages.append(reply)
         return reply
 
 
@@ -263,11 +289,7 @@ class TelegramHandlers:
         if identity is None:
             return
         _, chat_id, message = identity
-        state = await self._sessions.get_state(chat_id)
-        language = resolve_language(
-            _stored_language(state),
-            _telegram_language_code(update),
-        )
+        language = await self._chat_language(update, chat_id)
         await send_text_or_busy(message, _help_text(language), language=language)
 
     async def help(self, update: Update, context: CallbackContext) -> None:
@@ -718,6 +740,33 @@ class TelegramHandlers:
             identity,
             f"{IMAGE_GENERATION_PREFIX}\n\n{prompt}",
             telegram_code=_telegram_language_code(update),
+            is_group=_is_group_update(update),
+        )
+
+    async def gemini(self, update: Update, context: CallbackContext) -> None:
+        """Ask a question in a new conversation in private or group chat."""
+
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        is_group = _is_group_update(update)
+        language = await self._chat_language(update, chat_id)
+        prompt = _command_prompt(context)
+        if prompt is None:
+            await send_text_or_busy(
+                message,
+                translate("gemini.usage", language),
+                language=language,
+                **({"do_quote": True} if is_group else {}),
+            )
+            return
+        await self._stream_prompt(
+            identity,
+            prompt,
+            telegram_code=_telegram_language_code(update),
+            is_group=is_group,
+            new_private=not is_group,
         )
 
     async def research_status(
@@ -1220,10 +1269,22 @@ class TelegramHandlers:
         if not prompt:
             return
 
+        is_group = _is_group_update(update)
+        group_parent_message_id: int | None = None
+        if is_group:
+            replied_to = getattr(message, "reply_to_message", None)
+            if replied_to is None:
+                return
+            replied_to_id = getattr(replied_to, "message_id", None)
+            if isinstance(replied_to_id, int):
+                group_parent_message_id = replied_to_id
+
         await self._stream_prompt(
             identity,
             prompt,
             telegram_code=_telegram_language_code(update),
+            is_group=is_group,
+            group_parent_message_id=group_parent_message_id,
         )
 
     async def _stream_prompt(
@@ -1232,34 +1293,78 @@ class TelegramHandlers:
         prompt: str,
         *,
         telegram_code: str | None = None,
+        is_group: bool = False,
+        group_parent_message_id: int | None = None,
+        new_private: bool = False,
     ) -> None:
         """Stream one prompt and deliver its images through ``MediaHandler``."""
 
         user_id, chat_id, message = identity
         started = time.monotonic()
-        state = await self._sessions.get_state(chat_id)
-        language = resolve_language(_stored_language(state), telegram_code)
+        if is_group:
+            language = LANGUAGE_ENGLISH
+            temporary = False
+            extended_thinking = False
+            usage_model = getattr(self._sessions, "group_model_name", None)
+        else:
+            state = await self._sessions.get_state(chat_id)
+            language = resolve_language(_stored_language(state), telegram_code)
+            temporary = state.temporary
+            extended_thinking = state.extended_thinking
+            usage_model = state.model
         ok = False
         error_kind: str | None = None
-        stream_message = _StreamingMessageProxy(message)
+        stream_message = _StreamingMessageProxy(message, quote=is_group)
         try:
             self._ensure_service_accepting_requests()
             async with self._request_queue.request(user_id) as permit:
-                session = await self._sessions.get_or_create(chat_id)
-                streamed = await self._service.execute(
-                    lambda _client: stream_response(
-                        stream_message,
-                        session,
-                        prompt,
-                        language=language,
-                        temporary=state.temporary,
-                        extended_thinking=state.extended_thinking,
-                        flood_wait=permit.wait_for_flood_control,
+                restored = False
+                if is_group:
+                    session, restored = await self._sessions.start_group_session(
+                        chat_id,
+                        group_parent_message_id,
                     )
-                )
-            if state.extended_thinking:
+                elif new_private:
+                    session = await self._sessions.start_new(chat_id)
+                else:
+                    session = await self._sessions.get_or_create(chat_id)
+
+                async def run_stream() -> Any:
+                    return await self._service.execute(
+                        lambda _client: stream_response(
+                            stream_message,
+                            session,
+                            prompt,
+                            language=language,
+                            temporary=temporary,
+                            extended_thinking=extended_thinking,
+                            flood_wait=permit.wait_for_flood_control,
+                        )
+                    )
+
+                try:
+                    streamed = await run_stream()
+                except Exception as error:
+                    if not restored:
+                        raise
+                    LOGGER.warning(
+                        "Unable to restore group conversation (%s); "
+                        "starting a new conversation",
+                        type(error).__name__,
+                    )
+                    await _delete_placeholder(stream_message.placeholder)
+                    await send_text_or_busy(
+                        message,
+                        translate("gemini.thread_expired", language),
+                        language=language,
+                        do_quote=True,
+                    )
+                    session, _ = await self._sessions.start_group_session(chat_id)
+                    stream_message = _StreamingMessageProxy(message, quote=True)
+                    streamed = await run_stream()
+            if extended_thinking:
                 thought_characters = len(streamed.thoughts)
-                model = state.model or "account default"
+                model = usage_model or "account default"
                 if thought_characters:
                     LOGGER.info(
                         "Extended thinking result for model %s: requested, "
@@ -1275,25 +1380,32 @@ class TelegramHandlers:
                         "omitted it.",
                         model,
                     )
-            await self._sessions.persist(chat_id, session)
+            if not is_group:
+                await self._sessions.persist(chat_id, session)
             await self._reply_streamed_output_images(
-                message,
+                stream_message if is_group else message,
                 stream_message.placeholder,
                 streamed.text,
                 streamed.output,
                 keep_placeholder=(
-                    state.extended_thinking and bool(streamed.thoughts)
+                    extended_thinking and bool(streamed.thoughts)
                 ),
             )
+            if is_group:
+                await self._persist_group_answers(
+                    chat_id,
+                    stream_message.sent_messages,
+                    session,
+                )
             ok = True
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
-            await _reply_rate_limited(message, error, language)
+            await _reply_rate_limited(stream_message, error, language)
         except FloodControlExceeded as error:
             error_kind = "flood_control"
             _log_handler_error("Telegram flood control", error)
             await send_text_or_busy(
-                message,
+                stream_message,
                 translate("generic.service_busy", language),
                 language=language,
             )
@@ -1301,14 +1413,14 @@ class TelegramHandlers:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
             await send_text_or_busy(
-                message,
+                stream_message,
                 translate("generic.service_busy", language),
                 language=language,
             )
         except ServiceUnavailableError as error:
             error_kind = "unavailable"
             await send_text_or_busy(
-                message,
+                stream_message,
                 _service_unavailable_message(error, language),
                 language=language,
             )
@@ -1316,7 +1428,7 @@ class TelegramHandlers:
             error_kind = classify_error(error).value
             _log_handler_error("text message", error)
             await send_text_or_busy(
-                message,
+                stream_message,
                 translate("generic.failure", language),
                 language=language,
             )
@@ -1324,10 +1436,30 @@ class TelegramHandlers:
             await self._record_usage(
                 user_id=user_id,
                 chat_id=chat_id,
-                model=state.model,
+                model=usage_model,
                 ok=ok,
                 error_kind=error_kind,
                 latency_ms=round((time.monotonic() - started) * 1000),
+            )
+
+    async def _persist_group_answers(
+        self,
+        chat_id: int,
+        answers: list[Any],
+        session: Any,
+    ) -> None:
+        """Persist every Telegram message that can anchor the next reply."""
+
+        seen: set[int] = set()
+        for answer in answers:
+            message_id = getattr(answer, "message_id", None)
+            if not isinstance(message_id, int) or message_id in seen:
+                continue
+            seen.add(message_id)
+            await self._sessions.persist_group_session(
+                chat_id,
+                message_id,
+                session,
             )
 
     async def user_message(
@@ -1357,14 +1489,35 @@ class TelegramHandlers:
         if identity is None:
             return
         user_id, chat_id, message = identity
+        is_group = _is_group_update(update)
+        group_parent_message_id: int | None = None
+        if is_group:
+            replied_to = getattr(message, "reply_to_message", None)
+            if replied_to is None:
+                return
+            replied_to_id = getattr(replied_to, "message_id", None)
+            if isinstance(replied_to_id, int):
+                group_parent_message_id = replied_to_id
         started = time.monotonic()
-        state = await self._sessions.get_state(chat_id)
-        language = resolve_language(
-            _stored_language(state),
-            _telegram_language_code(update),
-        )
+        if is_group:
+            language = LANGUAGE_ENGLISH
+            temporary = False
+            extended_thinking = False
+            usage_model = getattr(self._sessions, "group_model_name", None)
+        else:
+            state = await self._sessions.get_state(chat_id)
+            language = resolve_language(
+                _stored_language(state),
+                _telegram_language_code(update),
+            )
+            temporary = state.temporary
+            extended_thinking = state.extended_thinking
+            usage_model = state.model
         ok = False
         error_kind: str | None = None
+        reply_target = (
+            _StreamingMessageProxy(message, quote=True) if is_group else message
+        )
 
         try:
             self._ensure_service_accepting_requests()
@@ -1373,30 +1526,69 @@ class TelegramHandlers:
                 language=language,
             ) as upload:
                 async with self._request_queue.request(user_id):
-                    session = await self._sessions.get_or_create(chat_id)
-                    output = await self._service.execute(
-                        lambda _client: session.send_message(
-                            upload.prompt,
-                            files=upload.files,
-                            temporary=state.temporary,
-                            extended_thinking=state.extended_thinking,
+                    restored = False
+                    if is_group:
+                        session, restored = (
+                            await self._sessions.start_group_session(
+                                chat_id,
+                                group_parent_message_id,
+                            )
                         )
-                    )
+                    else:
+                        session = await self._sessions.get_or_create(chat_id)
+
+                    async def send_upload() -> Any:
+                        return await self._service.execute(
+                            lambda _client: session.send_message(
+                                upload.prompt,
+                                files=upload.files,
+                                temporary=temporary,
+                                extended_thinking=extended_thinking,
+                            )
+                        )
+
+                    try:
+                        output = await send_upload()
+                    except Exception as error:
+                        if not restored:
+                            raise
+                        LOGGER.warning(
+                            "Unable to restore group conversation (%s); "
+                            "starting a new conversation",
+                            type(error).__name__,
+                        )
+                        await send_text_or_busy(
+                            message,
+                            translate("gemini.thread_expired", language),
+                            language=language,
+                            do_quote=True,
+                        )
+                        session, _ = await self._sessions.start_group_session(
+                            chat_id
+                        )
+                        output = await send_upload()
                 self._media.record_upload(upload)
-            await self._sessions.persist(chat_id, session)
-            await self._reply_output(message, output, language=language)
+            if not is_group:
+                await self._sessions.persist(chat_id, session)
+            await self._reply_output(reply_target, output, language=language)
+            if is_group:
+                await self._persist_group_answers(
+                    chat_id,
+                    reply_target.sent_messages,
+                    session,
+                )
             ok = True
         except MediaUploadError as error:
             error_kind = "media_rejected"
-            await send_text_or_busy(message, str(error), language=language)
+            await send_text_or_busy(reply_target, str(error), language=language)
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
-            await _reply_rate_limited(message, error, language)
+            await _reply_rate_limited(reply_target, error, language)
         except FloodControlExceeded as error:
             error_kind = "flood_control"
             _log_handler_error("Telegram flood control", error)
             await send_text_or_busy(
-                message,
+                reply_target,
                 translate("generic.service_busy", language),
                 language=language,
             )
@@ -1404,14 +1596,14 @@ class TelegramHandlers:
             error_kind = "queue_timeout"
             _log_handler_error("request queue acquisition", error)
             await send_text_or_busy(
-                message,
+                reply_target,
                 translate("generic.service_busy", language),
                 language=language,
             )
         except ServiceUnavailableError as error:
             error_kind = "unavailable"
             await send_text_or_busy(
-                message,
+                reply_target,
                 _service_unavailable_message(error, language),
                 language=language,
             )
@@ -1419,7 +1611,7 @@ class TelegramHandlers:
             error_kind = classify_error(error).value
             _log_handler_error("media message", error)
             await send_text_or_busy(
-                message,
+                reply_target,
                 translate("generic.failure", language),
                 language=language,
             )
@@ -1427,7 +1619,7 @@ class TelegramHandlers:
             await self._record_usage(
                 user_id=user_id,
                 chat_id=chat_id,
-                model=state.model,
+                model=usage_model,
                 ok=ok,
                 error_kind=error_kind,
                 latency_ms=round((time.monotonic() - started) * 1000),
@@ -1646,6 +1838,8 @@ class TelegramHandlers:
         )
 
     async def _chat_language(self, update: Update, chat_id: int) -> str:
+        if _is_group_update(update):
+            return LANGUAGE_ENGLISH
         state = await self._sessions.get_state(chat_id)
         return resolve_language(
             _stored_language(state),
@@ -1862,6 +2056,7 @@ def register_handlers(
     )
     application.add_handler(CommandHandler("status", handlers.status), group=1)
     application.add_handler(CommandHandler("img", handlers.img), group=1)
+    application.add_handler(CommandHandler("gemini", handlers.gemini), group=1)
     application.add_handler(
         CommandHandler("research", handlers.research),
         group=1,
@@ -1943,6 +2138,11 @@ def _message_identity(update: Update) -> tuple[int, int, Any] | None:
     if user is None or chat is None or message is None:
         return None
     return user.id, chat.id, message
+
+
+def _is_group_update(update: Update) -> bool:
+    chat = update.effective_chat
+    return getattr(chat, "type", ChatType.PRIVATE) != ChatType.PRIVATE
 
 
 def _telegram_language_code(update: Update) -> str | None:

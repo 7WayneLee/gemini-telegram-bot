@@ -31,6 +31,9 @@ ENVIRONMENT_VARIABLES = {
     "GEMINI_COOKIE_PATH",
     "GEMINI_PROXY",
     "DEFAULT_MODEL",
+    "GROUP_MODEL",
+    "GROUP_THREAD_RETENTION_DAYS",
+    "GROUP_THREAD_MAX_PER_CHAT",
     "DEFAULT_LANGUAGE",
     "MAX_CONCURRENCY",
     "USER_RATE_LIMIT_PER_MIN",
@@ -68,8 +71,32 @@ def test_required_values_and_safe_defaults() -> None:
     assert settings.enable_video_generation is False
     assert settings.enable_audio_generation is False
     assert settings.default_model is None
+    assert settings.group_model == "flash"
+    assert settings.group_thread_retention_days == 30
+    assert settings.group_thread_max_per_chat == 200
     assert settings.default_language == "en"
     assert settings.gemini_proxy is None
+
+
+def test_group_conversation_settings_are_validated() -> None:
+    """Invalid cleanup or model values must fail before losing thread state."""
+
+    settings = make_settings(
+        GROUP_MODEL="dynamic-group-model",
+        GROUP_THREAD_RETENTION_DAYS=14,
+        GROUP_THREAD_MAX_PER_CHAT=75,
+    )
+    assert settings.group_model == "dynamic-group-model"
+    assert settings.group_thread_retention_days == 14
+    assert settings.group_thread_max_per_chat == 75
+
+    for key, value in (
+        ("GROUP_MODEL", ""),
+        ("GROUP_THREAD_RETENTION_DAYS", 0),
+        ("GROUP_THREAD_MAX_PER_CHAT", 0),
+    ):
+        with pytest.raises(ValidationError):
+            make_settings(**{key: value})
 
 
 def test_default_language_accepts_only_supported_catalogs() -> None:

@@ -9,7 +9,19 @@ from dataclasses import dataclass
 import aiosqlite
 
 
-SCHEMA_SQL = """
+GROUP_THREAD_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS group_threads (
+    chat_id        INTEGER NOT NULL,
+    bot_message_id INTEGER NOT NULL,
+    cid            TEXT,
+    metadata_json  TEXT,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (chat_id, bot_message_id)
+);
+"""
+
+
+SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS chat_sessions (
     chat_id       INTEGER PRIMARY KEY,
     cid           TEXT,
@@ -47,6 +59,8 @@ CREATE TABLE IF NOT EXISTS usage_log (
     latency_ms INTEGER,
     created_at TEXT NOT NULL
 );
+
+{GROUP_THREAD_SCHEMA_SQL}
 """
 
 ChatMetadata = list[str | None]
@@ -88,6 +102,15 @@ class ChatSession:
     extended_thinking: bool = False
     language: str | None = None
     updated_at: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GroupThread:
+    chat_id: int
+    bot_message_id: int
+    cid: str | None = None
+    metadata: ChatMetadata | None = None
+    created_at: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -175,6 +198,99 @@ class ChatSessionDAO:
             await cursor.close()
         await self._connection.commit()
         return deleted
+
+
+class GroupThreadDAO:
+    """Persist the upstream context attached to each bot reply in a group."""
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def upsert(self, thread: GroupThread) -> None:
+        await self._connection.execute(
+            """
+            INSERT INTO group_threads (
+                chat_id, bot_message_id, cid, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, bot_message_id) DO UPDATE SET
+                cid = excluded.cid,
+                metadata_json = excluded.metadata_json,
+                created_at = excluded.created_at
+            """,
+            (
+                thread.chat_id,
+                thread.bot_message_id,
+                thread.cid,
+                serialize_metadata(thread.metadata),
+                thread.created_at,
+            ),
+        )
+        await self._connection.commit()
+
+    async def get(
+        self,
+        chat_id: int,
+        bot_message_id: int,
+    ) -> GroupThread | None:
+        async with self._connection.execute(
+            """
+            SELECT * FROM group_threads
+            WHERE chat_id = ? AND bot_message_id = ?
+            """,
+            (chat_id, bot_message_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _group_thread_from_row(row) if row is not None else None
+
+    async def list_for_chat(self, chat_id: int) -> list[GroupThread]:
+        async with self._connection.execute(
+            """
+            SELECT * FROM group_threads
+            WHERE chat_id = ?
+            ORDER BY created_at, bot_message_id
+            """,
+            (chat_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_group_thread_from_row(row) for row in rows]
+
+    async def cleanup(self, *, older_than: str, max_per_chat: int) -> int:
+        """Remove expired rows, then retain only each chat's newest rows."""
+
+        if max_per_chat <= 0:
+            raise ValueError("max_per_chat must be positive")
+        await self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            expired = await self._connection.execute(
+                "DELETE FROM group_threads WHERE created_at < ?",
+                (older_than,),
+            )
+            try:
+                expired_count = max(expired.rowcount, 0)
+            finally:
+                await expired.close()
+            excess = await self._connection.execute(
+                """
+                DELETE FROM group_threads
+                WHERE bot_message_id NOT IN (
+                    SELECT kept.bot_message_id
+                    FROM group_threads AS kept
+                    WHERE kept.chat_id = group_threads.chat_id
+                    ORDER BY kept.created_at DESC, kept.bot_message_id DESC
+                    LIMIT ?
+                )
+                """,
+                (max_per_chat,),
+            )
+            try:
+                excess_count = max(excess.rowcount, 0)
+            finally:
+                await excess.close()
+            await self._connection.commit()
+        except BaseException:
+            await self._connection.rollback()
+            raise
+        return expired_count + excess_count
 
 
 class ResearchTaskDAO:
@@ -375,6 +491,16 @@ def _chat_session_from_row(row: aiosqlite.Row) -> ChatSession:
         extended_thinking=bool(row["extended_thinking"]),
         language=row["language"],
         updated_at=row["updated_at"],
+    )
+
+
+def _group_thread_from_row(row: aiosqlite.Row) -> GroupThread:
+    return GroupThread(
+        chat_id=row["chat_id"],
+        bot_message_id=row["bot_message_id"],
+        cid=row["cid"],
+        metadata=deserialize_metadata(row["metadata_json"]),
+        created_at=row["created_at"],
     )
 
 

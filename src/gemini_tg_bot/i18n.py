@@ -106,6 +106,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Generate an image",
         LANGUAGE_CHINESE: "生成圖片",
     },
+    "command.gemini.description": {
+        LANGUAGE_ENGLISH: "Ask Gemini in a new conversation",
+        LANGUAGE_CHINESE: "以新對話詢問 Gemini",
+    },
     "command.research.description": {
         LANGUAGE_ENGLISH: "Submit a Deep Research task",
         LANGUAGE_CHINESE: "提交 Deep Research 任務",
@@ -334,6 +338,17 @@ MESSAGES: dict[str, dict[str, str]] = {
     "image.usage": {
         LANGUAGE_ENGLISH: "Usage: /img <prompt>",
         LANGUAGE_CHINESE: "用法：/img <prompt>",
+    },
+    "gemini.usage": {
+        LANGUAGE_ENGLISH: "Usage: /gemini <question>",
+        LANGUAGE_CHINESE: "用法：/gemini <問題>",
+    },
+    "gemini.thread_expired": {
+        LANGUAGE_ENGLISH: (
+            "The original conversation is no longer available. "
+            "I started a new conversation for you."
+        ),
+        LANGUAGE_CHINESE: "原對話已失效，已為你開始新的對話。",
     },
     "admin.only": {
         LANGUAGE_ENGLISH: "This command is only available to administrators.",

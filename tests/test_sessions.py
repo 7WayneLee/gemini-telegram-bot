@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from gemini_tg_bot.gemini.sessions import ChatSessionRegistry, ChatState
 from gemini_tg_bot.storage.db import Database
+from gemini_tg_bot.storage.models import GroupThread, GroupThreadDAO
 
 
 def _service_with_client(client: object) -> SimpleNamespace:
@@ -309,4 +311,221 @@ async def test_restart_restores_sqlite_metadata_and_continues_conversation(
         cid="persisted-cid",
         model="persisted-model",
         gem="persisted-gem",
+    )
+
+
+async def test_group_sessions_are_fresh_and_ignore_saved_chat_settings(
+    tmp_path: Path,
+) -> None:
+    """Each /gemini thread must be isolated from private-style chat state."""
+
+    resolved_model = object()
+    first = SimpleNamespace(cid="first-cid", metadata=["first", None])
+    second = SimpleNamespace(cid="second-cid", metadata=["second", None])
+    client = MagicMock()
+    client.resolve_model.return_value = resolved_model
+    client.start_chat.side_effect = [first, second]
+
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(client),
+            database,
+            group_model="configured-group-model",
+        )
+        await registry.set_model(-1001, "saved-private-model")
+        await registry.set_gem(-1001, "saved-private-gem")
+        await registry.set_temporary(-1001, True)
+        await registry.set_extended_thinking(-1001, True)
+        await registry.set_language(-1001, "zh-hant")
+
+        assert await registry.start_group_session(-1001) == (first, False)
+        assert await registry.start_group_session(-1001) == (second, False)
+
+    assert client.resolve_model.call_args_list == [
+        call("configured-group-model"),
+        call("configured-group-model"),
+    ]
+    assert client.start_chat.call_args_list == [
+        call(metadata=None, cid="", model=resolved_model, gem=None),
+        call(metadata=None, cid="", model=resolved_model, gem=None),
+    ]
+
+
+async def test_group_model_comes_from_service_settings(
+    tmp_path: Path,
+) -> None:
+    """Production construction must honor env-backed settings without rewiring."""
+
+    resolved_model = object()
+    session = SimpleNamespace(cid="", metadata=None)
+    client = MagicMock()
+    client.resolve_model.return_value = resolved_model
+    client.start_chat.return_value = session
+    service = SimpleNamespace(
+        client=client,
+        _settings=SimpleNamespace(
+            group_model="settings-group-model",
+            group_thread_retention_days=12,
+            group_thread_max_per_chat=34,
+        ),
+    )
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            service,
+            database,
+        )
+
+        assert registry.group_model_name == "settings-group-model"
+        assert await registry.start_group_session(-1001) == (session, False)
+
+    client.resolve_model.assert_called_once_with("settings-group-model")
+    client.start_chat.assert_called_once_with(
+        metadata=None,
+        cid="",
+        model=resolved_model,
+        gem=None,
+    )
+
+
+async def test_group_reply_context_survives_registry_and_database_restart(
+    tmp_path: Path,
+) -> None:
+    """A service restart must not break replies to already-sent bot answers."""
+
+    path = tmp_path / "bot.sqlite3"
+    initial_client = MagicMock()
+    initial_client.resolve_model.return_value = object()
+    initial_session = SimpleNamespace(
+        cid="persisted-group-cid",
+        metadata=["slot-0", None, "slot-2", None],
+    )
+    async with Database(path) as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(initial_client),
+            database,
+        )
+        await registry.persist_group_session(-1001, 401, initial_session)
+
+    restored_client = MagicMock()
+    restored_model = object()
+    restored_session = SimpleNamespace(cid="restored", metadata=None)
+    restored_client.resolve_model.return_value = restored_model
+    restored_client.start_chat.return_value = restored_session
+    async with Database(path) as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(restored_client),
+            database,
+        )
+        assert await registry.start_group_session(-1001, 401) == (
+            restored_session,
+            True,
+        )
+
+    restored_client.start_chat.assert_called_once_with(
+        metadata=["slot-0", None, "slot-2", None],
+        cid="persisted-group-cid",
+        model=restored_model,
+        gem=None,
+    )
+
+
+async def test_invalid_group_model_falls_back_to_account_default(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """A renamed upstream model must not disable otherwise healthy groups."""
+
+    client = MagicMock()
+    client.resolve_model.side_effect = ValueError("synthetic invalid model")
+    session = SimpleNamespace(cid="", metadata=None)
+    client.start_chat.return_value = session
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(client),
+            database,
+            group_model="removed-model",
+        )
+        with caplog.at_level("WARNING"):
+            assert await registry.start_group_session(-1001) == (session, False)
+
+    client.resolve_model.assert_called_once_with("removed-model")
+    client.start_chat.assert_called_once_with(
+        metadata=None,
+        cid="",
+        model=None,
+        gem=None,
+    )
+    assert "using account default" in caplog.text
+
+
+async def test_restore_all_cleans_expired_and_excess_group_threads(
+    tmp_path: Path,
+) -> None:
+    """Startup cleanup bounds old thread state even during quiet deployments."""
+
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    client = MagicMock()
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        dao = GroupThreadDAO(database.connection)
+        for message_id, created_at in (
+            (1, "2026-07-01T00:00:00+00:00"),
+            (2, "2026-09-01T00:00:00+00:00"),
+            (3, "2026-09-02T00:00:00+00:00"),
+            (4, "2026-09-03T00:00:00+00:00"),
+        ):
+            await dao.upsert(
+                GroupThread(
+                    chat_id=-1001,
+                    bot_message_id=message_id,
+                    created_at=created_at,
+                )
+            )
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(client),
+            database,
+            group_thread_retention_days=30,
+            group_thread_max_per_chat=2,
+            now=lambda: now,
+        )
+
+        await registry.restore_all()
+
+        assert [
+            row.bot_message_id for row in await dao.list_for_chat(-1001)
+        ] == [3, 4]
+
+
+async def test_start_new_preserves_private_settings_and_replaces_context(
+    tmp_path: Path,
+) -> None:
+    """Adding /gemini must keep private preferences and continuous-chat rules."""
+
+    client = MagicMock()
+    fresh = SimpleNamespace(cid="", metadata=None)
+    client.start_chat.return_value = fresh
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            _service_with_client(client),
+            database,
+        )
+        await registry.set_model(1, "private-model")
+        await registry.set_gem(1, "private-gem")
+        await registry.set_temporary(1, True)
+        await registry.set_extended_thinking(1, True)
+        await registry.set_language(1, "zh-hant")
+
+        assert await registry.start_new(1) is fresh
+        state = await registry.get_state(1)
+        assert state.cid is None
+        assert state.model == "private-model"
+        assert state.gem_id == "private-gem"
+        assert state.temporary is True
+        assert state.extended_thinking is True
+        assert state.language == "zh-hant"
+
+    client.start_chat.assert_called_once_with(
+        metadata=None,
+        cid="",
+        model="private-model",
+        gem="private-gem",
     )

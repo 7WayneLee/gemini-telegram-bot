@@ -58,6 +58,13 @@ except ModuleNotFoundError:
     class _RegistrySpec:
         async def get_state(self, chat_id: int) -> Any: ...
         async def get_or_create(self, chat_id: int) -> Any: ...
+        async def start_new(self, chat_id: int) -> Any: ...
+        async def start_group_session(
+            self, chat_id: int, bot_message_id: int | None = None
+        ) -> tuple[Any, bool]: ...
+        async def persist_group_session(
+            self, chat_id: int, bot_message_id: int, session: Any
+        ) -> None: ...
         async def reset(self, chat_id: int) -> None: ...
         async def set_model(self, chat_id: int, model: str | None) -> None: ...
         async def set_gem(self, chat_id: int, gem_id: str | None) -> None: ...
@@ -149,10 +156,22 @@ def _update(
     chat_id: int = 202,
     chat_type: str = ChatType.PRIVATE,
     language_code: str | None = None,
+    message_id: int = 301,
+    reply_to_message_id: int | None = None,
 ) -> SimpleNamespace:
-    placeholder = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
+    placeholder = SimpleNamespace(
+        message_id=message_id + 1,
+        edit_text=AsyncMock(),
+        delete=AsyncMock(),
+    )
     message = SimpleNamespace(
+        message_id=message_id,
         text=text,
+        reply_to_message=(
+            SimpleNamespace(message_id=reply_to_message_id)
+            if reply_to_message_id is not None
+            else None
+        ),
         delete=AsyncMock(),
         reply_text=AsyncMock(return_value=placeholder),
         reply_photo=AsyncMock(),
@@ -353,6 +372,325 @@ async def test_group_help_and_image_commands_remain_available(
     image_update.effective_message.reply_text.assert_awaited_once_with(
         translate("image.usage", LANGUAGE_ENGLISH)
     )
+
+
+async def test_gemini_without_question_returns_quoted_group_usage(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """A malformed group trigger needs actionable English guidance in-thread."""
+
+    handlers, _ = handlers_factory()
+    registry.get_state.return_value = _state(language=LANGUAGE_CHINESE)
+    update = _update(text="/gemini", chat_id=-1001, chat_type=ChatType.GROUP)
+
+    await handlers.gemini(update, SimpleNamespace(args=[]))
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        translate("gemini.usage", LANGUAGE_ENGLISH),
+        do_quote=True,
+    )
+    registry.get_state.assert_not_awaited()
+
+
+async def test_each_group_gemini_command_starts_and_records_a_fresh_thread(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Independent /gemini questions must never leak context into each other."""
+
+    output = SimpleNamespace(text="answer", text_delta="answer", images=())
+    sessions = [_StreamingSession([output]), _StreamingSession([output])]
+    registry.start_group_session.side_effect = [
+        (sessions[0], False),
+        (sessions[1], False),
+    ]
+    handlers, _ = handlers_factory()
+    first = _update(
+        text="/gemini first",
+        chat_id=-1001,
+        chat_type=ChatType.SUPERGROUP,
+        message_id=100,
+    )
+    second = _update(
+        text="/gemini second",
+        chat_id=-1001,
+        chat_type=ChatType.SUPERGROUP,
+        message_id=200,
+    )
+
+    await handlers.gemini(first, SimpleNamespace(args=["first"]))
+    await handlers.gemini(second, SimpleNamespace(args=["second"]))
+
+    assert registry.start_group_session.await_args_list == [
+        call(-1001, None),
+        call(-1001, None),
+    ]
+    assert sessions[0].calls == [
+        ("first", {"temporary": False, "extended_thinking": False})
+    ]
+    assert sessions[1].calls == [
+        ("second", {"temporary": False, "extended_thinking": False})
+    ]
+    assert registry.persist_group_session.await_args_list == [
+        call(-1001, 101, sessions[0]),
+        call(-1001, 201, sessions[1]),
+    ]
+    assert first.effective_message.reply_text.await_args.kwargs["do_quote"] is True
+    assert second.effective_message.reply_text.await_args.kwargs["do_quote"] is True
+    registry.get_state.assert_not_awaited()
+    registry.persist.assert_not_awaited()
+
+
+async def test_group_reply_restores_and_extends_the_referenced_thread(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Recording every new answer lets a reply chain grow beyond one turn."""
+
+    output = SimpleNamespace(text="answer", text_delta="answer", images=())
+    first_session = _StreamingSession([output])
+    continued_session = _StreamingSession([output])
+    registry.start_group_session.side_effect = [
+        (first_session, False),
+        (continued_session, True),
+    ]
+    handlers, _ = handlers_factory()
+    first = _update(
+        text="/gemini begin",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        message_id=300,
+    )
+    follow_up = _update(
+        text="continue",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        message_id=400,
+        reply_to_message_id=301,
+    )
+
+    await handlers.gemini(first, SimpleNamespace(args=["begin"]))
+    await handlers.text_message(follow_up, SimpleNamespace())
+
+    assert registry.start_group_session.await_args_list == [
+        call(-1001, None),
+        call(-1001, 301),
+    ]
+    registry.persist_group_session.assert_has_awaits(
+        [
+            call(-1001, 301, first_session),
+            call(-1001, 401, continued_session),
+        ]
+    )
+    assert continued_session.calls == [
+        ("continue", {"temporary": False, "extended_thinking": False})
+    ]
+    assert follow_up.effective_message.reply_text.await_args.kwargs == {
+        "do_quote": True
+    }
+
+
+async def test_unknown_group_reply_starts_a_new_conversation_without_notice(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Replies to untracked old messages should remain useful after cleanup."""
+
+    output = SimpleNamespace(text="new answer", text_delta="new answer", images=())
+    session = _StreamingSession([output])
+    registry.start_group_session.return_value = (session, False)
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="old thread follow-up",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=999,
+    )
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    registry.start_group_session.assert_awaited_once_with(-1001, 999)
+    assert [
+        call_.args[0]
+        for call_ in update.effective_message.reply_text.await_args_list
+    ] == [PLACEHOLDER_TEXT]
+    registry.persist_group_session.assert_awaited_once_with(-1001, 302, session)
+
+
+async def test_failed_group_restore_notifies_then_retries_fresh(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Expired upstream context must degrade to a new answer, not an error."""
+
+    class FailingSession:
+        def send_message_stream(self, prompt: str, **kwargs: Any) -> Any:
+            del prompt, kwargs
+
+            async def fail() -> Any:
+                raise RuntimeError("synthetic expired thread")
+                yield
+
+            return fail()
+
+    output = SimpleNamespace(text="recovered", text_delta="recovered", images=())
+    fresh_session = _StreamingSession([output])
+    registry.start_group_session.side_effect = [
+        (FailingSession(), True),
+        (fresh_session, False),
+    ]
+    failed_placeholder = SimpleNamespace(
+        message_id=501,
+        edit_text=AsyncMock(),
+        delete=AsyncMock(),
+    )
+    notice = SimpleNamespace(message_id=502)
+    fresh_placeholder = SimpleNamespace(
+        message_id=503,
+        edit_text=AsyncMock(),
+        delete=AsyncMock(),
+    )
+    handlers, _ = handlers_factory()
+    update = _update(
+        text="continue",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=450,
+    )
+    update.effective_message.reply_text.side_effect = [
+        failed_placeholder,
+        notice,
+        fresh_placeholder,
+    ]
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    assert registry.start_group_session.await_args_list == [
+        call(-1001, 450),
+        call(-1001),
+    ]
+    failed_placeholder.delete.assert_awaited_once_with()
+    assert update.effective_message.reply_text.await_args_list[1] == call(
+        translate("gemini.thread_expired", LANGUAGE_ENGLISH),
+        do_quote=True,
+    )
+    registry.persist_group_session.assert_awaited_once_with(
+        -1001,
+        503,
+        fresh_session,
+    )
+
+
+async def test_unthreaded_group_text_is_ignored(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """Privacy-mode semantics expose only explicit commands and bot replies."""
+
+    handlers, service = handlers_factory()
+    update = _update(
+        text="ambient group message",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+    )
+
+    await handlers.text_message(update, SimpleNamespace())
+
+    registry.start_group_session.assert_not_awaited()
+    service.execute.assert_not_awaited()
+    update.effective_message.reply_text.assert_not_awaited()
+
+
+async def test_private_gemini_starts_fresh_with_private_settings(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """The new command must not replace normal private chat preferences."""
+
+    output = SimpleNamespace(text="answer", text_delta="answer", images=())
+    first_session = _StreamingSession([output])
+    second_session = _StreamingSession([output])
+    registry.get_state.return_value = _state(
+        model="private-model",
+        temporary=True,
+        extended_thinking=True,
+        language=LANGUAGE_CHINESE,
+    )
+    registry.start_new.side_effect = [first_session, second_session]
+    handlers, _ = handlers_factory()
+
+    await handlers.gemini(
+        _update(text="/gemini first"),
+        SimpleNamespace(args=["first"]),
+    )
+    await handlers.gemini(
+        _update(text="/gemini second"),
+        SimpleNamespace(args=["second"]),
+    )
+
+    assert registry.start_new.await_args_list == [call(202), call(202)]
+    assert first_session.calls == [
+        ("first", {"temporary": True, "extended_thinking": True})
+    ]
+    assert second_session.calls == [
+        ("second", {"temporary": True, "extended_thinking": True})
+    ]
+    assert registry.persist.await_args_list == [
+        call(202, first_session),
+        call(202, second_session),
+    ]
+    registry.start_group_session.assert_not_awaited()
+
+
+async def test_group_media_reply_uses_fixed_settings_and_extends_thread(
+    handlers_factory,
+    registry: AsyncMock,
+) -> None:
+    """File follow-ups must not bypass the group's fixed privacy-safe setup."""
+
+    upload = SimpleNamespace(prompt="analyze", files=["prepared-file"])
+    prepared = MagicMock()
+    prepared.__aenter__ = AsyncMock(return_value=upload)
+    prepared.__aexit__ = AsyncMock(return_value=None)
+    media_handler = MagicMock(spec=MediaHandler)
+    media_handler.prepare_upload.return_value = prepared
+    output = SimpleNamespace(text="analysis", images=())
+    session = SimpleNamespace(
+        send_message=AsyncMock(return_value=output),
+        cid="media-cid",
+        metadata=["media", None],
+    )
+    registry.start_group_session.return_value = (session, True)
+    registry.get_state.return_value = _state(
+        temporary=True,
+        extended_thinking=True,
+        language=LANGUAGE_CHINESE,
+    )
+    handlers, _ = handlers_factory(media_handler=media_handler)
+    update = _update(
+        text="caption",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=600,
+    )
+
+    await handlers.media_message(update, SimpleNamespace())
+
+    registry.start_group_session.assert_awaited_once_with(-1001, 600)
+    session.send_message.assert_awaited_once_with(
+        "analyze",
+        files=["prepared-file"],
+        temporary=False,
+        extended_thinking=False,
+    )
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "analysis",
+        parse_mode=ParseMode.HTML,
+        do_quote=True,
+    )
+    registry.persist_group_session.assert_awaited_once_with(-1001, 302, session)
+    registry.get_state.assert_not_awaited()
 
 
 async def test_group_gate_stops_even_an_unregistered_command(
@@ -1470,8 +1808,8 @@ def test_registration_places_auth_in_first_group(
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
     assert calls[1].kwargs == {"group": 0}
-    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:14])
-    assert len(calls) == 16
+    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:15])
+    assert len(calls) == 17
     registered_commands = {
         command
         for registered in calls
@@ -1505,6 +1843,7 @@ async def test_startup_registers_public_command_menu() -> None:
     assert registered_commands == {
         "start",
         "help",
+        "gemini",
         "new",
         "model",
         "gem",
@@ -1526,7 +1865,7 @@ async def test_startup_registers_public_command_menu() -> None:
             "health",
         }
     )
-    assert GROUP_COMMANDS == {"start", "help", "img"}
+    assert GROUP_COMMANDS == {"start", "help", "img", "gemini"}
     assert {item.command for item in menu_calls[1].args[0]} == GROUP_COMMANDS
     assert isinstance(
         menu_calls[1].kwargs["scope"],
