@@ -19,6 +19,7 @@ from telegram.constants import ChatType, MediaGroupLimit, ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ApplicationHandlerStop
 
+import gemini_tg_bot.telegram.handlers as handlers_module
 from gemini_tg_bot.__main__ import (
     _initialize_and_start_polling,
     _log_cookie_location,
@@ -32,6 +33,7 @@ from gemini_tg_bot.i18n import (
     translate,
 )
 from gemini_tg_bot.queue import RequestQueue
+from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
@@ -43,6 +45,7 @@ from gemini_tg_bot.telegram.handlers import (
     PUBLIC_BOT_COMMANDS,
     EgressMeter,
     TelegramHandlers,
+    _help_text,
     register_handlers,
 )
 from gemini_tg_bot.telegram.media import MediaHandler
@@ -96,6 +99,7 @@ def _state(
     chat_id: int = 202,
     cid: str | None = "cid-test",
     model: str | None = "dynamic-model",
+    gem_id: str | None = None,
     temporary: bool = False,
     extended_thinking: bool = False,
     language: str | None = None,
@@ -104,7 +108,7 @@ def _state(
         chat_id=chat_id,
         cid=cid,
         model=model,
-        gem_id=None,
+        gem_id=gem_id,
         temporary=temporary,
         extended_thinking=extended_thinking,
         language=language,
@@ -359,19 +363,67 @@ async def test_group_help_and_image_commands_remain_available(
     """The deliberately small group surface must still provide help and images."""
 
     handlers, _ = handlers_factory()
+    start_update = _update(text="/start", chat_type=ChatType.GROUP)
     help_update = _update(text="/help", chat_type=ChatType.GROUP)
     image_update = _update(text="/img", chat_type=ChatType.GROUP)
 
+    await handlers.command_gate(start_update, SimpleNamespace())
+    await handlers.start(start_update, SimpleNamespace())
     await handlers.command_gate(help_update, SimpleNamespace())
     await handlers.help(help_update, SimpleNamespace())
     await handlers.command_gate(image_update, SimpleNamespace())
     await handlers.img(image_update, SimpleNamespace(args=[]))
 
-    help_text = help_update.effective_message.reply_text.await_args.args[0]
-    assert help_text.startswith(translate("help.heading", LANGUAGE_ENGLISH))
+    for help_message in (start_update, help_update):
+        help_text = help_message.effective_message.reply_text.await_args.args[0]
+        assert _help_commands(help_text) == GROUP_COMMANDS
     image_update.effective_message.reply_text.assert_awaited_once_with(
         translate("image.usage", LANGUAGE_ENGLISH)
     )
+
+
+def _help_commands(help_text: str) -> set[str]:
+    return {
+        line.partition(" ")[0].removeprefix("/")
+        for line in help_text.splitlines()
+        if line.startswith("/")
+    }
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+@pytest.mark.parametrize("group_only", [False, True])
+def test_help_lists_exact_commands_for_chat_scope(
+    language: str,
+    group_only: bool,
+) -> None:
+    """Accurate discovery prevents users from invoking unavailable commands."""
+
+    help_text = _help_text(language, group_only=group_only)
+    expected = (
+        GROUP_COMMANDS
+        if group_only
+        else {item.command for item in PUBLIC_BOT_COMMANDS}
+    )
+
+    assert _help_commands(help_text) == expected
+    for command in expected:
+        assert (
+            f"/{command} — "
+            f"{translate(f'command.{command}.description', language)}"
+        ) in help_text
+
+
+def test_group_help_reads_group_commands_at_render_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One live source prevents the menu, gate, and help text from drifting."""
+
+    changed_commands = frozenset({"help", "img"})
+    monkeypatch.setattr(handlers_module, "GROUP_COMMANDS", changed_commands)
+
+    assert _help_commands(
+        _help_text(LANGUAGE_ENGLISH, group_only=True)
+    ) == changed_commands
 
 
 async def test_gemini_without_question_returns_quoted_group_usage(
@@ -440,6 +492,136 @@ async def test_each_group_gemini_command_starts_and_records_a_fresh_thread(
     assert second.effective_message.reply_text.await_args.kwargs["do_quote"] is True
     registry.get_state.assert_not_awaited()
     registry.persist.assert_not_awaited()
+
+
+async def test_group_img_uses_fixed_fresh_sessions_and_records_reply_threads(
+    handlers_factory,
+    tmp_path: Path,
+) -> None:
+    """Image requests must stay isolated yet remain continuable by reply."""
+
+    from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
+
+    image = SimpleNamespace(
+        url="https://example.test/generated.png",
+        title="Generated",
+        alt="Generated image",
+    )
+    image_output = SimpleNamespace(
+        text="",
+        text_delta="",
+        images=[image],
+        candidates=[SimpleNamespace(web_images=[], generated_images=[image])],
+        chosen=0,
+    )
+    continued_output = SimpleNamespace(
+        text="continued",
+        text_delta="continued",
+        images=(),
+    )
+    first_session = _StreamingSession([image_output])
+    first_session.cid = "first-image-cid"
+    first_session.metadata = ["first-image", None]
+    second_session = _StreamingSession([image_output])
+    second_session.cid = "second-image-cid"
+    second_session.metadata = ["second-image", None]
+    continued_session = _StreamingSession([continued_output])
+    continued_session.cid = "continued-image-cid"
+    continued_session.metadata = ["continued-image", None]
+    resolved_group_model = object()
+    client = MagicMock()
+    client.resolve_model.return_value = resolved_group_model
+    client.start_chat.side_effect = [
+        first_session,
+        second_session,
+        continued_session,
+    ]
+    handlers, service = handlers_factory(client)
+    service.client = client
+
+    first = _update(
+        text="/img first",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        message_id=100,
+    )
+    first.effective_message.reply_photo.return_value = SimpleNamespace(
+        message_id=150
+    )
+    second = _update(
+        text="/img second",
+        chat_id=-1001,
+        chat_type=ChatType.SUPERGROUP,
+        message_id=200,
+    )
+    second.effective_message.reply_photo.return_value = SimpleNamespace(
+        message_id=250
+    )
+    follow_up = _update(
+        text="continue the first image",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        message_id=300,
+        reply_to_message_id=150,
+    )
+
+    async with Database(tmp_path / "group-img.sqlite3") as database:
+        registry = ChatSessionRegistry(  # type: ignore[arg-type]
+            service,
+            database,
+            group_model="configured-group-model",
+            group_thread_retention_days=30,
+            group_thread_max_per_chat=100,
+        )
+        handlers._sessions = registry
+        await registry.set_model(-1001, "saved-private-model")
+        await registry.set_gem(-1001, "saved-private-gem")
+        await registry.set_temporary(-1001, True)
+        await registry.set_extended_thinking(-1001, True)
+        await registry.set_language(-1001, LANGUAGE_CHINESE)
+
+        await handlers.img(first, SimpleNamespace(args=["first"]))
+        await handlers.img(second, SimpleNamespace(args=["second"]))
+        await handlers.text_message(follow_up, SimpleNamespace())
+
+    assert client.resolve_model.call_args_list == [
+        call("configured-group-model"),
+        call("configured-group-model"),
+        call("configured-group-model"),
+    ]
+    assert client.start_chat.call_args_list == [
+        call(metadata=None, cid="", model=resolved_group_model, gem=None),
+        call(metadata=None, cid="", model=resolved_group_model, gem=None),
+        call(
+            metadata=["first-image", None],
+            cid="first-image-cid",
+            model=resolved_group_model,
+            gem=None,
+        ),
+    ]
+    assert first_session.calls == [
+        (
+            f"{IMAGE_GENERATION_PREFIX}\n\nfirst",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+    assert second_session.calls == [
+        (
+            f"{IMAGE_GENERATION_PREFIX}\n\nsecond",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+    assert continued_session.calls == [
+        (
+            "continue the first image",
+            {"temporary": False, "extended_thinking": False},
+        )
+    ]
+    assert first.effective_message.reply_photo.await_args.kwargs["do_quote"] is True
+    assert second.effective_message.reply_photo.await_args.kwargs["do_quote"] is True
+    assert follow_up.effective_message.reply_text.await_args.kwargs == {
+        "do_quote": True
+    }
 
 
 async def test_group_reply_restores_and_extends_the_referenced_thread(
@@ -1017,6 +1199,8 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
+    """Private image generation must retain each chat's chosen preferences."""
+
     image = SimpleNamespace(
         url="https://example.test/generated.png",
         title="Generated",
@@ -1033,6 +1217,13 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     )
     session = _StreamingSession([output])
     media_handler = MagicMock(spec=MediaHandler)
+    registry.get_state.return_value = _state(
+        model="private-image-model",
+        gem_id="private-image-gem",
+        temporary=True,
+        extended_thinking=True,
+        language=LANGUAGE_CHINESE,
+    )
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory(media_handler=media_handler)
     update = _update(text="/img 台北 101 的水彩畫")
@@ -1056,7 +1247,7 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     assert session.calls == [
         (
             f"{IMAGE_GENERATION_PREFIX}\n\n台北 101 的水彩畫",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": True, "extended_thinking": True},
         )
     ]
     media_handler.send_output_images.assert_awaited_once_with(
@@ -1067,6 +1258,11 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     update.effective_message.placeholder.edit_text.assert_not_awaited()
     update.effective_message.placeholder.delete.assert_awaited_once_with()
     assert delivery_order == ["delete-placeholder", "send-images"]
+    assert registry.get_state.await_args_list == [call(202), call(202)]
+    registry.get_or_create.assert_awaited_once_with(202)
+    registry.start_group_session.assert_not_awaited()
+    registry.set_model.assert_not_awaited()
+    registry.set_gem.assert_not_awaited()
     registry.persist.assert_awaited_once_with(202, session)
 
 

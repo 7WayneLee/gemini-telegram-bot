@@ -111,8 +111,12 @@ def _group_commands_for_language(language: str) -> tuple[BotCommand, ...]:
     )
 
 
-def _help_text(language: str) -> str:
-    commands = _commands_for_language(language)
+def _help_text(language: str, *, group_only: bool = False) -> str:
+    commands = (
+        _group_commands_for_language(language)
+        if group_only
+        else _commands_for_language(language)
+    )
     return "\n".join(
         (
             translate("help.heading", language),
@@ -290,7 +294,11 @@ class TelegramHandlers:
             return
         _, chat_id, message = identity
         language = await self._chat_language(update, chat_id)
-        await send_text_or_busy(message, _help_text(language), language=language)
+        await send_text_or_busy(
+            message,
+            _help_text(language, group_only=_is_group_update(update)),
+            language=language,
+        )
 
     async def help(self, update: Update, context: CallbackContext) -> None:
         """Alias for :meth:`start`."""
