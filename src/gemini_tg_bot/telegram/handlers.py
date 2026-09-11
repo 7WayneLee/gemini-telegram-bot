@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from datetime import UTC, date, datetime
 from html import escape
 from pathlib import Path
@@ -19,6 +20,7 @@ from telegram import (
     BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MessageEntity,
     Update,
 )
 from telegram.constants import ChatType, ParseMode
@@ -773,6 +775,7 @@ class TelegramHandlers:
         if identity is None:
             return
         _, chat_id, message = identity
+        attachment_message = _preferred_command_attachment(message)
         prompt = _prompt_with_quoted_context(
             _command_prompt(context),
             message,
@@ -781,18 +784,22 @@ class TelegramHandlers:
         )
         language = await self._chat_language(update, chat_id)
         if prompt is None:
-            await send_text_or_busy(
-                message,
-                translate("image.usage", language),
-                language=language,
-            )
-            return
+            if attachment_message is not None:
+                prompt = QUOTED_DEFAULT_IMAGE_REQUEST
+            else:
+                await send_text_or_busy(
+                    message,
+                    translate("image.usage", language),
+                    language=language,
+                )
+                return
 
         await self._stream_prompt(
             identity,
             f"{IMAGE_GENERATION_PREFIX}\n\n{prompt}",
             telegram_code=_telegram_language_code(update),
             is_group=_is_group_update(update),
+            attachment_message=attachment_message,
         )
 
     async def gemini(self, update: Update, context: CallbackContext) -> None:
@@ -804,6 +811,7 @@ class TelegramHandlers:
         _, chat_id, message = identity
         is_group = _is_group_update(update)
         language = await self._chat_language(update, chat_id)
+        attachment_message = _preferred_command_attachment(message)
         prompt = _prompt_with_quoted_context(
             _command_prompt(context),
             message,
@@ -811,19 +819,23 @@ class TelegramHandlers:
             default_prompt=QUOTED_DEFAULT_QUESTION,
         )
         if prompt is None:
-            await send_text_or_busy(
-                message,
-                translate("gemini.usage", language),
-                language=language,
-                **({"do_quote": True} if is_group else {}),
-            )
-            return
+            if attachment_message is not None:
+                prompt = QUOTED_DEFAULT_QUESTION
+            else:
+                await send_text_or_busy(
+                    message,
+                    translate("gemini.usage", language),
+                    language=language,
+                    **({"do_quote": True} if is_group else {}),
+                )
+                return
         await self._stream_prompt(
             identity,
             prompt,
             telegram_code=_telegram_language_code(update),
             is_group=is_group,
             new_private=not is_group,
+            attachment_message=attachment_message,
         )
 
     async def research_status(
@@ -1390,8 +1402,9 @@ class TelegramHandlers:
         is_group: bool = False,
         group_parent_message_id: int | None = None,
         new_private: bool = False,
+        attachment_message: Any | None = None,
     ) -> None:
-        """Stream one prompt and deliver its images through ``MediaHandler``."""
+        """Stream one prompt, optionally including one Telegram attachment."""
 
         user_id, chat_id, message = identity
         started = time.monotonic()
@@ -1411,51 +1424,90 @@ class TelegramHandlers:
         stream_message = _StreamingMessageProxy(message, quote=is_group)
         try:
             self._ensure_service_accepting_requests()
-            async with self._request_queue.request(user_id) as permit:
-                restored = False
-                if is_group:
-                    session, restored = await self._sessions.start_group_session(
-                        chat_id,
-                        group_parent_message_id,
-                    )
-                elif new_private:
-                    session = await self._sessions.start_new(chat_id)
-                else:
-                    session = await self._sessions.get_or_create(chat_id)
-
-                async def run_stream() -> Any:
-                    return await self._service.execute(
-                        lambda _client: stream_response(
-                            stream_message,
-                            session,
-                            prompt,
-                            language=language,
-                            temporary=temporary,
-                            extended_thinking=extended_thinking,
-                            flood_wait=permit.wait_for_flood_control,
+            async with AsyncExitStack() as upload_stack:
+                upload = None
+                if attachment_message is not None:
+                    try:
+                        upload = await upload_stack.enter_async_context(
+                            self._media.prepare_upload(
+                                attachment_message,
+                                language=language,
+                            )
                         )
-                    )
+                    except MediaUploadError as error:
+                        await _notify_attachment_skipped(
+                            message,
+                            language=language,
+                            is_group=is_group,
+                            reason=str(error),
+                        )
+                    except Exception as error:
+                        _log_handler_error("attachment download", error)
+                        await _notify_attachment_skipped(
+                            message,
+                            language=language,
+                            is_group=is_group,
+                        )
 
-                try:
-                    streamed = await run_stream()
-                except Exception as error:
-                    if not restored:
-                        raise
-                    LOGGER.warning(
-                        "Unable to restore group conversation (%s); "
-                        "starting a new conversation",
-                        type(error).__name__,
-                    )
-                    await _delete_placeholder(stream_message.placeholder)
-                    await send_text_or_busy(
-                        message,
-                        translate("gemini.thread_expired", language),
-                        language=language,
-                        do_quote=True,
-                    )
-                    session, _ = await self._sessions.start_group_session(chat_id)
-                    stream_message = _StreamingMessageProxy(message, quote=True)
-                    streamed = await run_stream()
+                async with self._request_queue.request(user_id) as permit:
+                    restored = False
+                    if is_group:
+                        session, restored = (
+                            await self._sessions.start_group_session(
+                                chat_id,
+                                group_parent_message_id,
+                            )
+                        )
+                    elif new_private:
+                        session = await self._sessions.start_new(chat_id)
+                    else:
+                        session = await self._sessions.get_or_create(chat_id)
+
+                    async def run_stream() -> Any:
+                        generate_kwargs: dict[str, Any] = {
+                            "temporary": temporary,
+                            "extended_thinking": extended_thinking,
+                        }
+                        if upload is not None:
+                            generate_kwargs["files"] = upload.files
+                        return await self._service.execute(
+                            lambda _client: stream_response(
+                                stream_message,
+                                session,
+                                prompt,
+                                language=language,
+                                flood_wait=permit.wait_for_flood_control,
+                                **generate_kwargs,
+                            )
+                        )
+
+                    try:
+                        streamed = await run_stream()
+                    except Exception as error:
+                        if not restored:
+                            raise
+                        LOGGER.warning(
+                            "Unable to restore group conversation (%s); "
+                            "starting a new conversation",
+                            type(error).__name__,
+                        )
+                        await _delete_placeholder(stream_message.placeholder)
+                        await send_text_or_busy(
+                            message,
+                            translate("gemini.thread_expired", language),
+                            language=language,
+                            do_quote=True,
+                        )
+                        session, _ = await self._sessions.start_group_session(
+                            chat_id
+                        )
+                        stream_message = _StreamingMessageProxy(
+                            message,
+                            quote=True,
+                        )
+                        streamed = await run_stream()
+                if upload is not None:
+                    self._media.record_upload(upload)
             if extended_thinking:
                 thought_characters = len(streamed.thoughts)
                 model = usage_model or "account default"
@@ -1567,6 +1619,15 @@ class TelegramHandlers:
         if message is None:
             return
         if getattr(message, "photo", None) or getattr(message, "document", None):
+            media_command = _media_caption_command(message, context)
+            if media_command is not None:
+                command, args = media_command
+                context.args = args
+                if command == "gemini":
+                    await self.gemini(update, context)
+                else:
+                    await self.img(update, context)
+                return
             await self.media_message(update, context)
             return
         await self.text_message(update, context)
@@ -2366,6 +2427,23 @@ def _own_bot_reply_message_id(
     return replied_to_id if isinstance(replied_to_id, int) else None
 
 
+def _preferred_command_attachment(message: Any) -> Any | None:
+    """Choose the command message's upload, otherwise its quoted upload."""
+
+    # The user's own attachment has the clearest intent.  Keep this priority
+    # instead of sending both it and the quoted attachment to Gemini.
+    if _has_supported_attachment(message):
+        return message
+    replied_to = getattr(message, "reply_to_message", None)
+    return replied_to if _has_supported_attachment(replied_to) else None
+
+
+def _has_supported_attachment(message: Any | None) -> bool:
+    return message is not None and bool(
+        getattr(message, "photo", None) or getattr(message, "document", None)
+    )
+
+
 def _quoted_message_text(message: Any) -> str | None:
     """Return the replied-to message's text, falling back to its caption."""
 
@@ -2445,6 +2523,40 @@ def _command_name(text: str | None) -> str | None:
     if not token.startswith("/"):
         return None
     return token[1:].split("@", maxsplit=1)[0].lower()
+
+
+def _media_caption_command(
+    message: Any,
+    context: CallbackContext,
+) -> tuple[str, list[str]] | None:
+    """Parse /gemini or /img when Telegram carries it in a media caption."""
+
+    caption = getattr(message, "caption", None)
+    entities = getattr(message, "caption_entities", None)
+    if not isinstance(caption, str) or not entities:
+        return None
+    first = entities[0]
+    if (
+        getattr(first, "type", None) != MessageEntity.BOT_COMMAND
+        or getattr(first, "offset", None) != 0
+    ):
+        return None
+    length = getattr(first, "length", None)
+    if not isinstance(length, int):
+        return None
+    token = caption[:length]
+    command_with_target = token[1:].split("@", maxsplit=1)
+    command = command_with_target[0].lower()
+    if command not in {"gemini", "img"}:
+        return None
+    if len(command_with_target) == 2:
+        bot = getattr(context, "bot", None)
+        username = getattr(bot, "username", None)
+        if not isinstance(username, str) or (
+            command_with_target[1].casefold() != username.casefold()
+        ):
+            return None
+    return command, caption.split()[1:]
 
 
 def _command_user_id(context: CallbackContext) -> int | None:
@@ -2603,6 +2715,24 @@ async def _reply_rate_limited(
         message,
         _rate_limit_message(error, language),
         language=language,
+    )
+
+
+async def _notify_attachment_skipped(
+    message: Any,
+    *,
+    language: str,
+    is_group: bool,
+    reason: str | None = None,
+) -> None:
+    notice = translate("media.attachment_skipped", language)
+    if reason:
+        notice = f"{reason}\n{notice}"
+    await send_text_or_busy(
+        message,
+        notice,
+        language=language,
+        **({"do_quote": True} if is_group else {}),
     )
 
 

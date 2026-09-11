@@ -62,7 +62,10 @@ from gemini_tg_bot.telegram.handlers import (
     _help_text,
     register_handlers,
 )
-from gemini_tg_bot.telegram.media import MediaHandler
+from gemini_tg_bot.telegram.media import (
+    MAX_UPLOAD_BYTES,
+    MediaHandler,
+)
 from gemini_tg_bot.telegram.sending import MAX_FLOOD_WAIT_SECONDS, SERVICE_BUSY
 from gemini_tg_bot.telegram.streaming import EDIT_CHARACTER_THRESHOLD, PLACEHOLDER_TEXT
 
@@ -170,7 +173,7 @@ def test_telegram_send_sites_use_common_transport(relative_path: str) -> None:
 
 def _update(
     *,
-    text: str = "hello",
+    text: str | None = "hello",
     user_id: int = 101,
     chat_id: int = 202,
     chat_type: str = ChatType.PRIVATE,
@@ -182,6 +185,12 @@ def _update(
     reply_to_text: str | None = None,
     reply_to_caption: str | None = None,
     reply_to_sender_name: str | None = None,
+    photo: list[Any] | None = None,
+    document: Any | None = None,
+    reply_to_photo: list[Any] | None = None,
+    reply_to_document: Any | None = None,
+    caption: str | None = None,
+    caption_entities: list[Any] | None = None,
 ) -> SimpleNamespace:
     placeholder = SimpleNamespace(
         message_id=message_id + 1,
@@ -191,11 +200,17 @@ def _update(
     message = SimpleNamespace(
         message_id=message_id,
         text=text,
+        photo=photo or [],
+        document=document,
+        caption=caption,
+        caption_entities=caption_entities or [],
         reply_to_message=(
             SimpleNamespace(
                 message_id=reply_to_message_id,
                 text=reply_to_text,
                 caption=reply_to_caption,
+                photo=reply_to_photo or [],
+                document=reply_to_document,
                 from_user=SimpleNamespace(
                     id=reply_to_user_id,
                     is_bot=reply_to_user_is_bot,
@@ -1474,6 +1489,365 @@ def _sent_texts(update: SimpleNamespace) -> list[Any]:
     ]
 
 
+_DEFAULT_FILE_SIZE = object()
+
+
+def _telegram_attachment(
+    payload: bytes,
+    *,
+    file_name: str | None = None,
+    file_size: object = _DEFAULT_FILE_SIZE,
+    download_error: Exception | None = None,
+) -> tuple[SimpleNamespace, list[Path]]:
+    downloaded_paths: list[Path] = []
+
+    async def download_to_drive(*, custom_path: Path) -> Path:
+        downloaded_paths.append(custom_path)
+        custom_path.write_bytes(payload)
+        if download_error is not None:
+            raise download_error
+        return custom_path
+
+    telegram_file = SimpleNamespace(
+        download_to_drive=AsyncMock(side_effect=download_to_drive)
+    )
+    attachment = SimpleNamespace(
+        file_size=(len(payload) if file_size is _DEFAULT_FILE_SIZE else file_size),
+        get_file=AsyncMock(return_value=telegram_file),
+    )
+    if file_name is None:
+        attachment.file_unique_id = "quoted-photo"
+    else:
+        attachment.file_name = file_name
+    return attachment, downloaded_paths
+
+
+async def test_gemini_quote_sends_photo_and_caption_context(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A screenshot's caption cannot substitute for its pixels, so both
+    inputs must reach Gemini while the temporary download is still scoped."""
+
+    payload = b"jpeg-screenshot"
+    photo, downloaded_paths = _telegram_attachment(payload)
+    session = _text_session()
+    registry.start_group_session.return_value = (session, False)
+    meter = EgressMeter(now=lambda: NOW)
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=meter,
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/gemini",
+        chat_id=-1001,
+        chat_type=ChatType.GROUP,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_caption="Rank too high, requesting support.",
+        reply_to_photo=[photo],
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=[]))
+
+    sent_prompt, sent_kwargs = session.calls[0]
+    assert sent_prompt == (
+        "Quoted message:\n"
+        "Rank too high, requesting support.\n\n"
+        f"{QUOTED_QUESTION_LABEL} {QUOTED_DEFAULT_QUESTION}"
+    )
+    assert sent_kwargs["files"] == [str(downloaded_paths[0])]
+    assert sent_kwargs["temporary"] is False
+    assert sent_kwargs["extended_thinking"] is False
+    assert meter.month_to_date_bytes == len(payload)
+    assert not downloaded_paths[0].exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_gemini_quote_sends_photo_without_empty_text_scaffolding(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A photo without a caption is still useful input, but an invented empty
+    quote block would add misleading context to the user's real question."""
+
+    photo, downloaded_paths = _telegram_attachment(b"captionless-photo")
+    session = _text_session()
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/gemini",
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_photo=[photo],
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=[]))
+
+    assert session.calls[0][0] == QUOTED_DEFAULT_QUESTION
+    assert session.calls[0][1]["files"] == [str(downloaded_paths[0])]
+    assert not downloaded_paths[0].exists()
+
+
+async def test_gemini_quote_sends_pdf_document(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Quoted documents need the same upload path as photos or PDF questions
+    would silently reach Gemini as text-only requests."""
+
+    document, downloaded_paths = _telegram_attachment(
+        b"pdf-payload",
+        file_name="report.pdf",
+    )
+    session = _text_session()
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/gemini summarise",
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_caption="September report.",
+        reply_to_document=document,
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["summarise"]))
+
+    assert "September report." in session.calls[0][0]
+    assert session.calls[0][1]["files"] == [str(downloaded_paths[0])]
+    assert downloaded_paths[0].suffix == ".pdf"
+    assert not downloaded_paths[0].exists()
+
+
+async def test_img_quote_sends_photo_to_generation_request(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Reference-image generation depends on the quoted pixels, so /img must
+    forward them through the same checked upload path as /gemini."""
+
+    photo, downloaded_paths = _telegram_attachment(b"style-reference")
+    session = _text_session()
+    registry.get_or_create.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/img make it warmer",
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_caption="A neon skyline at dusk.",
+        reply_to_photo=[photo],
+    )
+
+    await handlers.img(
+        update,
+        SimpleNamespace(args=["make", "it", "warmer"]),
+    )
+
+    assert session.calls[0][0] == (
+        f"{IMAGE_GENERATION_PREFIX}\n\n"
+        "Quoted message:\nA neon skyline at dusk.\n\n"
+        f"{QUOTED_REQUEST_LABEL} make it warmer"
+    )
+    assert session.calls[0][1]["files"] == [str(downloaded_paths[0])]
+    assert not downloaded_paths[0].exists()
+
+
+async def test_command_attachment_takes_priority_but_keeps_quoted_text(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """The user's actively attached file expresses stronger intent than a
+    quoted file, while the quote's words still explain what they are asking."""
+
+    own_document, own_paths = _telegram_attachment(
+        b"own-pdf",
+        file_name="chosen.pdf",
+    )
+    quoted_photo, quoted_paths = _telegram_attachment(b"older-photo")
+    session = _text_session()
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text=None,
+        caption="/gemini compare",
+        caption_entities=[
+            SimpleNamespace(type="bot_command", offset=0, length=7)
+        ],
+        document=own_document,
+        reply_to_message_id=700,
+        reply_to_user_id=555,
+        reply_to_user_is_bot=False,
+        reply_to_caption="Use this requirement as context.",
+        reply_to_photo=[quoted_photo],
+    )
+
+    await handlers.user_message(update, SimpleNamespace(args=None))
+
+    assert "Use this requirement as context." in session.calls[0][0]
+    assert session.calls[0][1]["files"] == [str(own_paths[0])]
+    own_document.get_file.assert_awaited_once_with()
+    quoted_photo.get_file.assert_not_awaited()
+    assert quoted_paths == []
+    assert not own_paths[0].exists()
+
+
+async def test_oversized_quoted_attachment_degrades_to_text(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """An oversized image must not discard a useful caption answer or spend
+    egress downloading bytes that Telegram already reports cannot be used."""
+
+    photo, downloaded_paths = _telegram_attachment(
+        b"not-downloaded",
+        file_size=MAX_UPLOAD_BYTES + 1,
+    )
+    session = _text_session()
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/gemini explain",
+        reply_to_message_id=700,
+        reply_to_caption="Keep answering this caption.",
+        reply_to_photo=[photo],
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["explain"]))
+
+    assert "Keep answering this caption." in session.calls[0][0]
+    assert "files" not in session.calls[0][1]
+    photo.get_file.assert_not_awaited()
+    assert downloaded_paths == []
+    assert translate("media.too_large", LANGUAGE_ENGLISH) in _sent_texts(update)[0]
+    assert translate("media.attachment_skipped", LANGUAGE_ENGLISH) in _sent_texts(
+        update
+    )[0]
+    assert _sent_texts(update)[1] == PLACEHOLDER_TEXT
+    registry.persist.assert_awaited_once_with(202, session)
+
+
+async def test_unknown_size_quoted_attachment_degrades_to_text(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Unknown sizes cannot bypass the pre-download limit, but their caption
+    should still receive a successful text-only Gemini response."""
+
+    document, downloaded_paths = _telegram_attachment(
+        b"not-downloaded",
+        file_name="unknown.pdf",
+        file_size=None,
+    )
+    session = _text_session()
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/gemini explain",
+        reply_to_message_id=700,
+        reply_to_caption="The size is unknown, not the caption.",
+        reply_to_document=document,
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["explain"]))
+
+    assert "The size is unknown, not the caption." in session.calls[0][0]
+    assert "files" not in session.calls[0][1]
+    document.get_file.assert_not_awaited()
+    assert downloaded_paths == []
+    notice = _sent_texts(update)[0]
+    assert translate("media.size_unknown", LANGUAGE_ENGLISH) in notice
+    assert translate("media.attachment_skipped", LANGUAGE_ENGLISH) in notice
+    registry.persist.assert_awaited_once_with(202, session)
+
+
+async def test_download_failure_degrades_to_localized_text_and_cleans_temp(
+    handlers_factory,
+    registry: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Expired Telegram files and network failures are recoverable: the bot
+    must answer the caption and remove even a partially downloaded artifact."""
+
+    photo, downloaded_paths = _telegram_attachment(
+        b"partial-download",
+        download_error=RuntimeError("synthetic expired file"),
+    )
+    session = _text_session()
+    registry.get_state.return_value = _state(language=LANGUAGE_CHINESE)
+    registry.start_new.return_value = session
+    handlers, _ = handlers_factory(
+        media_handler=MediaHandler(
+            egress_meter=EgressMeter(now=lambda: NOW),
+            temp_root=tmp_path,
+        )
+    )
+    update = _update(
+        text="/gemini explain",
+        reply_to_message_id=700,
+        reply_to_caption="Caption survives download failure.",
+        reply_to_photo=[photo],
+    )
+
+    await handlers.gemini(update, SimpleNamespace(args=["explain"]))
+
+    assert "Caption survives download failure." in session.calls[0][0]
+    assert "files" not in session.calls[0][1]
+    assert _sent_texts(update)[0] == translate(
+        "media.attachment_skipped",
+        LANGUAGE_CHINESE,
+    )
+    assert _sent_texts(update)[1] == translate(
+        "stream.placeholder",
+        LANGUAGE_CHINESE,
+    )
+    assert not downloaded_paths[0].exists()
+    assert list(tmp_path.iterdir()) == []
+    registry.persist.assert_awaited_once_with(202, session)
+
+
 async def test_group_gemini_reply_carries_the_quoted_message_as_context(
     handlers_factory,
     registry: AsyncMock,
@@ -1483,7 +1857,8 @@ async def test_group_gemini_reply_carries_the_quoted_message_as_context(
 
     session = _text_session()
     registry.start_group_session.return_value = (session, False)
-    handlers, _ = handlers_factory()
+    media_handler = MagicMock(spec=MediaHandler)
+    handlers, _ = handlers_factory(media_handler=media_handler)
     update = _update(
         text="/gemini why",
         chat_id=-1001,
@@ -1506,6 +1881,7 @@ async def test_group_gemini_reply_carries_the_quoted_message_as_context(
             {"temporary": False, "extended_thinking": False},
         )
     ]
+    media_handler.prepare_upload.assert_not_called()
 
 
 async def test_img_reply_carries_the_quoted_message_as_context(

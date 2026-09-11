@@ -659,6 +659,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         LANGUAGE_CHINESE: "無法確認檔案大小；為避免超過 20 MB 上限，已拒絕下載。",
     },
+    "media.attachment_skipped": {
+        LANGUAGE_ENGLISH: (
+            "The attachment could not be sent to Gemini. Continuing with text only."
+        ),
+        LANGUAGE_CHINESE: (
+            "附件無法一併傳送給 Gemini，將繼續只處理文字內容。"
+        ),
+    },
     "stream.placeholder": {
         LANGUAGE_ENGLISH: "Thinking…",
         LANGUAGE_CHINESE: "思考中…",
