@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Iterable
+from dataclasses import dataclass
+from enum import Enum
 from html import escape
 from typing import Protocol
 
@@ -80,6 +82,16 @@ class SQLiteAccessOverrides:
             row = await cursor.fetchone()
         return None if row is None else bool(row[0])
 
+    async def list_all(self) -> dict[int, bool]:
+        """Return every stored user access decision."""
+
+        await self._ensure_initialized()
+        async with self._connection.execute(
+            "SELECT user_id, allowed FROM telegram_user_access"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {int(row[0]): bool(row[1]) for row in rows}
+
     async def allow(self, user_id: int) -> None:
         """Persist an immediate allow decision."""
 
@@ -101,6 +113,16 @@ class SQLiteAccessOverrides:
         ) as cursor:
             row = await cursor.fetchone()
         return None if row is None else bool(row[0])
+
+    async def list_all_chats(self) -> dict[int, bool]:
+        """Return every stored group-chat access decision."""
+
+        await self._ensure_initialized()
+        async with self._connection.execute(
+            "SELECT chat_id, allowed FROM telegram_chat_access"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {int(row[0]): bool(row[1]) for row in rows}
 
     async def allow_chat(self, chat_id: int) -> None:
         """Persist an immediate group-chat allow decision."""
@@ -148,6 +170,25 @@ class SQLiteAccessOverrides:
             await self._connection.execute(TELEGRAM_CHAT_ACCESS_SCHEMA_SQL)
             await self._connection.commit()
             self._initialized = True
+
+
+class AccessSource(Enum):
+    """Source of an effective allow decision."""
+
+    ADMINISTRATOR = "administrator"
+    CONFIGURATION = "configuration"
+    USER_OVERRIDE = "user_override"
+    CHAT_OVERRIDE = "chat_override"
+
+
+@dataclass(frozen=True)
+class AccessListing:
+    """Effective access plus persisted denials, in stable identifier order."""
+
+    allowed_users: tuple[tuple[int, AccessSource], ...]
+    denied_users: tuple[int, ...]
+    allowed_chats: tuple[tuple[int, AccessSource], ...]
+    denied_chats: tuple[int, ...]
 
 
 class AuthMiddleware:
@@ -218,6 +259,49 @@ class AuthMiddleware:
         """Deny a group chat immediately and persist the decision."""
 
         await self._access_overrides.deny_chat(chat_id)
+
+    async def list_access(self) -> AccessListing:
+        """Return the effective configured and runtime access state."""
+
+        user_overrides = await self._access_overrides.list_all()
+        chat_overrides = await self._access_overrides.list_all_chats()
+
+        allowed_users: list[tuple[int, AccessSource]] = []
+        denied_users: list[int] = []
+        user_ids = (
+            set(self._configured_user_ids)
+            | set(user_overrides)
+            | {self._admin_user_id}
+        )
+        for user_id in sorted(user_ids):
+            if user_id == self._admin_user_id:
+                allowed_users.append((user_id, AccessSource.ADMINISTRATOR))
+            elif user_id in user_overrides:
+                if user_overrides[user_id]:
+                    allowed_users.append((user_id, AccessSource.USER_OVERRIDE))
+                else:
+                    denied_users.append(user_id)
+            elif user_id in self._configured_user_ids:
+                allowed_users.append((user_id, AccessSource.CONFIGURATION))
+
+        allowed_chats: list[tuple[int, AccessSource]] = []
+        denied_chats: list[int] = []
+        chat_ids = set(self._configured_chat_ids) | set(chat_overrides)
+        for chat_id in sorted(chat_ids):
+            if chat_id in chat_overrides:
+                if chat_overrides[chat_id]:
+                    allowed_chats.append((chat_id, AccessSource.CHAT_OVERRIDE))
+                else:
+                    denied_chats.append(chat_id)
+            elif chat_id in self._configured_chat_ids:
+                allowed_chats.append((chat_id, AccessSource.CONFIGURATION))
+
+        return AccessListing(
+            allowed_users=tuple(allowed_users),
+            denied_users=tuple(denied_users),
+            allowed_chats=tuple(allowed_chats),
+            denied_chats=tuple(denied_chats),
+        )
 
     async def __call__(self, update: Update, context: CallbackContext) -> None:
         """PTB callback that blocks all handlers after an unauthorized update.

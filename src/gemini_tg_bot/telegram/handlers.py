@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,7 +51,7 @@ from gemini_tg_bot.i18n import (
 from gemini_tg_bot.queue import QueueAcquireTimeout, RateLimitExceeded, RequestQueue
 from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
 
-from .auth import AuthMiddleware
+from .auth import AccessListing, AccessSource, AuthMiddleware
 from .media import MediaHandler, MediaUploadError, caption_is_eligible
 from .rendering import render_markdown_chunks
 from .sending import (
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 CALLBACK_DATA_LIMIT = 64
+ACCESS_NAME_LOOKUP_LIMIT = 50
 MODEL_CALLBACK_PREFIX = "model:"
 GEM_CALLBACK_PREFIX = "gem:"
 LANGUAGE_CALLBACK_PREFIX = "lang:"
@@ -890,6 +892,7 @@ class TelegramHandlers:
             "deny": self.deny,
             "allow_chat": self.allow_chat,
             "deny_chat": self.deny_chat,
+            "access": self.access,
             "health": self.health,
         }.get(command)
         if handler is not None:
@@ -1168,6 +1171,43 @@ class TelegramHandlers:
                 chat_id=target_chat_id,
             ),
             language=language,
+        )
+
+    async def access(self, update: Update, context: CallbackContext) -> None:
+        """List effective user and group access with its source."""
+
+        identity = await self._require_admin(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
+        assert self._auth is not None
+        try:
+            listing = await self._auth.list_access()
+        except Exception as error:
+            _log_handler_error("access listing", error)
+            await send_text_or_busy(
+                message,
+                translate("access.unavailable", language),
+                language=language,
+            )
+            return
+
+        names, names_truncated = await _lookup_access_names(
+            getattr(context, "bot", None),
+            listing,
+        )
+        report = _format_access_listing(
+            listing,
+            names=names,
+            names_truncated=names_truncated,
+            language=language,
+        )
+        await send_text_or_busy(
+            message,
+            report,
+            language=language,
+            parse_mode=ParseMode.HTML,
         )
 
     async def health(self, update: Update, context: CallbackContext) -> None:
@@ -2080,6 +2120,114 @@ class TelegramHandlers:
             return False
 
 
+_ACCESS_SOURCE_MESSAGE_KEYS = {
+    AccessSource.ADMINISTRATOR: "access.source.administrator",
+    AccessSource.CONFIGURATION: "access.source.configuration",
+    AccessSource.USER_OVERRIDE: "access.source.allow",
+    AccessSource.CHAT_OVERRIDE: "access.source.allow_chat",
+}
+
+
+async def _lookup_access_names(
+    bot: Any,
+    listing: AccessListing,
+) -> tuple[dict[int, str | None], bool]:
+    entry_ids = [
+        *(entry_id for entry_id, _source in sorted(listing.allowed_users)),
+        *sorted(listing.denied_users),
+        *(entry_id for entry_id, _source in sorted(listing.allowed_chats)),
+        *sorted(listing.denied_chats),
+    ]
+    names: dict[int, str | None] = {}
+    for entry_id in entry_ids[:ACCESS_NAME_LOOKUP_LIMIT]:
+        try:
+            chat = await bot.get_chat(entry_id)
+        except Exception as error:
+            LOGGER.warning(
+                "Unable to resolve Telegram access name for id=%s (%s)",
+                entry_id,
+                type(error).__name__,
+            )
+            names[entry_id] = None
+            continue
+        names[entry_id] = _access_entry_name(chat, is_group=entry_id < 0)
+    return names, len(entry_ids) > ACCESS_NAME_LOOKUP_LIMIT
+
+
+def _access_entry_name(chat: Any, *, is_group: bool) -> str | None:
+    attributes = ("title",) if is_group else ("full_name", "username")
+    for attribute in attributes:
+        value = getattr(chat, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _format_access_listing(
+    listing: AccessListing,
+    *,
+    names: dict[int, str | None],
+    names_truncated: bool,
+    language: str,
+) -> str:
+    lines: list[str] = []
+
+    def add_heading(message_key: str) -> None:
+        if lines:
+            lines.append("")
+        heading = escape(translate(message_key, language), quote=False)
+        lines.append(f"<b>{heading}</b>")
+
+    def entry_parts(entry_id: int) -> list[str]:
+        parts = [f"<code>{entry_id}</code>"]
+        if entry_id in names:
+            name = names[entry_id]
+            if name is None:
+                name = translate("access.name_unavailable", language)
+            parts.append(escape(name, quote=False))
+        return parts
+
+    add_heading("access.users_allowed_heading")
+    if listing.allowed_users:
+        for user_id, source in sorted(listing.allowed_users):
+            source_label = escape(
+                translate(_ACCESS_SOURCE_MESSAGE_KEYS[source], language),
+                quote=False,
+            )
+            lines.append("  " + "  ".join((*entry_parts(user_id), source_label)))
+    else:
+        lines.append("  " + translate("access.users_allowed_empty", language))
+
+    add_heading("access.users_denied_heading")
+    if listing.denied_users:
+        for user_id in sorted(listing.denied_users):
+            lines.append("  " + "  ".join(entry_parts(user_id)))
+    else:
+        lines.append("  " + translate("access.users_denied_empty", language))
+
+    add_heading("access.chats_allowed_heading")
+    if listing.allowed_chats:
+        for chat_id, source in sorted(listing.allowed_chats):
+            source_label = escape(
+                translate(_ACCESS_SOURCE_MESSAGE_KEYS[source], language),
+                quote=False,
+            )
+            lines.append("  " + "  ".join((*entry_parts(chat_id), source_label)))
+    else:
+        lines.append("  " + translate("access.chats_allowed_empty", language))
+
+    add_heading("access.chats_denied_heading")
+    if listing.denied_chats:
+        for chat_id in sorted(listing.denied_chats):
+            lines.append("  " + "  ".join(entry_parts(chat_id)))
+    else:
+        lines.append("  " + translate("access.chats_denied_empty", language))
+
+    if names_truncated:
+        lines.extend(("", translate("access.name_lookup_truncated", language)))
+    return "\n".join(lines)
+
+
 def register_handlers(
     application: Application[Any, Any, Any, Any, Any, Any],
     *,
@@ -2126,6 +2274,7 @@ def register_handlers(
                 "deny",
                 "allow_chat",
                 "deny_chat",
+                "access",
                 "health",
             ],
             handlers.admin_command,

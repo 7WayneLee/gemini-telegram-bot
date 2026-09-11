@@ -1074,7 +1074,7 @@ async def test_group_gate_stops_even_an_unregistered_command(
     )
 
 
-@pytest.mark.parametrize("command", ["allow_chat", "deny_chat"])
+@pytest.mark.parametrize("command", ["allow_chat", "deny_chat", "access"])
 async def test_group_gate_stops_chat_access_admin_commands(
     handlers_factory,
     command: str,
@@ -2616,7 +2616,7 @@ def test_registration_places_auth_in_first_group(
     assert {"start", "help"} <= registered_commands
     assert "lang" not in registered_commands
     assert {"img", "research", "research_status"} <= registered_commands
-    assert {"allow_chat", "deny_chat"} <= registered_commands
+    assert {"allow_chat", "deny_chat", "access"} <= registered_commands
 
 
 async def test_startup_registers_public_command_menu() -> None:
@@ -2660,6 +2660,7 @@ async def test_startup_registers_public_command_menu() -> None:
             "deny",
             "allow_chat",
             "deny_chat",
+            "access",
             "health",
         }
     )

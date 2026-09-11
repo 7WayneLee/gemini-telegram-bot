@@ -13,6 +13,7 @@ from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import AdminNotificationDAO
 from gemini_tg_bot.telegram.auth import (
     UNAUTHORIZED_MESSAGE,
+    AccessSource,
     AuthMiddleware,
     SQLiteAccessOverrides,
 )
@@ -98,6 +99,47 @@ async def test_database_allow_and_deny_take_effect_immediately(tmp_path) -> None
         reloaded = _middleware(database, allowed_user_ids={101})
         assert await reloaded.is_allowed(202) is True
         assert await reloaded.is_allowed(101) is False
+
+
+@pytest.mark.asyncio
+async def test_access_listing_reports_effective_sources_and_all_denials(
+    tmp_path,
+) -> None:
+    """The admin view must mirror override precedence instead of configuration."""
+
+    async with Database(tmp_path / "bot.sqlite3") as database:
+        overrides = SQLiteAccessOverrides(database.connection)
+        middleware = AuthMiddleware(
+            admin_user_id=9001,
+            allowed_user_ids={100, 400},
+            allowed_chat_ids={-400, -300},
+            access_overrides=overrides,
+        )
+        await middleware.deny(100)
+        await middleware.allow(200)
+        await middleware.deny(9001)
+        await middleware.deny_chat(-300)
+        await middleware.allow_chat(-200)
+
+        listing = await middleware.list_access()
+
+        assert await overrides.list_all() == {
+            100: False,
+            200: True,
+            9001: False,
+        }
+        assert await overrides.list_all_chats() == {-300: False, -200: True}
+        assert listing.allowed_users == (
+            (200, AccessSource.USER_OVERRIDE),
+            (400, AccessSource.CONFIGURATION),
+            (9001, AccessSource.ADMINISTRATOR),
+        )
+        assert listing.denied_users == (100,)
+        assert listing.allowed_chats == (
+            (-400, AccessSource.CONFIGURATION),
+            (-200, AccessSource.CHAT_OVERRIDE),
+        )
+        assert listing.denied_chats == (-300,)
 
 
 @pytest.mark.asyncio

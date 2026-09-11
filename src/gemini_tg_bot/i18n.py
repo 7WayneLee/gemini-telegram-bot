@@ -473,6 +473,72 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Denied group chat {chat_id}.",
         LANGUAGE_CHINESE: "已拒絕群組 {chat_id}。",
     },
+    "access.users_allowed_heading": {
+        LANGUAGE_ENGLISH: "Authorized users",
+        LANGUAGE_CHINESE: "已授權的使用者",
+    },
+    "access.users_denied_heading": {
+        LANGUAGE_ENGLISH: "Denied by /deny (overrides configuration)",
+        LANGUAGE_CHINESE: "被 /deny 拒絕（覆蓋設定檔）",
+    },
+    "access.chats_allowed_heading": {
+        LANGUAGE_ENGLISH: "Authorized groups",
+        LANGUAGE_CHINESE: "已授權的群組",
+    },
+    "access.chats_denied_heading": {
+        LANGUAGE_ENGLISH: (
+            "Groups denied by /deny_chat (overrides configuration)"
+        ),
+        LANGUAGE_CHINESE: "被 /deny_chat 拒絕的群組（覆蓋設定檔）",
+    },
+    "access.users_allowed_empty": {
+        LANGUAGE_ENGLISH: "No users are currently authorized.",
+        LANGUAGE_CHINESE: "目前沒有已授權的使用者。",
+    },
+    "access.users_denied_empty": {
+        LANGUAGE_ENGLISH: "No users are denied by /deny.",
+        LANGUAGE_CHINESE: "目前沒有被 /deny 拒絕的使用者。",
+    },
+    "access.chats_allowed_empty": {
+        LANGUAGE_ENGLISH: "No groups are currently authorized.",
+        LANGUAGE_CHINESE: "目前沒有已授權的群組。",
+    },
+    "access.chats_denied_empty": {
+        LANGUAGE_ENGLISH: "No groups are denied by /deny_chat.",
+        LANGUAGE_CHINESE: "目前沒有被 /deny_chat 拒絕的群組。",
+    },
+    "access.source.administrator": {
+        LANGUAGE_ENGLISH: "Administrator",
+        LANGUAGE_CHINESE: "管理者",
+    },
+    "access.source.configuration": {
+        LANGUAGE_ENGLISH: "Configuration",
+        LANGUAGE_CHINESE: "設定檔",
+    },
+    "access.source.allow": {
+        LANGUAGE_ENGLISH: "Granted by /allow",
+        LANGUAGE_CHINESE: "由 /allow 授予",
+    },
+    "access.source.allow_chat": {
+        LANGUAGE_ENGLISH: "Granted by /allow_chat",
+        LANGUAGE_CHINESE: "由 /allow_chat 授予",
+    },
+    "access.name_unavailable": {
+        LANGUAGE_ENGLISH: "(Name unavailable)",
+        LANGUAGE_CHINESE: "（名稱無法取得）",
+    },
+    "access.name_lookup_truncated": {
+        LANGUAGE_ENGLISH: (
+            "Some names were not resolved because the lookup limit was reached."
+        ),
+        LANGUAGE_CHINESE: "部分名稱未解析，因名單已達查詢上限。",
+    },
+    "access.unavailable": {
+        LANGUAGE_ENGLISH: (
+            "Could not list access right now. Please try again later."
+        ),
+        LANGUAGE_CHINESE: "目前無法列出授權狀態，請稍後再試。",
+    },
     "auth.group_title_unknown": {
         LANGUAGE_ENGLISH: "Unnamed group",
         LANGUAGE_CHINESE: "未命名群組",

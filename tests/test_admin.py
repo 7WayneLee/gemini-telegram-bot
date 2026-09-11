@@ -10,18 +10,23 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import SecretStr
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import ApplicationHandlerStop
 
 from gemini_tg_bot.config import Settings
 from gemini_tg_bot.gemini import service as service_module
 from gemini_tg_bot.gemini.errors import ErrorKind
 from gemini_tg_bot.gemini.service import GeminiService, ServiceState
-from gemini_tg_bot.i18n import LANGUAGE_ENGLISH, translate
+from gemini_tg_bot.i18n import (
+    LANGUAGE_CHINESE,
+    LANGUAGE_ENGLISH,
+    translate,
+)
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.telegram.auth import AuthMiddleware, SQLiteAccessOverrides
 from gemini_tg_bot.telegram.handlers import (
+    ACCESS_NAME_LOOKUP_LIMIT,
     ADMIN_ONLY,
     CREDENTIALS_NOT_RELAYED,
     EgressMeter,
@@ -161,7 +166,7 @@ async def test_group_setcookie_hides_whether_the_sender_is_an_admin(
         await database.close()
 
 
-@pytest.mark.parametrize("command", ["allow", "deny", "health"])
+@pytest.mark.parametrize("command", ["allow", "deny", "access", "health"])
 async def test_other_admin_commands_are_private_only(
     tmp_path: Path,
     command: str,
@@ -185,6 +190,29 @@ async def test_other_admin_commands_are_private_only(
             translate("command.private_only", LANGUAGE_ENGLISH)
         )
         assert await auth.is_allowed(7002) is False
+    finally:
+        await database.close()
+
+
+async def test_access_rejects_an_allowed_non_admin_in_private(
+    tmp_path: Path,
+) -> None:
+    """Allowlisted users must not be able to inspect other authorized identities."""
+
+    non_admin_id = 7001
+    database, _, handlers, _ = await _admin_stack(
+        tmp_path,
+        allowed_user_ids={non_admin_id},
+    )
+    try:
+        update = _update("/access", user_id=non_admin_id)
+
+        await handlers.access(
+            update,
+            SimpleNamespace(bot=SimpleNamespace(get_chat=AsyncMock())),
+        )
+
+        update.effective_message.reply_text.assert_awaited_once_with(ADMIN_ONLY)
     finally:
         await database.close()
 
@@ -276,6 +304,159 @@ async def test_chat_access_commands_are_private_only(
             translate("command.private_only", LANGUAGE_ENGLISH)
         )
         assert await auth.is_chat_allowed(-1002) is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+async def test_access_lists_effective_sources_denials_and_escaped_names(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """Operators need a bilingual, injection-safe view of actual precedence."""
+
+    database, auth, handlers, _ = await _admin_stack(
+        tmp_path,
+        allowed_user_ids={7001, 7002},
+        allowed_chat_ids={-1002, -1001},
+    )
+    try:
+        handlers._sessions.get_state.return_value = SimpleNamespace(
+            language=language
+        )
+        await auth.allow(7003)
+        await auth.deny(7002)
+        await auth.allow_chat(-1003)
+        await auth.deny_chat(-1002)
+        resolved = {
+            7001: SimpleNamespace(full_name="Configured User"),
+            7002: SimpleNamespace(full_name="Denied User"),
+            7003: SimpleNamespace(full_name=None, username="runtime_user"),
+            ADMIN_USER_ID: SimpleNamespace(full_name="Bot Owner"),
+            -1001: SimpleNamespace(title="<Ops > QA & Support>"),
+            -1002: SimpleNamespace(title="Denied Group"),
+            -1003: SimpleNamespace(title="Runtime Group"),
+        }
+        bot = SimpleNamespace(
+            get_chat=AsyncMock(side_effect=lambda entry_id: resolved[entry_id])
+        )
+        update = _update("/access")
+
+        await handlers.access(update, SimpleNamespace(bot=bot))
+
+        reply = update.effective_message.reply_text.await_args
+        report = reply.args[0]
+        assert reply.kwargs == {"parse_mode": ParseMode.HTML}
+        for heading_key in (
+            "access.users_allowed_heading",
+            "access.users_denied_heading",
+            "access.chats_allowed_heading",
+            "access.chats_denied_heading",
+        ):
+            assert f"<b>{translate(heading_key, language)}</b>" in report
+        allowed_users, denied_users = report.split(
+            f"<b>{translate('access.users_denied_heading', language)}</b>"
+        )
+        assert "<code>7002</code>" not in allowed_users
+        assert "<code>7002</code>  Denied User" in denied_users
+        assert (
+            f"<code>7001</code>  Configured User  "
+            f"{translate('access.source.configuration', language)}"
+        ) in report
+        assert (
+            f"<code>7003</code>  runtime_user  "
+            f"{translate('access.source.allow', language)}"
+        ) in report
+        assert (
+            f"<code>{ADMIN_USER_ID}</code>  Bot Owner  "
+            f"{translate('access.source.administrator', language)}"
+        ) in report
+        assert "<code>-1002</code>  Denied Group" in report
+        assert (
+            f"<code>-1003</code>  Runtime Group  "
+            f"{translate('access.source.allow_chat', language)}"
+        ) in report
+        assert "&lt;Ops &gt; QA &amp; Support&gt;" in report
+        assert "<Ops > QA & Support>" not in report
+        assert report.index("<code>7001</code>") < report.index(
+            "<code>7003</code>"
+        ) < report.index(f"<code>{ADMIN_USER_ID}</code>")
+    finally:
+        await database.close()
+
+
+async def test_access_keeps_empty_sections_visible(tmp_path: Path) -> None:
+    """Explicit empty text prevents administrators mistaking omission for failure."""
+
+    database, _, handlers, _ = await _admin_stack(tmp_path)
+    try:
+        bot = SimpleNamespace(
+            get_chat=AsyncMock(return_value=SimpleNamespace(full_name="Owner"))
+        )
+        update = _update("/access")
+
+        await handlers.access(update, SimpleNamespace(bot=bot))
+
+        report = update.effective_message.reply_text.await_args.args[0]
+        assert translate("access.users_denied_empty", LANGUAGE_ENGLISH) in report
+        assert translate("access.chats_allowed_empty", LANGUAGE_ENGLISH) in report
+        assert translate("access.chats_denied_empty", LANGUAGE_ENGLISH) in report
+    finally:
+        await database.close()
+
+
+async def test_access_name_lookup_failure_does_not_fail_the_command(
+    tmp_path: Path,
+) -> None:
+    """Stale Telegram relationships must degrade one row, not the whole report."""
+
+    database, _, handlers, _ = await _admin_stack(tmp_path)
+    try:
+        bot = SimpleNamespace(
+            get_chat=AsyncMock(side_effect=RuntimeError("chat unavailable"))
+        )
+        update = _update("/access")
+
+        await handlers.access(update, SimpleNamespace(bot=bot))
+
+        report = update.effective_message.reply_text.await_args.args[0]
+        assert f"<code>{ADMIN_USER_ID}</code>" in report
+        assert translate("access.name_unavailable", LANGUAGE_ENGLISH) in report
+        update.effective_message.reply_text.assert_awaited_once()
+    finally:
+        await database.close()
+
+
+async def test_access_caps_name_lookups_and_explains_unresolved_rows(
+    tmp_path: Path,
+) -> None:
+    """A large allowlist must have bounded Telegram latency and clear omissions."""
+
+    configured_users = set(range(1, ACCESS_NAME_LOOKUP_LIMIT + 1))
+    database, _, handlers, _ = await _admin_stack(
+        tmp_path,
+        allowed_user_ids=configured_users,
+    )
+    try:
+        bot = SimpleNamespace(
+            get_chat=AsyncMock(
+                side_effect=lambda entry_id: SimpleNamespace(
+                    full_name=f"Name {entry_id}"
+                )
+            )
+        )
+        update = _update("/access")
+
+        await handlers.access(update, SimpleNamespace(bot=bot))
+
+        report = update.effective_message.reply_text.await_args.args[0]
+        assert bot.get_chat.await_count == ACCESS_NAME_LOOKUP_LIMIT
+        assert f"Name {ADMIN_USER_ID}" not in report
+        assert f"<code>{ADMIN_USER_ID}</code>" in report
+        assert (
+            translate("access.name_lookup_truncated", LANGUAGE_ENGLISH)
+            in report
+        )
     finally:
         await database.close()
 
