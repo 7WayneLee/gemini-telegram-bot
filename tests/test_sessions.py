@@ -18,7 +18,7 @@ from gemini_tg_bot.storage.models import ChatSession as StoredChatSession, ChatS
 
 
 def _service_with_client(client: object) -> SimpleNamespace:
-    return SimpleNamespace(client=client)
+    return SimpleNamespace(client=client, accepting_requests=True)
 
 
 @pytest.mark.parametrize(

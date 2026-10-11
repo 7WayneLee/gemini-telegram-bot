@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import gemini_webapi
 from pydantic import SecretStr
 from telegram import Update
 from telegram.constants import ChatType
@@ -22,6 +23,7 @@ from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import GeminiService
 from gemini_tg_bot.gemini.thinking import ThinkingLevel, thinking_request
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
+from gemini_tg_bot.log_redaction import TokenRedactingFormatter
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import AdminNotificationDAO, UsageLogDAO
@@ -483,6 +485,25 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_logging(log_level: str) -> None:
+    """Configure application logs without exposing request credentials."""
+
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    formatter = TokenRedactingFormatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(formatter)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # Upstream DEBUG records embed the cookie cache file name, which contains
+    # the raw __Secure-1PSID value.
+    gemini_webapi.set_log_level("INFO" if log_level == "DEBUG" else log_level)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.dry_run:
@@ -490,10 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = Settings()
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    _configure_logging(settings.log_level)
     asyncio.run(_run_polling(settings))
     return 0
 

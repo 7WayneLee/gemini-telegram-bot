@@ -17,7 +17,7 @@ from gemini_tg_bot.config import (
     DEFAULT_GROUP_THREAD_MAX_PER_CHAT,
     DEFAULT_GROUP_THREAD_RETENTION_DAYS,
 )
-from gemini_tg_bot.gemini.service import GeminiService
+from gemini_tg_bot.gemini.service import GeminiService, ServiceUnavailableError
 from gemini_tg_bot.gemini.thinking import DEFAULT_THINKING_LEVEL, ThinkingLevel
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import (
@@ -307,15 +307,25 @@ class ChatSessionRegistry:
             await self._dao.upsert(record)
 
     async def restore_all(self) -> None:
-        """Rebuild all in-memory sessions from their persisted metadata."""
+        """Restore sessions when ready, otherwise defer until their first use."""
 
         await self.cleanup_group_threads()
         async with self._lock:
-            records = await self._dao.list_all()
-            restored = {
-                record.chat_id: self._start_chat(record) for record in records
-            }
-            self._sessions = restored
+            self._sessions.clear()
+            try:
+                if self._service.accepting_requests:
+                    records = await self._dao.list_all()
+                    restored = {
+                        record.chat_id: self._start_chat(record) for record in records
+                    }
+                    self._sessions = restored
+                    return
+            except ServiceUnavailableError:
+                # A service can degrade after the readiness check above.
+                pass
+            LOGGER.warning(
+                "Gemini is unavailable; chat sessions will be restored on first use"
+            )
 
     def _start_chat(self, record: StoredChatSession | None) -> ChatSession:
         """Construct a ChatSession through the service's sole client."""
