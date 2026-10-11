@@ -14,6 +14,7 @@ FAKE_URL = (
     "https://api.telegram.org/"
     "bot123456789:FAKE_TOKEN_FOR_TEST_abcdefghijkl/getMe"
 )
+FAKE_TOKEN = "123456789:FAKE_TOKEN_FOR_TEST_abcdefghijklmnop"
 
 
 @pytest.fixture
@@ -64,6 +65,96 @@ def test_configured_handler_redacts_exception_tracebacks(isolated_logging):
     assert "RuntimeError: https://api.telegram.org/bot<redacted>/getMe" in output
     assert "FAKE_TOKEN" not in output
     assert "bot123456789:" not in output
+
+
+def test_configured_handler_redacts_bare_tokens(isolated_logging):
+    """Rejected-token messages contain bare credentials without a bot prefix."""
+
+    main_module._configure_logging("INFO")
+    logging.getLogger("test.redaction").error(
+        "The token `%s` was rejected", FAKE_TOKEN,
+    )
+
+    output = isolated_logging.output.getvalue()
+    assert "The token `<redacted-token>` was rejected" in output
+    assert "FAKE_TOKEN" not in output
+    assert "123456789:" not in output
+
+
+def test_configured_handler_redacts_bare_tokens_in_tracebacks(isolated_logging):
+    """Credentials appearing only in exception details also need redaction."""
+
+    main_module._configure_logging("INFO")
+    try:
+        raise RuntimeError(f"The token `{FAKE_TOKEN}` was rejected")
+    except RuntimeError:
+        logging.getLogger("test.redaction").exception("Polling failed")
+
+    output = isolated_logging.output.getvalue()
+    assert "Traceback (most recent call last)" in output
+    assert "RuntimeError: The token `<redacted-token>` was rejected" in output
+    assert "FAKE_TOKEN_FOR_TEST" not in output
+    assert "123456789:" not in output
+
+
+@pytest.mark.parametrize("message", ["12:34", "2026-10-11 15:06:54"])
+def test_configured_handler_preserves_short_digit_strings(isolated_logging, message):
+    """Short colon-separated digits and timestamps are not Telegram credentials."""
+
+    main_module._configure_logging("INFO")
+    logging.getLogger("test.redaction").warning("Unrelated value: %s", message)
+
+    output = isolated_logging.output.getvalue()
+    assert f"Unrelated value: {message}" in output
+    assert "redacted" not in output
+
+
+def test_main_logs_fatal_polling_errors_before_nonzero_exit(
+    isolated_logging, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+):
+    """Fatal polling failures must reach stderr through redaction and still fail."""
+
+    monkeypatch.setattr(main_module, "Settings", lambda: SimpleNamespace(
+        log_level="INFO",
+    ))
+
+    async def fake_polling(settings):
+        raise RuntimeError(f"The token `{FAKE_TOKEN}` was rejected")
+
+    monkeypatch.setattr(main_module, "_run_polling", fake_polling)
+    logging.getLogger().handlers = []
+
+    with pytest.raises(SystemExit) as exit_info:
+        raise SystemExit(main_module.main([]))
+
+    assert exit_info.value.code != 0
+    stderr = capsys.readouterr().err
+    assert "FAKE_TOKEN_FOR_TEST" not in stderr
+    assert "123456789:" not in stderr
+    assert "<redacted-token>" in stderr
+    assert "Traceback (most recent call last)" in stderr
+    assert stderr.count("CRITICAL") == 1
+
+
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_main_preserves_control_flow_exceptions(
+    isolated_logging, monkeypatch: pytest.MonkeyPatch, exception_type,
+):
+    """Interrupts and explicit exits must retain their existing propagation."""
+
+    monkeypatch.setattr(main_module, "Settings", lambda: SimpleNamespace(
+        log_level="INFO",
+    ))
+
+    async def fake_polling(settings):
+        raise exception_type()
+
+    monkeypatch.setattr(main_module, "_run_polling", fake_polling)
+
+    with pytest.raises(exception_type):
+        main_module.main([])
+
+    assert "CRITICAL" not in isolated_logging.output.getvalue()
 
 
 def test_request_loggers_suppress_credential_bearing_info(isolated_logging):

@@ -512,7 +512,11 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     _configure_logging(settings.log_level)
-    asyncio.run(_run_polling(settings))
+    try:
+        asyncio.run(_run_polling(settings))
+    except Exception:
+        LOGGER.critical("Fatal error while running Telegram polling", exc_info=True)
+        return 1
     return 0
 
 
