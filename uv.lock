@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -293,7 +293,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "gemini-webapi", specifier = ">=2.1.1" },
+    { name = "gemini-webapi", specifier = "==2.1.1" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-telegram-bot", specifier = ">=21" },
 ]

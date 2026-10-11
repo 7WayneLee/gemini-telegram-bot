@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 dependencies = [
-    "gemini-webapi>=2.1.1",
+    "gemini-webapi==2.1.1",
     "python-telegram-bot>=21",
     "pydantic-settings>=2.0",
     "aiosqlite>=0.20",

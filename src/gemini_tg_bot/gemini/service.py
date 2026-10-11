@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, ClassVar, TypeVar, cast
 
-from gemini_webapi import GeminiClient
 from gemini_webapi import exceptions as gw_exc
 from gemini_webapi.constants import AccountStatus
 from gemini_webapi.utils import clear_cookies_cache
@@ -23,6 +22,7 @@ from gemini_tg_bot.config import Settings
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 
 from .errors import AccountStatusError, ErrorKind, classify_error
+from .thinking import ThinkingLevelGeminiClient as GeminiClient
 
 
 BLOCKED_ESCALATION_THRESHOLD = 3
