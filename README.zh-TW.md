@@ -176,12 +176,13 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `ENABLE_VIDEO_GENERATION` | `false` | 單支影片可達數十 MB |
 | `ENABLE_AUDIO_GENERATION` | `false` | 同上 |
 
-群組模式另外有四項：
+群組模式另外有五項：
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
 | `ALLOWED_CHAT_IDS` | 空 | 逗號分隔的群組 chat id（負數）。留空代表不核准任何群組 |
 | `GROUP_MODEL` | `flash` | 群組固定使用的模型，由上游動態解析取得，並非硬編碼 |
+| `GROUP_THINKING_LEVEL` | `medium` | 所有群組對話使用的思考等級（`low`、`medium` 或 `high`） |
 | `GROUP_THREAD_RETENTION_DAYS` | `30` | 群組對話串記錄的保留天數 |
 | `GROUP_THREAD_MAX_PER_CHAT` | `200` | 每個群組保留的對話串上限 |
 
@@ -196,15 +197,14 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `/start`、`/help` | 顯示可用指令。`/help` 不在指令選單中，但仍可使用 |
 | `/gemini <問題>` | 以這個問題開始一段新對話。作為回覆送出時，被引用訊息的內容會一併成為脈絡 |
 | `/new` | 結束目前對話，開始新的一輪 |
-| `/model` | 以 inline keyboard 選擇模型，清單為動態取得 |
+| `/model` | 選擇模型與思考等級，各聊天室獨立儲存（預設 Medium） |
 | `/gem` | 選擇要套用於對話的 gem |
 | `/temp` | 切換暫時模式 —— 不寫入 Gemini 歷史 |
 | `/language` | 切換 bot 自身介面的語言（不影響 Gemini 回覆語言），可選英文或正體中文；選擇後，該聊天室的指令選單也會隨之切換 |
-| `/think` | 切換各聊天室獨立持久化的延伸思考；回覆會附上可展開的思考過程並顯示思考秒數，Gemini Advanced 額度消耗速度比一般模式快 |
 | `/img <prompt>` | **明確要求生成圖片。** 未明示時 Gemini 傾向回傳網路搜尋結果而非 AI 生成圖 |
 | `/research <topic>` | 送出 Deep Research 任務，立即回傳 task id |
 | `/research_status` | 該聊天室的研究任務狀態 |
-| `/status` | 模型、session id、延伸思考開關狀態、cookie 最後刷新時間、佇列深度、用量、egress 估算 |
+| `/status` | 模型與思考等級、session id、cookie 最後刷新時間、佇列深度、用量、egress 估算 |
 | 純文字 | 以串流方式回覆 |
 | 圖片／文件 | 送給 Gemini，caption 作為 prompt |
 
@@ -230,7 +230,7 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | | 私訊 | 群組 |
 |---|---|---|
 | 對話 | 一段連續的對話。直接打字即可延續，`/new` 重置 | 一次一問。`/gemini <問題>` 每次都開始一段新對話；**回覆 bot 的訊息**才能延續該段對話。純文字不會送到 bot |
-| 設定 | 模型、gem、暫時模式、延伸思考、介面語言都可以調整 | 固定且不可更改：模型為 `GROUP_MODEL`、介面為英文、延伸思考關閉、不套用 gem |
+| 設定 | 模型、gem、暫時模式、思考等級（以 `/model` 調整）、介面語言都可以調整 | 固定且不可更改：模型為 `GROUP_MODEL`、思考等級固定為 `GROUP_THINKING_LEVEL`、介面為英文、不套用 gem |
 | 可用指令 | 全部 | `/gemini`、`/img`、`/help` |
 
 ### 為什麼群組需要指令或回覆

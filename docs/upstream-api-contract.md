@@ -165,13 +165,15 @@ update_gem, wait_for_deep_research
 |---|---|---|
 | `init` | **async** | `(timeout=450, auto_close=False, close_delay=450, auto_refresh=True, refresh_interval=600, watchdog_timeout=120, impersonate='chrome145', verbose=False) -> None` |
 | `start_chat` | **sync** | `(**kwargs) -> ChatSession` — 注意**不是** coroutine，不要 await |
-| `generate_content` | **async** | `(prompt, files=None, model=None, gem=None, chat=None, temporary=False, deep_research=False, extended_thinking=False, **kwargs) -> ModelOutput` |
+| `generate_content` | **async** | `(prompt, files=None, model=None, gem=None, chat=None, temporary=False, deep_research=False, extended_thinking=False, **kwargs) -> ModelOutput` — 註：`extended_thinking` 為布林值，僅對應 Low/High，詳見 [二之二](#二之二思考等級網頁版三段編碼與本專案的轉接層2026-10-11) |
 | `generate_content_stream` | **async generator** | 同上參數 → `AsyncGenerator[ModelOutput, None]` |
 | `list_models` | **sync** | `() -> list[AvailableModel] \| None` — **可能回傳 `None`，必須處理** |
 | `resolve_model` | **sync** | `(name: str) -> AvailableModel` |
 | `fetch_gems` | **async** | `(include_hidden=False, **kwargs) -> GemJar` |
 | `start_auto_refresh` | **async** | `() -> None` |
 | `close` | **async** | `(delay: float = 0) -> None` |
+
+> 註：`extended_thinking` 為布林值（`bool`），僅能對應 Low 與 High，無法原生表達 Medium；詳見 [二之二、思考等級](#二之二思考等級網頁版三段編碼與本專案的轉接層2026-10-11)。
 
 ### 建構子與 cookie 持久化
 
@@ -312,6 +314,47 @@ T3.4 的 `/setcookie` 熱更新可能需要。
   （例如回覆「模型清單暫時無法取得」），不得假設一定是 list。
 - `impersonate` 預設 `'chrome145'`。專案的 cookie 取得流程使用 Firefox（見 spec），
   兩者不一致並不影響 cookie 有效性，但若日後出現指紋問題，此為可調參數。
+
+---
+
+## 二之二、⚠️ 思考等級：網頁版三段編碼與本專案的轉接層（2026-10-11）
+
+> 由 Commander 於 2026-10-11 親自執行偵察（HUMAN-gated）：擷取 gemini.google.com 的四次 StreamGenerate 真實請求確認。
+
+### 傳輸層編碼對照表
+
+思考等級在 HTTP 請求的兩處欄位中傳遞，兩者數值必須一致：
+
+| Level | `f.req` inner list, index 80 | `x-goog-ext-525001261-jspb`, element right after the model number |
+|---|---|---|
+| Low | 1 | 1 |
+| Medium | 4 | 4 |
+| High | 2 | 2 |
+
+> **注意**：`f.req` inner list 索引 17 是每次對話輪次的計數器（per-conversation turn counter），並非思考等級。
+
+### 上游 `gemini-webapi` 2.1.1 的限制
+
+上游 `gemini-webapi` 2.1.1 僅提供 `extended_thinking: bool` 參數：
+
+- `client.py` 第 1501 行：`extended_thinking` 為 `True` 時於 `inner[80]` 寫入 2，否則寫入 1。
+- `client.py` 第 1513–1514 行：在 model header（`x-goog-ext-525001261-jspb`）中、session id 前附加相同數值（`2` 或 `1`）。
+
+因此上游原生僅能表達 Low（1）與 High（2），無法送出 Medium（4）。
+
+### 本專案轉接層（`ThinkingLevelGeminiClient`）機制與容錯
+
+本專案於 `src/gemini_tg_bot/gemini/thinking.py` 實作轉接層：
+
+- **Singleton 不變量**：`ThinkingLevelGeminiClient` 繼承 `GeminiClient`，僅覆寫 `_live_client` property。全專案唯一的建構點仍在 `service.py::_create_client`，維持不變量 2。
+- **ContextVar 作用域**：遇到 Medium 等級時，`thinking_request(ThinkingLevel.MEDIUM)` 向上游請求 High（`extended_thinking=True`），同時設定一個 `ContextVar`。在該 ContextVar 作用期間，發往 `Endpoint.GENERATE` 的 StreamGenerate 請求會被攔截，並將兩處欄位的數值由 2（High）改寫為 4（Medium）。
+- **完全隔離背景任務**：透過 `ContextVar` 隔離請求作用域，非 Medium 請求以及背景任務（如 cookie 輪替）取得的皆為未經改寫的原生 session，不受任何影響。
+- **改寫為 all-or-nothing 且 fail-safe**：改寫前會嚴格檢查 `f.req` 與 header 的結構。若 payload 形狀不符合預期（如上游結構漂移），轉接層會記錄 `WARNING`，並將請求維持原樣（以 High 送出），絕不會因為轉接層拋出例外導致使用者請求失敗。
+
+### 版本鎖定與升級流程
+
+- **版本釘選**：`gemini-webapi` 於 `pyproject.toml` 嚴格鎖定為 `==2.1.1`，因正式環境透過 `uv pip install` 安裝會忽略 `uv.lock`。測試 `tests/test_thinking.py::test_upstream_version_pin` 會在安裝版本不符時失敗。
+- **升級流程**：日後升級 `gemini-webapi` 時，必須重新檢視新版本原始碼確認傳輸層行為，並重跑 `tests/test_thinking.py`。若上游未來原生支援思考等級參數，應移除轉接層並改用上游官方參數。
 
 ---
 

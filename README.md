@@ -194,12 +194,13 @@ Everything else has a safe default. Three worth knowing:
 | `ENABLE_VIDEO_GENERATION` | `false` | A single clip can be tens of MB |
 | `ENABLE_AUDIO_GENERATION` | `false` | Same |
 
-Group mode adds four more:
+Group mode adds five more:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ALLOWED_CHAT_IDS` | empty | Comma-separated group chat ids (negative numbers). Empty means no group is approved |
 | `GROUP_MODEL` | `flash` | The model groups always use, resolved dynamically from upstream rather than hardcoded |
+| `GROUP_THINKING_LEVEL` | `medium` | Thinking level used for all group conversations (`low`, `medium`, or `high`) |
 | `GROUP_THREAD_RETENTION_DAYS` | `30` | How long group thread records are kept, in days |
 | `GROUP_THREAD_MAX_PER_CHAT` | `200` | Maximum threads kept per group |
 
@@ -214,15 +215,14 @@ Group mode adds four more:
 | `/start`, `/help` | Show available commands. `/help` is not in the command menu, but still works |
 | `/gemini <question>` | Start a new conversation with this question. Sent as a reply, the quoted message is included as context |
 | `/new` | End the current conversation and start a fresh one |
-| `/model` | Pick a model from an inline keyboard, listed dynamically |
+| `/model` | Pick a model, then pick a thinking level; saved per chat (default Medium) |
 | `/gem` | Pick a gem to apply to the conversation |
 | `/temp` | Toggle temporary mode — nothing written to Gemini history |
 | `/language` | Switch the bot's own interface between English and Traditional Chinese (not the language of Gemini's replies); this chat's command menu switches to match |
-| `/think` | Toggle extended thinking for this chat (persisted per chat); replies include an expandable thought process with thinking time in seconds and consume Gemini Advanced quota faster than normal mode |
 | `/img <prompt>` | **Explicitly ask for generation.** Without that wording Gemini tends to return web search results instead of an AI-generated image |
 | `/research <topic>` | Submit a Deep Research task; returns a task id immediately |
 | `/research_status` | Status of this chat's research tasks |
-| `/status` | Model, session id, extended thinking on/off, last cookie refresh, queue depth, usage, egress estimate |
+| `/status` | Model and thinking level, session id, last cookie refresh, queue depth, usage, egress estimate |
 | Plain text | Answered with streaming |
 | Photo / document | Passed to Gemini; the caption becomes the prompt |
 
@@ -249,7 +249,7 @@ the differences are deliberate.
 | | Direct message | Group |
 |---|---|---|
 | Conversation | One continuous conversation. Plain text continues it, `/new` resets it | One question at a time. `/gemini <question>` always starts a new conversation; **replying to one of the bot's messages** continues that conversation. Plain text does not reach the bot |
-| Settings | Model, gem, temporary mode, extended thinking and interface language are all adjustable | Fixed and not changeable: the model is `GROUP_MODEL`, the interface is English, extended thinking is off, and no gem is applied |
+| Settings | Model, gem, temporary mode, thinking level (adjustable with `/model`), and interface language are all adjustable | Fixed and not changeable: the model is `GROUP_MODEL`, the thinking level is fixed at `GROUP_THINKING_LEVEL`, the interface is English, and no gem is applied |
 | Available commands | All of them | `/gemini`, `/img`, `/help` |
 
 ### Why a group needs a command or a reply

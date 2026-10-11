@@ -38,11 +38,22 @@ Alongside: SQLite (aiosqlite), cookie store, admin notifier
 sharing one cookie invalidate each other**, logging the account out repeatedly.
 
 Hence: one process, one event loop, no extra workers or replicas. There is exactly
-one `GeminiClient(...)` construction site in the codebase (`gemini/service.py`).
+one client construction site in the codebase (`gemini/service.py::_create_client`),
+which now builds `ThinkingLevelGeminiClient` (a `GeminiClient` subclass).
 
 The practical consequence is that this design **cannot scale horizontally**. Higher
 throughput would require a pool of accounts with cookie rotation, which is a redesign
 of the cookie lifecycle rather than a configuration change.
+
+### Thinking-level transport adapter
+
+Gemini Web replaced its binary toggle with three thinking levels (Low, Medium, and High). Upstream `gemini-webapi` 2.1.1 only exposes a boolean `extended_thinking` parameter that sends wire values for Low (1) and High (2), with no native way to send Medium (4).
+
+To support Medium without modifying upstream:
+- `ThinkingLevelGeminiClient` subclasses `GeminiClient` and overrides only `_live_client` to intercept generation streams.
+- For Medium, `thinking_request(ThinkingLevel.MEDIUM)` asks upstream for High (`extended_thinking=True`) and sets a `ContextVar`. While set, generation requests have both wire fields rewritten from 2 to 4.
+- The override uses a `ContextVar` rather than mutable client state so that request scoping is isolated across concurrent async operations, leaving background tasks such as cookie rotation completely unaffected.
+- The rewrite is all-or-nothing and fails safe: if the payload shape does not match expectations, a warning is logged and the request is sent unchanged as High. The adapter never breaks a user request.
 
 ---
 
@@ -177,11 +188,13 @@ SQLite via `aiosqlite`, migrated with `PRAGMA user_version`:
 
 | Table | Contents |
 |---|---|
-| `chat_sessions` | Telegram chat → Gemini conversation, model, gem, temporary flag |
+| `chat_sessions` | Telegram chat → Gemini conversation, model, gem, temporary flag, thinking level |
 | `research_tasks` | Deep Research state, including the serialised plan needed to resume polling after a restart |
 | `usage_log` | Per-request outcome, error kind, latency |
 | `telegram_user_access` | Runtime allow/deny overrides from `/allow` and `/deny` |
 | `admin_notifications` | Digest and timestamp of each administrator page, so a restart loop cannot repeat one |
+
+Schema v9 adds `chat_sessions.thinking_level` (TEXT; `NULL` means the default, Medium). Chats that had extended thinking enabled are migrated to High, while `extended_thinking` is retained as an unused legacy column so that fresh and migrated databases match.
 
 `ChatSession.metadata` is a `list[str | None]` and is stored as a JSON array —
 positions carry meaning, so `None` entries must be preserved rather than compacted.
