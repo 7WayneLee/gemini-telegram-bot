@@ -18,7 +18,7 @@ from .models import (
 )
 
 
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 _TELEGRAM_ACCESS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_user_access (
@@ -48,6 +48,7 @@ async def migrate(connection: aiosqlite.Connection) -> None:
         6: _migrate_to_v6,
         7: _migrate_to_v7,
         8: _migrate_to_v8,
+        9: _migrate_to_v9,
     }
     for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
         await migrations[version](connection)
@@ -139,6 +140,24 @@ async def _migrate_to_v8(connection: aiosqlite.Connection) -> None:
         GROUP_THREAD_SCHEMA_SQL,
         version=8,
     )
+
+
+async def _migrate_to_v9(connection: aiosqlite.Connection) -> None:
+    await connection.execute("BEGIN IMMEDIATE")
+    try:
+        if not await _column_exists(connection, "chat_sessions", "thinking_level"):
+            await connection.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN thinking_level TEXT"
+            )
+        await connection.execute(
+            "UPDATE chat_sessions SET thinking_level = 'high' "
+            f"WHERE {CHAT_SESSION_THINKING_COLUMN} = 1"
+        )
+        await connection.execute("PRAGMA user_version = 9")
+        await connection.commit()
+    except BaseException:
+        await connection.rollback()
+        raise
 
 
 async def _run_schema_migration(

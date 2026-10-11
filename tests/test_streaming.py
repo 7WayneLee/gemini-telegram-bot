@@ -90,6 +90,7 @@ async def test_stream_uses_session_and_forwards_generation_options() -> None:
         clock=clock,
         temporary=True,
         extended_thinking=True,
+        show_thoughts=True,
     )
 
     assert session.calls == [
@@ -342,16 +343,19 @@ async def test_thoughts_are_prepended_as_an_expandable_blockquote() -> None:
         "question",
         clock=clock,
         sleep=AsyncMock(),
+        show_thoughts=True,
     )
 
     assert result.thoughts == "先看資料規模，再確認迴圈層數"
     final = placeholder.edit_text.await_args.args[0]
-    assert final.startswith("<blockquote expandable>先看資料規模，再確認迴圈層數</blockquote>")
+    assert final.startswith("<blockquote expandable>Thought process (0 seconds)\n先看資料規模，再確認迴圈層數</blockquote>")
     assert final.endswith("<b>答案</b>")
     assert placeholder.edit_text.await_args.kwargs["parse_mode"] == ParseMode.HTML
 
 
-async def test_thinking_elapsed_placeholder_is_throttled_and_finally_reported() -> None:
+async def test_private_low_thinking_placeholder_is_throttled_and_finally_reported() -> None:
+    """Low effort must still show returned thoughts and time in a private chat."""
+
     clock = FakeClock()
     answer_ready = asyncio.Event()
     sleep_calls: list[float] = []
@@ -378,7 +382,7 @@ async def test_thinking_elapsed_placeholder_is_throttled_and_finally_reported() 
             **kwargs: Any,
         ) -> AsyncIterator[SimpleNamespace]:
             assert prompt == "question"
-            assert kwargs == {"extended_thinking": True}
+            assert kwargs == {"extended_thinking": False}
             return self.generate()
 
     async def advancing_sleep(delay: float) -> None:
@@ -397,7 +401,8 @@ async def test_thinking_elapsed_placeholder_is_throttled_and_finally_reported() 
         language=LANGUAGE_CHINESE,
         clock=clock,
         sleep=advancing_sleep,
-        extended_thinking=True,
+        extended_thinking=False,
+        show_thoughts=True,
     )
 
     chinese_placeholder = translate("stream.placeholder", LANGUAGE_CHINESE)
@@ -414,7 +419,9 @@ async def test_thinking_elapsed_placeholder_is_throttled_and_finally_reported() 
     )
 
 
-async def test_disabled_thinking_does_not_add_placeholder_edits() -> None:
+async def test_hidden_thoughts_do_not_add_placeholder_edits() -> None:
+    """Groups must suppress both the thinking timer and the returned thought text."""
+
     clock = FakeClock()
     session = FakeSession(
         [(0.0, ""), (5.0, "答案")],
@@ -428,15 +435,11 @@ async def test_disabled_thinking_does_not_add_placeholder_edits() -> None:
         session,
         "question",
         clock=clock,
-        extended_thinking=False,
+        extended_thinking=True,
     )
 
     assert placeholder.edit_text.await_args_list == [
         call("答案", parse_mode=None),
-        call(
-            "<blockquote expandable>上游意外附帶的思考</blockquote>\n\n答案",
-            parse_mode=ParseMode.HTML,
-        ),
     ]
 
 
@@ -470,6 +473,7 @@ async def test_thinking_without_answer_measures_until_stream_end() -> None:
         language=LANGUAGE_CHINESE,
         clock=clock,
         extended_thinking=True,
+        show_thoughts=True,
     )
 
     assert placeholder.edit_text.await_args_list[-1] == call(
@@ -497,6 +501,7 @@ async def test_long_thoughts_are_truncated_to_keep_one_message() -> None:
         language=LANGUAGE_CHINESE,
         clock=clock,
         sleep=AsyncMock(),
+        show_thoughts=True,
     )
 
     final = placeholder.edit_text.await_args.args[0]

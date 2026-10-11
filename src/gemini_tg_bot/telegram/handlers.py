@@ -43,6 +43,7 @@ from gemini_tg_bot.gemini.service import (
     ServiceUnavailableError,
     account_status_guidance,
 )
+from gemini_tg_bot.gemini.thinking import ThinkingLevel, thinking_request
 from gemini_tg_bot.i18n import (
     DEFAULT_LANGUAGE,
     LANGUAGE_CHINESE,
@@ -51,7 +52,7 @@ from gemini_tg_bot.i18n import (
     translate,
 )
 from gemini_tg_bot.queue import QueueAcquireTimeout, RateLimitExceeded, RequestQueue
-from gemini_tg_bot.storage.models import UsageLog, UsageLogDAO
+from gemini_tg_bot.storage.models import ChatSessionDAO, UsageLog, UsageLogDAO
 
 from .auth import AccessListing, AccessSource, AuthMiddleware
 from .media import MediaHandler, MediaUploadError, caption_is_eligible
@@ -78,6 +79,7 @@ LOGGER = logging.getLogger(__name__)
 CALLBACK_DATA_LIMIT = 64
 ACCESS_NAME_LOOKUP_LIMIT = 50
 MODEL_CALLBACK_PREFIX = "model:"
+MODEL_LEVEL_CALLBACK_PREFIX = "mlvl:"
 GEM_CALLBACK_PREFIX = "gem:"
 LANGUAGE_CALLBACK_PREFIX = "lang:"
 
@@ -91,7 +93,6 @@ _AVAILABLE_PUBLIC_COMMAND_KEYS = (
     ("model", "command.model.description"),
     ("gem", "command.gem.description"),
     ("temp", "command.temp.description"),
-    ("think", "command.think.description"),
     ("language", "command.language.description"),
     ("img", "command.img.description"),
     ("research", "command.research.description"),
@@ -156,9 +157,6 @@ def _help_text(language: str, *, group_only: bool = False) -> str:
 
 PUBLIC_BOT_COMMANDS = _commands_for_language(DEFAULT_LANGUAGE)
 HELP_TEXT = _help_text(DEFAULT_LANGUAGE)
-
-THINKING_ENABLED = translate("think.enabled", DEFAULT_LANGUAGE)
-THINKING_DISABLED = translate("think.disabled", DEFAULT_LANGUAGE)
 
 MODEL_LIST_UNAVAILABLE = translate("model.list_unavailable", DEFAULT_LANGUAGE)
 GEM_LIST_UNAVAILABLE = translate("gem.list_unavailable", DEFAULT_LANGUAGE)
@@ -441,7 +439,14 @@ class TelegramHandlers:
                 if not model.is_available:
                     continue
                 callback_data = f"{MODEL_CALLBACK_PREFIX}{model.model_name}"
-                if not _valid_callback_data(callback_data):
+                level_callback_data = (
+                    f"{MODEL_LEVEL_CALLBACK_PREFIX}{ThinkingLevel.MEDIUM.value}:"
+                    f"{model.model_name}"
+                )
+                if not (
+                    _valid_callback_data(callback_data)
+                    and _valid_callback_data(level_callback_data)
+                ):
                     LOGGER.warning(
                         "Skipping model whose Telegram callback data exceeds %d bytes",
                         CALLBACK_DATA_LIMIT,
@@ -562,34 +567,6 @@ class TelegramHandlers:
             language=language,
         )
 
-    async def think(self, update: Update, context: CallbackContext) -> None:
-        """Toggle the persisted extended-thinking setting for this chat."""
-
-        del context
-        identity = await self._require_private_command(update)
-        if identity is None:
-            return
-        _, chat_id, message = identity
-        state = await self._sessions.get_state(chat_id)
-        language = resolve_language(
-            _stored_language(state),
-            _telegram_language_code(update),
-        )
-        enabled = not state.extended_thinking
-        await self._sessions.set_extended_thinking(chat_id, enabled)
-        if enabled:
-            await send_text_or_busy(
-                message,
-                translate("think.enabled", language),
-                language=language,
-            )
-            return
-        await send_text_or_busy(
-            message,
-            translate("think.disabled", language),
-            language=language,
-        )
-
     async def language(self, update: Update, context: CallbackContext) -> None:
         """Offer the supported per-chat interface languages."""
 
@@ -658,10 +635,6 @@ class TelegramHandlers:
             "status.on" if state.temporary else "status.off",
             language,
         )
-        thinking = translate(
-            "status.on" if state.extended_thinking else "status.off",
-            language,
-        )
         await send_text_or_busy(
             message,
             "\n".join(
@@ -671,6 +644,9 @@ class TelegramHandlers:
                         language,
                         model=state.model
                         or translate("status.account_default", language),
+                        level=translate(
+                            f"thinking.level.{state.thinking_level.value}", language
+                        ),
                     ),
                     translate(
                         "status.session_cid",
@@ -679,7 +655,6 @@ class TelegramHandlers:
                         or translate("status.session_missing", language),
                     ),
                     translate("status.temporary", language, state=temporary),
-                    translate("status.thinking", language, state=thinking),
                     translate(
                         "status.service",
                         language,
@@ -1303,12 +1278,36 @@ class TelegramHandlers:
         if not isinstance(data, str) or not _valid_callback_data(data):
             await edit_message_text_or_busy(
                 query,
-                translate("generic.invalid_option", language),
+                translate(
+                    "model.invalid"
+                    if isinstance(data, str) and data.startswith(MODEL_LEVEL_CALLBACK_PREFIX)
+                    else "generic.invalid_option",
+                    language,
+                ),
                 language=language,
             )
             return
 
-        if data.startswith(MODEL_CALLBACK_PREFIX):
+        if data.startswith(MODEL_LEVEL_CALLBACK_PREFIX):
+            try:
+                raw_level, model_name = data[len(MODEL_LEVEL_CALLBACK_PREFIX):].split(":", 1)
+                level = ThinkingLevel(raw_level)
+                if not model_name:
+                    raise ValueError("Missing model name")
+            except ValueError:
+                await edit_message_text_or_busy(
+                    query, translate("model.invalid", language), language=language
+                )
+                return
+            await self._select_model(
+                query=query,
+                user_id=user.id,
+                chat_id=chat.id,
+                model_name=model_name,
+                language=language,
+                level=level,
+            )
+        elif data.startswith(MODEL_CALLBACK_PREFIX):
             await self._select_model(
                 query=query,
                 user_id=user.id,
@@ -1411,14 +1410,15 @@ class TelegramHandlers:
         if is_group:
             language = LANGUAGE_ENGLISH
             temporary = False
-            extended_thinking = False
+            level = self._sessions.group_thinking_level
             usage_model = getattr(self._sessions, "group_model_name", None)
         else:
             state = await self._sessions.get_state(chat_id)
             language = resolve_language(_stored_language(state), telegram_code)
             temporary = state.temporary
-            extended_thinking = state.extended_thinking
+            level = state.thinking_level
             usage_model = state.model
+        show_thoughts = not is_group
         ok = False
         error_kind: str | None = None
         stream_message = _StreamingMessageProxy(message, quote=is_group)
@@ -1466,20 +1466,22 @@ class TelegramHandlers:
                     async def run_stream() -> Any:
                         generate_kwargs: dict[str, Any] = {
                             "temporary": temporary,
-                            "extended_thinking": extended_thinking,
                         }
                         if upload is not None:
                             generate_kwargs["files"] = upload.files
-                        return await self._service.execute(
-                            lambda _client: stream_response(
-                                stream_message,
-                                session,
-                                prompt,
-                                language=language,
-                                flood_wait=permit.wait_for_flood_control,
-                                **generate_kwargs,
+                        with thinking_request(level) as thinking_kwargs:
+                            return await self._service.execute(
+                                lambda _client: stream_response(
+                                    stream_message,
+                                    session,
+                                    prompt,
+                                    language=language,
+                                    show_thoughts=show_thoughts,
+                                    flood_wait=permit.wait_for_flood_control,
+                                    **generate_kwargs,
+                                    **thinking_kwargs,
+                                )
                             )
-                        )
 
                     try:
                         streamed = await run_stream()
@@ -1508,23 +1510,25 @@ class TelegramHandlers:
                         streamed = await run_stream()
                 if upload is not None:
                     self._media.record_upload(upload)
-            if extended_thinking:
+            if show_thoughts:
                 thought_characters = len(streamed.thoughts)
                 model = usage_model or "account default"
                 if thought_characters:
                     LOGGER.info(
-                        "Extended thinking result for model %s: requested, "
+                        "Thinking result for model %s at level %s: requested, "
                         "received %d thought characters.",
                         model,
+                        level.value,
                         thought_characters,
                     )
                 else:
                     LOGGER.info(
-                        "Extended thinking result for model %s: requested but "
+                        "Thinking result for model %s at level %s: requested but "
                         "received 0 thought characters; the model may not "
-                        "support extended thinking or the upstream response "
+                        "return thoughts or the upstream response "
                         "omitted it.",
                         model,
+                        level.value,
                     )
             if not is_group:
                 await self._sessions.persist(chat_id, session)
@@ -1534,7 +1538,7 @@ class TelegramHandlers:
                 streamed.text,
                 streamed.output,
                 keep_placeholder=(
-                    extended_thinking and bool(streamed.thoughts)
+                    show_thoughts and bool(streamed.thoughts)
                 ),
             )
             if is_group:
@@ -1656,7 +1660,7 @@ class TelegramHandlers:
         if is_group:
             language = LANGUAGE_ENGLISH
             temporary = False
-            extended_thinking = False
+            level = self._sessions.group_thinking_level
             usage_model = getattr(self._sessions, "group_model_name", None)
         else:
             state = await self._sessions.get_state(chat_id)
@@ -1665,7 +1669,7 @@ class TelegramHandlers:
                 _telegram_language_code(update),
             )
             temporary = state.temporary
-            extended_thinking = state.extended_thinking
+            level = state.thinking_level
             usage_model = state.model
         ok = False
         error_kind: str | None = None
@@ -1692,14 +1696,15 @@ class TelegramHandlers:
                         session = await self._sessions.get_or_create(chat_id)
 
                     async def send_upload() -> Any:
-                        return await self._service.execute(
-                            lambda _client: session.send_message(
-                                upload.prompt,
-                                files=upload.files,
-                                temporary=temporary,
-                                extended_thinking=extended_thinking,
+                        with thinking_request(level) as thinking_kwargs:
+                            return await self._service.execute(
+                                lambda _client: session.send_message(
+                                    upload.prompt,
+                                    files=upload.files,
+                                    temporary=temporary,
+                                    **thinking_kwargs,
+                                )
                             )
-                        )
 
                     try:
                         output = await send_upload()
@@ -1857,6 +1862,7 @@ class TelegramHandlers:
         chat_id: int,
         model_name: str,
         language: str,
+        level: ThinkingLevel | None = None,
     ) -> None:
         if not model_name:
             await edit_message_text_or_busy(
@@ -1916,11 +1922,40 @@ class TelegramHandlers:
                 language=language,
             )
             return
-        await self._sessions.set_model(chat_id, selected.model_name)
+        if level is not None:
+            await self._sessions.set_model_and_thinking_level(
+                chat_id, selected.model_name, level
+            )
+            await edit_message_text_or_busy(
+                query,
+                translate(
+                    "model.selected", language, model=selected.display_name,
+                    level=translate(f"thinking.level.{level.value}", language),
+                ),
+                language=language,
+            )
+            return
+
+        state = await self._sessions.get_state(chat_id)
+        buttons = []
+        for option in ThinkingLevel:
+            callback_data = (
+                f"{MODEL_LEVEL_CALLBACK_PREFIX}{option.value}:{selected.model_name}"
+            )
+            if not _valid_callback_data(callback_data):
+                await edit_message_text_or_busy(
+                    query, translate("model.invalid", language), language=language
+                )
+                return
+            label = translate(f"thinking.level.{option.value}", language)
+            if option is state.thinking_level:
+                label = translate("thinking.level.current", language, level=label)
+            buttons.append(InlineKeyboardButton(label, callback_data=callback_data))
         await edit_message_text_or_busy(
             query,
-            translate("model.selected", language, model=selected.display_name),
+            translate("model.choose_thinking", language, model=selected.display_name),
             language=language,
+            reply_markup=InlineKeyboardMarkup([buttons]),
         )
 
     async def _select_gem(
@@ -2018,6 +2053,17 @@ class TelegramHandlers:
                 chat_id,
                 type(error).__name__,
             )
+
+    async def republish_chat_command_menus(self, bot: Any) -> None:
+        """Replace stored language menus so removed commands do not linger."""
+
+        if self._database is None:
+            return
+        for record in await ChatSessionDAO(self._database.connection).list_all():
+            if record.language is not None:
+                await self._set_chat_command_menu(
+                    bot, record.chat_id, resolve_language(record.language, None)
+                )
 
     def _cookie_last_refresh(self) -> datetime | None:
         cache_file = self._cookie_path / (
@@ -2311,7 +2357,6 @@ def register_handlers(
     application.add_handler(CommandHandler("model", handlers.model), group=1)
     application.add_handler(CommandHandler("gem", handlers.gem), group=1)
     application.add_handler(CommandHandler("temp", handlers.temp), group=1)
-    application.add_handler(CommandHandler("think", handlers.think), group=1)
     application.add_handler(
         CommandHandler("language", handlers.language),
         group=1,
@@ -2346,7 +2391,7 @@ def register_handlers(
         CallbackQueryHandler(
             handlers.callback,
             pattern=(
-                rf"^(?:{MODEL_CALLBACK_PREFIX}|{GEM_CALLBACK_PREFIX}|"
+                rf"^(?:{MODEL_CALLBACK_PREFIX}|{MODEL_LEVEL_CALLBACK_PREFIX}|{GEM_CALLBACK_PREFIX}|"
                 rf"{LANGUAGE_CALLBACK_PREFIX})"
             ),
         )

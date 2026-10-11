@@ -181,6 +181,10 @@ class Settings(BaseSettings):
         validation_alias="GROUP_MODEL",
         min_length=1,
     )
+    group_thinking_level: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        validation_alias="GROUP_THINKING_LEVEL",
+    )
     group_thread_retention_days: int = Field(
         default=DEFAULT_GROUP_THREAD_RETENTION_DAYS,
         validation_alias="GROUP_THREAD_RETENTION_DAYS",

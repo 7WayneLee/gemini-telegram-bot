@@ -3,18 +3,73 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 from gemini_tg_bot.gemini.sessions import ChatSessionRegistry, ChatState
+from gemini_tg_bot.gemini.thinking import ThinkingLevel
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import GroupThread, GroupThreadDAO
+from gemini_tg_bot.storage.models import ChatSession as StoredChatSession, ChatSessionDAO
 
 
 def _service_with_client(client: object) -> SimpleNamespace:
     return SimpleNamespace(client=client)
+
+
+@pytest.mark.parametrize(
+    ("stored", "effective"),
+    [(None, ThinkingLevel.MEDIUM), ("low", ThinkingLevel.LOW),
+     ("medium", ThinkingLevel.MEDIUM), ("high", ThinkingLevel.HIGH),
+     ("garbage", ThinkingLevel.MEDIUM)],
+)
+async def test_effective_thinking_level_uses_safe_default(tmp_path, stored, effective) -> None:
+    """Unset or unrecognized preferences must never prevent a chat from answering."""
+
+    async with Database(tmp_path / "levels.sqlite3") as database:
+        await ChatSessionDAO(database.connection).upsert(
+            StoredChatSession(chat_id=1, thinking_level=stored, updated_at="test")
+        )
+        registry = ChatSessionRegistry(_service_with_client(MagicMock()), database)
+        assert (await registry.get_state(1)).thinking_level is effective
+
+
+async def test_model_and_level_are_saved_together_and_rebuild_session(tmp_path) -> None:
+    """The second model step must commit one complete preference and preserve context."""
+
+    client = MagicMock()
+    client.start_chat.side_effect = [
+        SimpleNamespace(cid="FAKE_CID", metadata=["FAKE_METADATA", None]), object()
+    ]
+    async with Database(tmp_path / "levels.sqlite3") as database:
+        registry = ChatSessionRegistry(_service_with_client(client), database)
+        await registry.persist(1, await registry.get_or_create(1))
+        upsert = AsyncMock(wraps=registry._dao.upsert)
+        registry._dao.upsert = upsert
+        await registry.set_model_and_thinking_level(1, "fake-model", ThinkingLevel.LOW)
+        assert upsert.await_count == 1
+        saved = upsert.await_args.args[0]
+        assert (saved.model, saved.thinking_level) == ("fake-model", "low")
+        assert saved.cid == "FAKE_CID"
+        await registry.get_or_create(1)
+        assert client.start_chat.call_args.kwargs["model"] == "fake-model"
+
+
+@pytest.mark.parametrize("configured", [None, "low", "medium", "high"])
+async def test_group_thinking_level_uses_fixed_settings(tmp_path, configured) -> None:
+    """Private preferences must never determine the effort of a group request."""
+
+    service = _service_with_client(MagicMock())
+    if configured is not None:
+        service._settings = SimpleNamespace(group_thinking_level=configured)
+    async with Database(tmp_path / "levels.sqlite3") as database:
+        registry = ChatSessionRegistry(service, database)
+        await registry.set_model_and_thinking_level(-1, "private", ThinkingLevel.HIGH)
+        assert registry.group_thinking_level is ThinkingLevel(configured or "medium")
 
 
 async def test_unknown_chat_has_default_state_and_creates_one_session(
@@ -36,7 +91,7 @@ async def test_unknown_chat_has_default_state_and_creates_one_session(
             model=None,
             gem_id=None,
             temporary=False,
-            extended_thinking=False,
+            thinking_level=ThinkingLevel.MEDIUM,
             language=None,
             updated_at=None,
         )
@@ -99,10 +154,10 @@ async def test_settings_are_per_chat_and_rebuild_session_with_context(
     }
 
 
-async def test_persist_preserves_enabled_extended_thinking(
+async def test_persist_preserves_thinking_level(
     tmp_path: Path,
 ) -> None:
-    """A successful response must not turn off the persisted /think switch."""
+    """A successful response must preserve the selected thinking level."""
 
     registry_client = MagicMock()
     session = SimpleNamespace(cid="response-cid", metadata=["response"])
@@ -112,11 +167,11 @@ async def test_persist_preserves_enabled_extended_thinking(
             _service_with_client(registry_client),
             database,
         )
-        await registry.set_extended_thinking(1, True)
+        await registry.set_model_and_thinking_level(1, (await registry.get_state(1)).model, ThinkingLevel.HIGH)
 
         await registry.persist(1, session)  # type: ignore[arg-type]
 
-        assert (await registry.get_state(1)).extended_thinking is True
+        assert (await registry.get_state(1)).thinking_level is ThinkingLevel.HIGH
 
 
 async def test_persist_preserves_every_setting_and_updates_context(
@@ -142,7 +197,7 @@ async def test_persist_preserves_every_setting_and_updates_context(
         await registry.set_model(2, "configured-model")
         await registry.set_gem(2, "configured-gem")
         await registry.set_temporary(2, True)
-        await registry.set_extended_thinking(2, True)
+        await registry.set_model_and_thinking_level(2, (await registry.get_state(2)).model, ThinkingLevel.HIGH)
         await registry.set_language(2, "zh-hant")
 
         await registry.persist(2, session)  # type: ignore[arg-type]
@@ -152,7 +207,7 @@ async def test_persist_preserves_every_setting_and_updates_context(
         assert state.model == "configured-model"
         assert state.gem_id == "configured-gem"
         assert state.temporary is True
-        assert state.extended_thinking is True
+        assert state.thinking_level is ThinkingLevel.HIGH
         assert state.language == "zh-hant"
 
         async with database.connection.execute(
@@ -335,7 +390,7 @@ async def test_group_sessions_are_fresh_and_ignore_saved_chat_settings(
         await registry.set_model(-1001, "saved-private-model")
         await registry.set_gem(-1001, "saved-private-gem")
         await registry.set_temporary(-1001, True)
-        await registry.set_extended_thinking(-1001, True)
+        await registry.set_model_and_thinking_level(-1001, (await registry.get_state(-1001)).model, ThinkingLevel.HIGH)
         await registry.set_language(-1001, "zh-hant")
 
         assert await registry.start_group_session(-1001) == (first, False)
@@ -511,7 +566,7 @@ async def test_start_new_preserves_private_settings_and_replaces_context(
         await registry.set_model(1, "private-model")
         await registry.set_gem(1, "private-gem")
         await registry.set_temporary(1, True)
-        await registry.set_extended_thinking(1, True)
+        await registry.set_model_and_thinking_level(1, (await registry.get_state(1)).model, ThinkingLevel.HIGH)
         await registry.set_language(1, "zh-hant")
 
         assert await registry.start_new(1) is fresh
@@ -520,7 +575,7 @@ async def test_start_new_preserves_private_settings_and_replaces_context(
         assert state.model == "private-model"
         assert state.gem_id == "private-gem"
         assert state.temporary is True
-        assert state.extended_thinking is True
+        assert state.thinking_level is ThinkingLevel.HIGH
         assert state.language == "zh-hant"
 
     client.start_chat.assert_called_once_with(

@@ -18,6 +18,7 @@ from gemini_tg_bot.config import (
     DEFAULT_GROUP_THREAD_RETENTION_DAYS,
 )
 from gemini_tg_bot.gemini.service import GeminiService
+from gemini_tg_bot.gemini.thinking import DEFAULT_THINKING_LEVEL, ThinkingLevel
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import (
     ChatSession as StoredChatSession,
@@ -40,7 +41,7 @@ class ChatState:
     model: str | None
     gem_id: str | None
     temporary: bool
-    extended_thinking: bool
+    thinking_level: ThinkingLevel
     language: str | None
     updated_at: str | None
 
@@ -68,6 +69,9 @@ class ChatSessionRegistry:
             settings,
             "group_model",
             DEFAULT_GROUP_MODEL,
+        )
+        self._group_thinking_level = ThinkingLevel(
+            getattr(settings, "group_thinking_level", DEFAULT_THINKING_LEVEL)
         )
         self._group_thread_retention_days = (
             group_thread_retention_days
@@ -100,6 +104,12 @@ class ChatSessionRegistry:
         """Return the configured group model name used for usage records."""
 
         return self._group_model
+
+    @property
+    def group_thinking_level(self) -> ThinkingLevel:
+        """Return the fixed configured effort for group conversations."""
+
+        return self._group_thinking_level
 
     async def get_state(self, chat_id: int) -> ChatState:
         """Return persisted state, or defaults for a chat not seen before."""
@@ -241,14 +251,19 @@ class ChatSessionRegistry:
                 _updated_record(chat_id, current, temporary=temporary)
             )
 
-    async def set_extended_thinking(self, chat_id: int, enabled: bool) -> None:
-        """Persist whether subsequent messages should use extended thinking."""
+    async def set_model_and_thinking_level(
+        self, chat_id: int, model: str | None, level: ThinkingLevel
+    ) -> None:
+        """Persist a model and effort together so neither selection is partial."""
 
         async with self._lock:
             current = await self._dao.get(chat_id)
             await self._dao.upsert(
-                _updated_record(chat_id, current, extended_thinking=enabled)
+                _updated_record(
+                    chat_id, current, model=model, thinking_level=level.value
+                )
             )
+            self._sessions.pop(chat_id, None)
 
     async def set_language(self, chat_id: int, language: str) -> None:
         """Persist an explicit interface language for this chat."""
@@ -345,7 +360,7 @@ def _to_state(
             model=None,
             gem_id=None,
             temporary=False,
-            extended_thinking=False,
+            thinking_level=DEFAULT_THINKING_LEVEL,
             language=None,
             updated_at=None,
         )
@@ -355,10 +370,17 @@ def _to_state(
         model=record.model,
         gem_id=record.gem_id,
         temporary=record.temporary,
-        extended_thinking=record.extended_thinking,
+        thinking_level=_effective_thinking_level(record.thinking_level),
         language=record.language,
         updated_at=record.updated_at,
     )
+
+
+def _effective_thinking_level(value: str | None) -> ThinkingLevel:
+    try:
+        return ThinkingLevel(value)
+    except (ValueError, TypeError):
+        return DEFAULT_THINKING_LEVEL
 
 
 def _updated_record(
@@ -368,14 +390,14 @@ def _updated_record(
     model: str | None | object = _UNSET,
     gem_id: str | None | object = _UNSET,
     temporary: bool | object = _UNSET,
-    extended_thinking: bool | object = _UNSET,
+    thinking_level: str | None | object = _UNSET,
     language: str | None | object = _UNSET,
 ) -> StoredChatSession:
     previous_model = current.model if current is not None else None
     previous_gem_id = current.gem_id if current is not None else None
     previous_temporary = current.temporary if current is not None else False
     previous_thinking = (
-        current.extended_thinking if current is not None else False
+        current.thinking_level if current is not None else None
     )
     previous_language = current.language if current is not None else None
     return StoredChatSession(
@@ -397,10 +419,10 @@ def _updated_record(
             if temporary is _UNSET
             else cast(bool, temporary)
         ),
-        extended_thinking=(
+        thinking_level=(
             previous_thinking
-            if extended_thinking is _UNSET
-            else cast(bool, extended_thinking)
+            if thinking_level is _UNSET
+            else cast(str | None, thinking_level)
         ),
         language=(
             previous_language

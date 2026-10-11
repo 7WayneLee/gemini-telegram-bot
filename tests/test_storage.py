@@ -33,6 +33,7 @@ EXPECTED_SCHEMA = {
         ("updated_at", "TEXT", 1, None, 0),
         ("extended_thinking", "INTEGER", 0, "0", 0),
         ("language", "TEXT", 0, None, 0),
+        ("thinking_level", "TEXT", 0, None, 0),
     ],
     "research_tasks": [
         ("task_id", "TEXT", 0, None, 1),
@@ -516,7 +517,7 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
         migrated_group_threads = await _column_names(database, "group_threads")
 
     assert migrated == fresh
-    assert fresh[-1] == "language"
+    assert fresh[-1] == "thinking_level"
     assert migrated_chat_access == fresh_chat_access
     assert fresh_chat_access == ["chat_id", "allowed"]
     assert migrated_group_threads == fresh_group_threads
@@ -527,6 +528,48 @@ async def test_migrated_database_matches_a_fresh_one(tmp_path) -> None:
         "metadata_json",
         "created_at",
     ]
+
+
+@pytest.mark.asyncio
+async def test_v9_migrates_legacy_thinking_and_matches_fresh_columns(tmp_path) -> None:
+    """Upgrades preserve opt-in High while giving other chats the new default."""
+
+    path = tmp_path / "v8.sqlite3"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE chat_sessions (
+                chat_id INTEGER PRIMARY KEY, cid TEXT, metadata_json TEXT,
+                model TEXT, gem_id TEXT, temporary INTEGER DEFAULT 0,
+                updated_at TEXT NOT NULL, extended_thinking INTEGER DEFAULT 0,
+                language TEXT
+            );
+            INSERT INTO chat_sessions (chat_id, extended_thinking, updated_at)
+            VALUES (1, 1, 'legacy'), (2, 0, 'legacy');
+            PRAGMA user_version = 8;
+            """
+        )
+    finally:
+        connection.close()
+
+    async with Database(path) as migrated:
+        columns = await _column_names(migrated, "chat_sessions")
+        assert await _user_version(migrated) == 9
+        dao = ChatSessionDAO(migrated.connection)
+        assert (await dao.get(1)).thinking_level == "high"
+        assert (await dao.get(2)).thinking_level is None
+        # Subsequent writes must ignore the retained legacy column.
+        await dao.upsert(ChatSession(chat_id=1, thinking_level="low", updated_at="new"))
+        await migrated.migrate()
+        assert (await dao.get(1)).thinking_level == "low"
+        async with migrated.connection.execute(
+            "SELECT extended_thinking FROM chat_sessions WHERE chat_id = 1"
+        ) as cursor:
+            assert (await cursor.fetchone())[0] == 1
+
+    async with Database(tmp_path / "fresh-v9.sqlite3") as fresh:
+        assert await _column_names(fresh, "chat_sessions") == columns
 
 
 async def _column_names(database: Database, table: str) -> list[str]:

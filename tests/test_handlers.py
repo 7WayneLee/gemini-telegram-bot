@@ -28,6 +28,8 @@ from gemini_tg_bot.__main__ import (
 )
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME
 from gemini_tg_bot.gemini.service import DegradedReason, ServiceState
+from gemini_tg_bot.gemini.thinking import ThinkingLevel, MEDIUM_WIRE_VALUE
+from gemini_tg_bot.gemini import thinking as thinking_module
 from gemini_tg_bot.i18n import (
     LANGUAGE_CHINESE,
     LANGUAGE_ENGLISH,
@@ -89,8 +91,8 @@ except ModuleNotFoundError:
         async def set_model(self, chat_id: int, model: str | None) -> None: ...
         async def set_gem(self, chat_id: int, gem_id: str | None) -> None: ...
         async def set_temporary(self, chat_id: int, temporary: bool) -> None: ...
-        async def set_extended_thinking(
-            self, chat_id: int, enabled: bool
+        async def set_model_and_thinking_level(
+            self, chat_id: int, model: str | None, level: ThinkingLevel
         ) -> None: ...
         async def set_language(self, chat_id: int, language: str) -> None: ...
         async def persist(self, chat_id: int, session: Any) -> None: ...
@@ -119,7 +121,7 @@ def _state(
     model: str | None = "dynamic-model",
     gem_id: str | None = None,
     temporary: bool = False,
-    extended_thinking: bool = False,
+    thinking_level: ThinkingLevel = ThinkingLevel.MEDIUM,
     language: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -128,7 +130,7 @@ def _state(
         model=model,
         gem_id=gem_id,
         temporary=temporary,
-        extended_thinking=extended_thinking,
+        thinking_level=thinking_level,
         language=language,
         updated_at=NOW.isoformat(),
     )
@@ -266,6 +268,7 @@ def _client_service(client: Any) -> MagicMock:
 
     service = MagicMock()
     service.execute = AsyncMock(side_effect=execute)
+    service._settings = SimpleNamespace(group_thinking_level="medium")
     service.health = SimpleNamespace(
         state=ServiceState.HEALTHY,
         accepting_requests=True,
@@ -295,6 +298,7 @@ class _StreamingSession:
 def registry() -> AsyncMock:
     mocked = AsyncMock(spec=_RegistrySpec)
     mocked.get_state.return_value = _state()
+    mocked.group_thinking_level = ThinkingLevel.MEDIUM
     return mocked
 
 
@@ -360,7 +364,6 @@ async def test_help_and_new_commands(
         "model",
         "gem",
         "temp",
-        "think",
         "language",
         "new",
         "status",
@@ -502,7 +505,6 @@ def test_group_help_explains_how_to_continue_a_conversation(
             "/model — Choose a Gemini model\n"
             "/gem — Choose a Gem\n"
             "/temp — Toggle temporary chat mode\n"
-            "/think — Toggle Extended Thinking\n"
             "/language — Choose interface language\n"
             "/img — Generate an image\n"
             "/research — Submit a Deep Research task\n"
@@ -520,7 +522,6 @@ def test_group_help_explains_how_to_continue_a_conversation(
             "/model — 選擇 Gemini 模型\n"
             "/gem — 選擇 Gem\n"
             "/temp — 切換暫時對話模式\n"
-            "/think — 切換 Extended Thinking\n"
             "/language — 選擇介面語言\n"
             "/img — 生成圖片\n"
             "/research — 提交 Deep Research 任務\n"
@@ -605,10 +606,10 @@ async def test_each_group_gemini_command_starts_and_records_a_fresh_thread(
         call(-1001, None),
     ]
     assert sessions[0].calls == [
-        ("first", {"temporary": False, "extended_thinking": False})
+        ("first", {"temporary": False, "extended_thinking": True})
     ]
     assert sessions[1].calls == [
-        ("second", {"temporary": False, "extended_thinking": False})
+        ("second", {"temporary": False, "extended_thinking": True})
     ]
     assert registry.persist_group_session.await_args_list == [
         call(-1001, 101, sessions[0]),
@@ -703,7 +704,7 @@ async def test_group_img_uses_fixed_fresh_sessions_and_records_reply_threads(
         await registry.set_model(-1001, "saved-private-model")
         await registry.set_gem(-1001, "saved-private-gem")
         await registry.set_temporary(-1001, True)
-        await registry.set_extended_thinking(-1001, True)
+        await registry.set_model_and_thinking_level(-1001, (await registry.get_state(-1001)).model, ThinkingLevel.HIGH)
         await registry.set_language(-1001, LANGUAGE_CHINESE)
 
         await handlers.img(first, SimpleNamespace(args=["first"]))
@@ -728,19 +729,19 @@ async def test_group_img_uses_fixed_fresh_sessions_and_records_reply_threads(
     assert first_session.calls == [
         (
             f"{IMAGE_GENERATION_PREFIX}\n\nfirst",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
     assert second_session.calls == [
         (
             f"{IMAGE_GENERATION_PREFIX}\n\nsecond",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
     assert continued_session.calls == [
         (
             "continue the first image",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
     assert first.effective_message.reply_photo.await_args.kwargs["do_quote"] is True
@@ -792,7 +793,7 @@ async def test_group_reply_restores_and_extends_the_referenced_thread(
         ]
     )
     assert continued_session.calls == [
-        ("continue", {"temporary": False, "extended_thinking": False})
+        ("continue", {"temporary": False, "extended_thinking": True})
     ]
     assert follow_up.effective_message.reply_text.await_args.kwargs == {
         "do_quote": True
@@ -956,7 +957,7 @@ async def test_private_gemini_starts_fresh_with_private_settings(
     registry.get_state.return_value = _state(
         model="private-model",
         temporary=True,
-        extended_thinking=True,
+        thinking_level=ThinkingLevel.HIGH,
         language=LANGUAGE_CHINESE,
     )
     registry.start_new.side_effect = [first_session, second_session]
@@ -1006,7 +1007,7 @@ async def test_group_media_reply_uses_fixed_settings_and_extends_thread(
     registry.start_group_session.return_value = (session, True)
     registry.get_state.return_value = _state(
         temporary=True,
-        extended_thinking=True,
+        thinking_level=ThinkingLevel.HIGH,
         language=LANGUAGE_CHINESE,
     )
     handlers, _ = handlers_factory(media_handler=media_handler)
@@ -1024,7 +1025,7 @@ async def test_group_media_reply_uses_fixed_settings_and_extends_thread(
         "analyze",
         files=["prepared-file"],
         temporary=False,
-        extended_thinking=False,
+        extended_thinking=True,
     )
     update.effective_message.reply_text.assert_awaited_once_with(
         "analysis",
@@ -1419,7 +1420,7 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
         model="private-image-model",
         gem_id="private-image-gem",
         temporary=True,
-        extended_thinking=True,
+        thinking_level=ThinkingLevel.HIGH,
         language=LANGUAGE_CHINESE,
     )
     registry.get_or_create.return_value = session
@@ -1562,7 +1563,7 @@ async def test_gemini_quote_sends_photo_and_caption_context(
     )
     assert sent_kwargs["files"] == [str(downloaded_paths[0])]
     assert sent_kwargs["temporary"] is False
-    assert sent_kwargs["extended_thinking"] is False
+    assert sent_kwargs["extended_thinking"] is True
     assert meter.month_to_date_bytes == len(payload)
     assert not downloaded_paths[0].exists()
     assert list(tmp_path.iterdir()) == []
@@ -1878,7 +1879,7 @@ async def test_group_gemini_reply_carries_the_quoted_message_as_context(
             "The build only fails on ARM runners.\n"
             "\n"
             f"{QUOTED_QUESTION_LABEL} why",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
     media_handler.prepare_upload.assert_not_called()
@@ -1915,7 +1916,7 @@ async def test_img_reply_carries_the_quoted_message_as_context(
             "A neon skyline at dusk.\n"
             "\n"
             f"{QUOTED_REQUEST_LABEL} in the same style",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
 
@@ -1949,7 +1950,7 @@ async def test_gemini_quoting_own_answer_still_opens_a_new_conversation(
             "Because the cache starts cold.\n"
             "\n"
             f"{QUOTED_QUESTION_LABEL} why",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
 
@@ -1985,7 +1986,7 @@ async def test_gemini_reply_to_a_caption_uses_the_caption(
             "Quarterly egress report, September.\n"
             "\n"
             f"{QUOTED_QUESTION_LABEL} summarise this",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
 
@@ -2013,7 +2014,7 @@ async def test_gemini_reply_without_text_or_caption_sends_only_the_question(
     await handlers.gemini(update, SimpleNamespace(args=["why"]))
 
     assert session.calls == [
-        ("why", {"temporary": False, "extended_thinking": False})
+        ("why", {"temporary": False, "extended_thinking": True})
     ]
 
 
@@ -2073,12 +2074,12 @@ async def test_gemini_and_img_without_a_reply_send_the_bare_prompt(
     )
 
     assert gemini_session.calls == [
-        ("why", {"temporary": False, "extended_thinking": False})
+        ("why", {"temporary": False, "extended_thinking": True})
     ]
     assert img_session.calls == [
         (
             f"{IMAGE_GENERATION_PREFIX}\n\na red bicycle",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
 
@@ -2114,7 +2115,7 @@ async def test_bare_commands_with_a_quote_treat_the_quote_as_the_request(
             "Egress stayed under one gigabyte all month.\n"
             "\n"
             f"{QUOTED_QUESTION_LABEL} {QUOTED_DEFAULT_QUESTION}",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
     assert img_session.calls == [
@@ -2124,7 +2125,7 @@ async def test_bare_commands_with_a_quote_treat_the_quote_as_the_request(
             "Egress stayed under one gigabyte all month.\n"
             "\n"
             f"{QUOTED_REQUEST_LABEL} {QUOTED_DEFAULT_IMAGE_REQUEST}",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
     assert translate("gemini.usage", LANGUAGE_ENGLISH) not in _sent_texts(
@@ -2190,7 +2191,7 @@ async def test_quoting_scaffolding_stays_english_in_every_interface_language(
             "The build only fails on ARM runners.\n"
             "\n"
             f"{QUOTED_QUESTION_LABEL} why",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
 
@@ -2249,7 +2250,7 @@ async def test_group_text_reply_to_this_bot_continues_without_scaffolding(
     assert session.calls == [
         (
             "and what about the cache?",
-            {"temporary": False, "extended_thinking": False},
+            {"temporary": False, "extended_thinking": True},
         )
     ]
 
@@ -2292,6 +2293,8 @@ async def test_real_generated_image_fixture_deletes_placeholder_before_media(
 async def test_model_lists_dynamic_available_models_and_skips_oversized_data(
     handlers_factory,
 ) -> None:
+    """Both model selection steps must fit Telegram callbacks and use fresh availability."""
+
     available = SimpleNamespace(
         model_name="dynamic-model",
         display_name="Dynamic Model",
@@ -2323,6 +2326,8 @@ async def test_model_lists_dynamic_available_models_and_skips_oversized_data(
 
 
 async def test_model_handles_upstream_none(handlers_factory) -> None:
+    """A missing dynamic model list must fail politely without offering invalid choices."""
+
     client = MagicMock()
     client.list_models.return_value = None
     handlers, _ = handlers_factory(client)
@@ -2339,6 +2344,8 @@ async def test_model_callback_revalidates_and_resolves_stable_name(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
+    """A model tap must validate availability before offering effort choices."""
+
     model = SimpleNamespace(
         model_name="dynamic-model",
         display_name="Dynamic Model",
@@ -2355,7 +2362,13 @@ async def test_model_callback_revalidates_and_resolves_stable_name(
     update.callback_query.answer.assert_awaited_once_with()
     client.list_models.assert_called_once_with()
     client.resolve_model.assert_called_once_with("dynamic-model")
-    registry.set_model.assert_awaited_once_with(202, "dynamic-model")
+    registry.set_model_and_thinking_level.assert_not_awaited()
+    keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+    assert len(keyboard) == 1
+    assert [button.text for button in keyboard[0]] == ["Low", "✓ Medium", "High"]
+    assert [button.callback_data for button in keyboard[0]] == [
+        "mlvl:low:dynamic-model", "mlvl:medium:dynamic-model", "mlvl:high:dynamic-model"
+    ]
     assert "Dynamic Model" in (
         update.callback_query.edit_message_text.await_args.args[0]
     )
@@ -2434,7 +2447,7 @@ async def test_text_uses_current_session_service_renders_and_persists_usage(
     assert session.calls == [
         (
             "question",
-            {"temporary": True, "extended_thinking": False},
+            {"temporary": True, "extended_thinking": True},
         )
     ]
     registry.persist.assert_awaited_once_with(202, session)
@@ -2565,6 +2578,7 @@ async def test_degraded_text_request_fails_before_waiting_for_queue(
         acquire_timeout=30.0,
     )
     handlers, service = handlers_factory(request_queue=queue)
+    service._settings = SimpleNamespace(group_thinking_level="medium")
     service.health = SimpleNamespace(
         state=ServiceState.DEGRADED,
         accepting_requests=False,
@@ -2590,6 +2604,7 @@ async def test_setcookie_rejects_non_available_account_status(
 ) -> None:
     handlers, service = handlers_factory()
     service.reinit = AsyncMock()
+    service._settings = SimpleNamespace(group_thinking_level="medium")
     service.health = SimpleNamespace(
         state=ServiceState.DEGRADED,
         accepting_requests=False,
@@ -2895,7 +2910,6 @@ async def test_status_reports_cookie_not_refreshed_when_cache_is_missing(
                 "Current model:",
                 "Session CID:",
                 "Temporary mode:",
-                "Extended Thinking:",
                 "Service status:",
                 "Account status:",
                 "Last cookie refresh:",
@@ -2910,7 +2924,6 @@ async def test_status_reports_cookie_not_refreshed_when_cache_is_missing(
                 "目前模型：",
                 "Session CID：",
                 "Temporary mode：",
-                "Extended Thinking：",
                 "服務狀態：",
                 "Account status：",
                 "Cookie 最後刷新時間：",
@@ -2981,8 +2994,8 @@ def test_registration_places_auth_in_first_group(
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
     assert calls[1].kwargs == {"group": 0}
-    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:15])
-    assert len(calls) == 17
+    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:14])
+    assert len(calls) == 16
     registered_commands = {
         command
         for registered in calls
@@ -2991,6 +3004,7 @@ def test_registration_places_auth_in_first_group(
     assert "language" in registered_commands
     assert {"start", "help"} <= registered_commands
     assert "lang" not in registered_commands
+    assert "think" not in registered_commands
     assert {"img", "research", "research_status"} <= registered_commands
     assert {"allow_chat", "deny_chat", "access"} <= registered_commands
 
@@ -3021,7 +3035,6 @@ async def test_startup_registers_public_command_menu() -> None:
         "model",
         "gem",
         "temp",
-        "think",
         "language",
         "img",
         "research",
@@ -3193,47 +3206,16 @@ def test_cookie_location_is_logged_as_an_absolute_path(
     assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text
 
 
-@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
-async def test_think_toggles_from_registry_state(
-    handlers_factory,
-    registry: AsyncMock,
-    language: str,
-) -> None:
-    """The persisted /think switch must report both states in the chat UI."""
-
-    handlers, _ = handlers_factory()
-    update = _update()
-    registry.get_state.side_effect = [
-        _state(extended_thinking=False, language=language),
-        _state(extended_thinking=True, language=language),
-    ]
-
-    await handlers.think(update, SimpleNamespace())
-    await handlers.think(update, SimpleNamespace())
-
-    assert registry.set_extended_thinking.await_args_list == [
-        call(202, True),
-        call(202, False),
-    ]
-    replies = [
-        c.args[0] for c in update.effective_message.reply_text.await_args_list
-    ]
-    assert replies == [
-        translate("think.enabled", language),
-        translate("think.disabled", language),
-    ]
-
-
 async def test_enabled_thinking_reaches_the_upstream_call(
     handlers_factory,
     registry: AsyncMock,
 ) -> None:
-    """The persisted switch has to arrive as the upstream keyword argument."""
+    """A selected High level must retain upstream extended thinking."""
 
     session = _StreamingSession(
         [SimpleNamespace(text="ok", text_delta="ok", images=())]
     )
-    registry.get_state.return_value = _state(extended_thinking=True)
+    registry.get_state.return_value = _state(thinking_level=ThinkingLevel.HIGH)
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory()
 
@@ -3249,6 +3231,8 @@ async def test_enabled_thinking_logs_model_and_thought_character_count(
     registry: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Effort diagnostics must name the model and level without exposing thought text."""
+
     thoughts = "SENSITIVE_THOUGHTS_SENTINEL"
     session = _StreamingSession(
         [
@@ -3262,7 +3246,7 @@ async def test_enabled_thinking_logs_model_and_thought_character_count(
     )
     registry.get_state.return_value = _state(
         model="thinking-capable-model",
-        extended_thinking=True,
+        thinking_level=ThinkingLevel.HIGH,
     )
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory()
@@ -3280,12 +3264,14 @@ async def test_enabled_thinking_logs_when_no_thoughts_are_returned(
     registry: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Missing thoughts must remain diagnosable even when an effort was requested."""
+
     session = _StreamingSession(
         [SimpleNamespace(text="ok", text_delta="ok", images=(), thoughts=None)]
     )
     registry.get_state.return_value = _state(
         model=None,
-        extended_thinking=True,
+        thinking_level=ThinkingLevel.HIGH,
     )
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory()
@@ -3297,11 +3283,13 @@ async def test_enabled_thinking_logs_when_no_thoughts_are_returned(
     assert "requested but received 0 thought characters" in caplog.text
 
 
-async def test_disabled_thinking_does_not_log_thought_observability(
+async def test_low_thinking_logs_effort_without_thought_text(
     handlers_factory,
     registry: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Low requests still need secret-free model and effort diagnostics."""
+
     session = _StreamingSession(
         [
             SimpleNamespace(
@@ -3312,11 +3300,202 @@ async def test_disabled_thinking_does_not_log_thought_observability(
             )
         ]
     )
-    registry.get_state.return_value = _state(extended_thinking=False)
+    registry.get_state.return_value = _state(thinking_level=ThinkingLevel.LOW)
     registry.get_or_create.return_value = session
     handlers, _ = handlers_factory()
 
     with caplog.at_level("INFO", logger="gemini_tg_bot.telegram.handlers"):
         await handlers.text_message(_update(text="question"), SimpleNamespace())
 
-    assert "Extended thinking result" not in caplog.text
+    assert "Thinking result for model dynamic-model at level low" in caplog.text
+    assert "UNEXPECTED_THOUGHTS_SENTINEL" not in caplog.text
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+@pytest.mark.parametrize("level", list(ThinkingLevel))
+async def test_model_level_tap_persists_and_confirms(handlers_factory, registry, language, level):
+    """The second step must save model and effort together using localized labels."""
+
+    model = SimpleNamespace(model_name="dynamic-model", display_name="Dynamic Model", is_available=True)
+    client = MagicMock()
+    client.list_models.return_value = [model]
+    client.resolve_model.return_value = model
+    registry.get_state.return_value = _state(language=language)
+    handlers, _ = handlers_factory(client)
+    update = _callback_update(f"mlvl:{level.value}:dynamic-model")
+
+    await handlers.callback(update, SimpleNamespace())
+
+    registry.set_model_and_thinking_level.assert_awaited_once_with(202, "dynamic-model", level)
+    assert update.callback_query.edit_message_text.await_args.args[0] == translate(
+        "model.selected", language, model="Dynamic Model", level=translate(f"thinking.level.{level.value}", language)
+    )
+    client.list_models.assert_called_once_with()
+    client.resolve_model.assert_called_once_with("dynamic-model")
+
+
+@pytest.mark.parametrize("data", ["mlvl:garbage:dynamic-model", "mlvl:medium", "mlvl:low:", "mlvl::dynamic-model", "mlvl:medium:" + "x" * 64])
+async def test_model_invalid_level_callback_is_rejected(handlers_factory, registry, data):
+    """Stale or malformed level callbacks must not write a partial preference."""
+
+    handlers, service = handlers_factory()
+    update = _callback_update(data)
+    await handlers.callback(update, SimpleNamespace())
+    assert update.callback_query.edit_message_text.await_args.args[0] == translate("model.invalid", LANGUAGE_ENGLISH)
+    registry.set_model_and_thinking_level.assert_not_awaited()
+    service.execute.assert_not_awaited()
+
+
+async def test_model_removed_before_level_tap_is_unavailable(handlers_factory, registry):
+    """Availability must be checked again after the user pauses at the effort chooser."""
+
+    client = MagicMock()
+    client.list_models.return_value = []
+    handlers, _ = handlers_factory(client)
+    update = _callback_update("mlvl:medium:disappeared-model")
+    await handlers.callback(update, SimpleNamespace())
+    assert update.callback_query.edit_message_text.await_args.args[0] == translate("model.unavailable", LANGUAGE_ENGLISH)
+    registry.set_model_and_thinking_level.assert_not_awaited()
+    client.resolve_model.assert_not_called()
+
+
+@pytest.mark.parametrize("current", list(ThinkingLevel))
+async def test_model_tap_marks_current_level(handlers_factory, registry, current):
+    """The chooser must show the effective preference without changing it on step one."""
+
+    model = SimpleNamespace(model_name="dynamic-model", display_name="Dynamic Model", is_available=True)
+    client = MagicMock()
+    client.list_models.return_value = [model]
+    client.resolve_model.return_value = model
+    registry.get_state.return_value = _state(thinking_level=current)
+    handlers, _ = handlers_factory(client)
+    update = _callback_update("model:dynamic-model")
+    await handlers.callback(update, SimpleNamespace())
+    edit = update.callback_query.edit_message_text.await_args
+    assert edit.args[0] == translate("model.choose_thinking", LANGUAGE_ENGLISH, model="Dynamic Model")
+    row = edit.kwargs["reply_markup"].inline_keyboard[0]
+    assert [button.text for button in row] == [
+        ("✓ " if level is current else "") + level.value.capitalize() for level in ThinkingLevel
+    ]
+    registry.set_model_and_thinking_level.assert_not_awaited()
+
+
+async def test_model_list_skips_names_that_only_overflow_level_step(handlers_factory, caplog):
+    """A usable model button must also fit the longer second-step Telegram callback."""
+
+    model = SimpleNamespace(model_name="x" * 54, display_name="Too long for level", is_available=True)
+    client = MagicMock()
+    client.list_models.return_value = [model]
+    handlers, _ = handlers_factory(client)
+    update = _update()
+    with caplog.at_level("WARNING"):
+        await handlers.model(update, SimpleNamespace())
+    assert "Skipping model whose Telegram callback data exceeds 64 bytes" in caplog.text
+    assert update.effective_message.reply_text.await_args.args[0] == MODEL_LIST_UNAVAILABLE
+
+
+@pytest.mark.parametrize("level", list(ThinkingLevel))
+@pytest.mark.parametrize("is_group", [False, True])
+async def test_stream_uses_chat_or_group_level_and_scopes_iteration(handlers_factory, registry, level, is_group):
+    """Medium must reach tasks that iterate the stream while groups hide every thought."""
+
+    observations = []
+
+    class ScopedSession(_StreamingSession):
+        async def _generate(self):
+            observations.append(thinking_module._thinking_wire_value.get())
+            await asyncio.sleep(0)
+            observations.append(thinking_module._thinking_wire_value.get())
+            yield SimpleNamespace(text="answer", text_delta="answer", thoughts="FAKE_THOUGHTS", images=())
+
+    session = ScopedSession([])
+    registry.get_or_create.return_value = session
+    registry.start_group_session.return_value = (session, False)
+    registry.get_state.return_value = _state(thinking_level=ThinkingLevel.HIGH if is_group else level)
+    registry.group_thinking_level = level
+    handlers, _ = handlers_factory()
+    update = _update(text="question", chat_id=-1001 if is_group else 202,
+                     chat_type=ChatType.GROUP if is_group else ChatType.PRIVATE,
+                     reply_to_message_id=600 if is_group else None)
+    await handlers.text_message(update, _bot_context())
+    assert session.calls == [("question", {"temporary": False, "extended_thinking": level is not ThinkingLevel.LOW})]
+    expected_override = MEDIUM_WIRE_VALUE if level is ThinkingLevel.MEDIUM else None
+    assert observations == [expected_override, expected_override]
+    assert thinking_module._thinking_wire_value.get() is None
+    final = update.effective_message.placeholder.edit_text.await_args.args[0]
+    assert ("<blockquote expandable>" in final) is not is_group
+    if is_group:
+        registry.get_state.assert_not_awaited()
+
+
+@pytest.mark.parametrize("level", list(ThinkingLevel))
+@pytest.mark.parametrize("is_group", [False, True])
+async def test_attachment_uses_chat_or_group_level_and_scopes_send(handlers_factory, registry, level, is_group):
+    """Attachment generation must apply the same request scope and fixed group effort."""
+
+    upload = SimpleNamespace(prompt="analyze", files=["FAKE_PREPARED_FILE"])
+    prepared = MagicMock()
+    prepared.__aenter__ = AsyncMock(return_value=upload)
+    prepared.__aexit__ = AsyncMock(return_value=None)
+    media = MagicMock(spec=MediaHandler)
+    media.prepare_upload.return_value = prepared
+    observations = []
+
+    async def send(*args, **kwargs):
+        observations.append(thinking_module._thinking_wire_value.get())
+        return SimpleNamespace(text="analysis", images=())
+
+    session = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+    registry.get_or_create.return_value = session
+    registry.start_group_session.return_value = (session, False)
+    registry.get_state.return_value = _state(thinking_level=ThinkingLevel.HIGH if is_group else level)
+    registry.group_thinking_level = level
+    handlers, _ = handlers_factory(media_handler=media)
+    update = _update(text="caption", chat_id=-1001 if is_group else 202,
+                     chat_type=ChatType.GROUP if is_group else ChatType.PRIVATE,
+                     reply_to_message_id=600 if is_group else None)
+    await handlers.media_message(update, _bot_context())
+    session.send_message.assert_awaited_once_with("analyze", files=["FAKE_PREPARED_FILE"], temporary=False,
+                                                extended_thinking=level is not ThinkingLevel.LOW)
+    assert observations == [MEDIUM_WIRE_VALUE if level is ThinkingLevel.MEDIUM else None]
+    assert thinking_module._thinking_wire_value.get() is None
+    if is_group:
+        registry.get_state.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_startup_republishes_stored_language_menus_best_effort(tmp_path, handlers_factory, fails, caplog):
+    """Stored chat menus must lose the removed toggle even when Telegram rejects one."""
+
+    from gemini_tg_bot.storage.models import ChatSession, ChatSessionDAO
+
+    async with Database(tmp_path / "menus.sqlite3") as database:
+        dao = ChatSessionDAO(database.connection)
+        for chat_id, language in [(1, LANGUAGE_ENGLISH), (2, LANGUAGE_CHINESE), (3, None)]:
+            await dao.upsert(ChatSession(chat_id=chat_id, language=language, updated_at="test"))
+        handlers, _ = handlers_factory()
+        handlers._database = database
+        bot = SimpleNamespace(set_my_commands=AsyncMock(
+            side_effect=[None, None, RuntimeError("FAKE_TELEGRAM_ERROR") if fails else None, None]
+        ))
+        application = SimpleNamespace(bot=bot, start=AsyncMock())
+        with caplog.at_level("WARNING"):
+            await _start_application(application, handlers=handlers)
+        application.start.assert_awaited_once_with()
+        scoped_calls = bot.set_my_commands.await_args_list[2:]
+        assert [c.kwargs["scope"].chat_id for c in scoped_calls] == [1, 2]
+        for c, language in zip(scoped_calls, [LANGUAGE_ENGLISH, LANGUAGE_CHINESE], strict=True):
+            assert "think" not in {item.command for item in c.args[0]}
+            assert next(item.description for item in c.args[0] if item.command == "model") == translate("command.model.description", language)
+        if fails:
+            assert "Unable to register Telegram chat command menu for chat 1 (RuntimeError)" in caplog.text
+            assert "FAKE_TELEGRAM_ERROR" not in caplog.text
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+def test_removed_think_is_absent_from_discovery(language):
+    """Help and menus must not advertise a command that no handler can execute."""
+
+    assert "/think" not in _help_text(language)
+    assert "think" not in PUBLIC_MENU_COMMANDS
+    assert not hasattr(TelegramHandlers, "think")

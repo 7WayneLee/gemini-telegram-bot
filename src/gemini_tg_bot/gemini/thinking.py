@@ -22,6 +22,9 @@ class ThinkingLevel(StrEnum):
     HIGH = "high"
 
 
+DEFAULT_THINKING_LEVEL = ThinkingLevel.MEDIUM
+
+
 # Official-client capture on 2026-10-11; see docs/upstream-api-contract.md
 # for the pinned upstream contract. Index 17 is a turn counter, not effort.
 LOW_WIRE_VALUE = 1

@@ -375,3 +375,11 @@ def test_upstream_version_pin() -> None:
     assert version("gemini-webapi") == "2.1.1", (
         "The adapter in thinking.py has to be re-verified before upgrading gemini-webapi"
     )
+
+
+def test_service_constructs_thinking_level_client() -> None:
+    """Using the plain upstream factory would silently send Medium requests as High."""
+
+    from gemini_tg_bot.gemini import service
+
+    assert service.GeminiClient is ThinkingLevelGeminiClient

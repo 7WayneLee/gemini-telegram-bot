@@ -32,6 +32,7 @@ ENVIRONMENT_VARIABLES = {
     "GEMINI_PROXY",
     "DEFAULT_MODEL",
     "GROUP_MODEL",
+    "GROUP_THINKING_LEVEL",
     "GROUP_THREAD_RETENTION_DAYS",
     "GROUP_THREAD_MAX_PER_CHAT",
     "DEFAULT_LANGUAGE",
@@ -105,6 +106,16 @@ def test_default_language_accepts_only_supported_catalogs() -> None:
     assert make_settings(DEFAULT_LANGUAGE="zh-hant").default_language == "zh-hant"
     with pytest.raises(ValidationError):
         make_settings(DEFAULT_LANGUAGE="fr")
+
+
+def test_group_thinking_level_defaults_and_validation() -> None:
+    """A valid fixed group effort must be selected before any generation starts."""
+
+    assert make_settings().group_thinking_level == "medium"
+    for value in ("low", "medium", "high"):
+        assert make_settings(GROUP_THINKING_LEVEL=value).group_thinking_level == value
+    with pytest.raises(ValidationError):
+        make_settings(GROUP_THINKING_LEVEL="extended")
 
 
 @pytest.mark.parametrize(

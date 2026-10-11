@@ -17,22 +17,6 @@ _TRADITIONAL_CHINESE_TELEGRAM_CODES = frozenset(
 
 
 MESSAGES: dict[str, dict[str, str]] = {
-    "think.enabled": {
-        LANGUAGE_ENGLISH: (
-            "Extended thinking is on. Replies include an expandable thought "
-            "process.\n"
-            "Note: this draws on the Gemini Advanced quota, faster than "
-            "normal mode."
-        ),
-        LANGUAGE_CHINESE: (
-            "Extended Thinking 已開啟。回覆會附上可展開的思考過程。\n"
-            "注意：這會消耗 Gemini Advanced 額度，用得比一般模式快。"
-        ),
-    },
-    "think.disabled": {
-        LANGUAGE_ENGLISH: "Extended thinking is off.",
-        LANGUAGE_CHINESE: "Extended Thinking 已關閉。",
-    },
     "generic.failure": {
         LANGUAGE_ENGLISH: (
             "An error occurred while processing your request. "
@@ -99,10 +83,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "command.temp.description": {
         LANGUAGE_ENGLISH: "Toggle temporary chat mode",
         LANGUAGE_CHINESE: "切換暫時對話模式",
-    },
-    "command.think.description": {
-        LANGUAGE_ENGLISH: "Toggle Extended Thinking",
-        LANGUAGE_CHINESE: "切換 Extended Thinking",
     },
     "command.language.description": {
         LANGUAGE_ENGLISH: "Choose interface language",
@@ -174,6 +154,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Choose a model:",
         LANGUAGE_CHINESE: "請選擇模型：",
     },
+    "model.choose_thinking": {
+        LANGUAGE_ENGLISH: "Choose a thinking level for {model}:",
+        LANGUAGE_CHINESE: "請選擇 {model} 的思考等級：",
+    },
+    "thinking.level.low": {
+        LANGUAGE_ENGLISH: "Low",
+        LANGUAGE_CHINESE: "Low",
+    },
+    "thinking.level.medium": {
+        LANGUAGE_ENGLISH: "Medium",
+        LANGUAGE_CHINESE: "Medium",
+    },
+    "thinking.level.high": {
+        LANGUAGE_ENGLISH: "High",
+        LANGUAGE_CHINESE: "High",
+    },
+    "thinking.level.current": {
+        LANGUAGE_ENGLISH: "✓ {level}",
+        LANGUAGE_CHINESE: "✓ {level}",
+    },
     "model.invalid": {
         LANGUAGE_ENGLISH: "Invalid model. Please run /model again.",
         LANGUAGE_CHINESE: "無效的模型，請重新執行 /model。",
@@ -185,8 +185,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_CHINESE: "此模型已無法使用，請重新執行 /model。",
     },
     "model.selected": {
-        LANGUAGE_ENGLISH: "Selected model: {model}",
-        LANGUAGE_CHINESE: "已選擇模型：{model}",
+        LANGUAGE_ENGLISH: "Selected model: {model} · {level}",
+        LANGUAGE_CHINESE: "已選擇模型：{model} · {level}",
     },
     "gem.list_unavailable": {
         LANGUAGE_ENGLISH: (
@@ -259,8 +259,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_CHINESE: "尚未建立",
     },
     "status.model": {
-        LANGUAGE_ENGLISH: "Current model: {model}",
-        LANGUAGE_CHINESE: "目前模型：{model}",
+        LANGUAGE_ENGLISH: "Current model: {model} · {level}",
+        LANGUAGE_CHINESE: "目前模型：{model} · {level}",
     },
     "status.session_cid": {
         LANGUAGE_ENGLISH: "Session CID: {cid}",
@@ -269,10 +269,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "status.temporary": {
         LANGUAGE_ENGLISH: "Temporary mode: {state}",
         LANGUAGE_CHINESE: "Temporary mode：{state}",
-    },
-    "status.thinking": {
-        LANGUAGE_ENGLISH: "Extended Thinking: {state}",
-        LANGUAGE_CHINESE: "Extended Thinking：{state}",
     },
     "status.service": {
         LANGUAGE_ENGLISH: "Service status: {state}{reason}",

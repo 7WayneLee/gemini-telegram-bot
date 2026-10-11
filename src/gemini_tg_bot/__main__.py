@@ -20,6 +20,7 @@ from telegram.ext import Application
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME, Settings
 from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import GeminiService
+from gemini_tg_bot.gemini.thinking import ThinkingLevel, thinking_request
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
@@ -191,7 +192,7 @@ async def _run_polling(settings: Settings) -> None:
                     updater,
                 )
                 try:
-                    await _start_application(application)
+                    await _start_application(application, handlers=handlers)
                     await stop_event.wait()
                 finally:
                     if updater.running:
@@ -230,10 +231,14 @@ async def _initialize_and_start_polling(
 
 async def _start_application(
     application: Application[Any, Any, Any, Any, Any, Any],
+    *,
+    handlers: TelegramHandlers | None = None,
 ) -> None:
     """Register the optional command menu, then start update processing."""
 
     await register_command_menu(application)
+    if handlers is not None:
+        await handlers.republish_chat_command_menus(application.bot)
     await application.start()
 
 
@@ -284,7 +289,7 @@ class _DryRunRegistry:
             model=None,
             gem_id=None,
             temporary=False,
-            extended_thinking=False,
+            thinking_level=ThinkingLevel.MEDIUM,
             updated_at=None,
         )
 
@@ -417,13 +422,12 @@ async def _run_dry_run() -> None:
         usage = await UsageLogDAO(database.connection).list_for_chat(chat_id)
         assert fake_application.handlers[0][0] == -1
         assert service.execute_count == 1
+        with thinking_request(ThinkingLevel.MEDIUM) as thinking_kwargs:
+            expected_generate_kwargs = {"temporary": False, **thinking_kwargs}
         assert sessions.session.calls == [
             (
                 "dry-run request",
-                {
-                    "temporary": False,
-                    "extended_thinking": False,
-                },
+                expected_generate_kwargs,
             )
         ]
         assert sessions.persisted is True

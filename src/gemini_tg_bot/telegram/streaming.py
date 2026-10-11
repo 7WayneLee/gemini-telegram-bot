@@ -64,6 +64,7 @@ async def stream_response(
     prompt: str,
     *,
     language: str = DEFAULT_LANGUAGE,
+    show_thoughts: bool = False,
     placeholder_text: str | None = None,
     edit_interval: float = EDIT_INTERVAL_SECONDS,
     edit_character_threshold: int = EDIT_CHARACTER_THRESHOLD,
@@ -112,7 +113,6 @@ async def stream_response(
     latest_thoughts = ""
     latest_output: Any | None = None
     last_sent_text = resolved_placeholder
-    extended_thinking = bool(generate_kwargs.get("extended_thinking", False))
     thoughts_started_at: float | None = None
     answer_started_at: float | None = None
 
@@ -126,7 +126,7 @@ async def stream_response(
         if latest_text:
             edit_content = latest_text
         elif (
-            extended_thinking
+            show_thoughts
             and latest_thoughts
             and thoughts_started_at is not None
         ):
@@ -159,7 +159,7 @@ async def stream_response(
         while next_chunk is not None:
             can_edit = bool(latest_text) and len(latest_text) <= MAX_MESSAGE_LENGTH
             showing_thoughts = (
-                extended_thinking
+                show_thoughts
                 and bool(latest_thoughts)
                 and not latest_text
                 and thoughts_started_at is not None
@@ -219,7 +219,7 @@ async def stream_response(
             (answer_started_at if answer_started_at is not None else clock())
             - thoughts_started_at,
         )
-        if extended_thinking and thoughts_started_at is not None
+        if show_thoughts and thoughts_started_at is not None
         else None
     )
     rendered_chunks = render_markdown_chunks(latest_text)
@@ -273,7 +273,7 @@ async def stream_response(
             thoughts=latest_thoughts,
         )
 
-    if latest_thoughts:
+    if show_thoughts and latest_thoughts:
         # Share one message with the answer so nothing can arrive between them.
         # The reasoning is supplementary, so it yields the space rather than
         # pushing the answer into a second message.
