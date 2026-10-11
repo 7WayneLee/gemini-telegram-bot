@@ -85,6 +85,24 @@ Google 會偵測到 session 地理位置跳動，**反覆作廢它**。
 
 ### 步驟
 
+#### 建議：一鍵自動化工具（macOS）
+
+執行 `fetch_cookies.py`（若 SSH alias 不是預設的 `movie-nas`，加上 `--host your-vm`）：
+
+```bash
+python3 scripts/fetch_cookies.py --host your-vm
+```
+
+其他可用選項：`--socks-port`（預設 `1080`）、`--tz`（預設 `America/Chicago`）以及 `--firefox`（若 Firefox 不在 `/Applications` 預設路徑）。
+
+工具會開啟 tunnel、驗證出口 IP、啟動已預先設定好 proxy 並使用伺服器時區的一次性 Firefox profile、等待你登入並以 ⌘Q 結束、將兩組 cookie 複製到剪貼簿，然後刪除該 profile 並關閉 tunnel。
+
+接著傳 `/setcookie` 給 bot 後貼上。
+
+#### 備用方案：手動步驟
+
+若要手動操作或從既有的 Firefox profile 讀取：
+
 1. **開一條到伺服器的 SOCKS tunnel**（把 `your-vm` 換成你的 SSH alias），保持開著：
 
    ```bash
@@ -110,7 +128,7 @@ Google 會偵測到 session 地理位置跳動，**反覆作廢它**。
    curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
    ```
 
-5. **取得 cookie。** 可以自動從 profile 讀出：
+5. **取得 cookie。** 可以自動從既有 profile 讀出：
 
    ```bash
    sh scripts/grab_cookies.sh          # 兩個值直接進剪貼簿
@@ -120,8 +138,8 @@ Google 會偵測到 session 地理位置跳動，**反覆作廢它**。
 
 6. **套用**：貼進 `.env`，或傳 `/setcookie` 給 bot 後貼上 —— 後者不需重啟。
 
-> 首次從新的國家登入時，Google 大機率會要求二階段驗證並寄送新裝置通知。
-> 這是正常的，通過後即穩定。
+> - 因為每次執行都使用全新 profile，Google 每次都可能會要求二階段驗證或發送新裝置通知；這是預期的。
+> - 切勿在該視窗中登出，因為登出會使 cookie 失效。切勿在其他瀏覽器開啟 bot 的 session，因為兩個 client 同時輪替同一 session 會導致被登出。
 
 ### cookie 會自動輪替
 

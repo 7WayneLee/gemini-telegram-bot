@@ -94,6 +94,24 @@ machine as your browser, you can skip the tunnel.
 
 ### Steps
 
+#### Recommended: Automated tool (macOS)
+
+Run `fetch_cookies.py` (pass `--host your-vm` if your SSH alias differs from the default `movie-nas`):
+
+```bash
+python3 scripts/fetch_cookies.py --host your-vm
+```
+
+Other options: `--socks-port` (default `1080`), `--tz` (default `America/Chicago`), and `--firefox` (path to the Firefox binary if not in `/Applications`).
+
+The script opens the tunnel, verifies the egress IP, launches a throwaway Firefox profile already proxied and using the server's timezone, waits for you to log in and quit with ⌘Q, copies both cookies to the clipboard, deletes the profile and closes the tunnel.
+
+Then send `/setcookie` to the bot and paste.
+
+#### Fallback: Manual steps
+
+If setting up manually or extracting from an existing Firefox profile:
+
 1. **Open a SOCKS tunnel to the server** (replace `your-vm` with your SSH alias) and
    leave it running:
 
@@ -121,7 +139,7 @@ machine as your browser, you can skip the tunnel.
    curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
    ```
 
-5. **Get the cookies.** Either read them from the profile automatically:
+5. **Get the cookies.** Either read them from an existing profile automatically:
 
    ```bash
    sh scripts/grab_cookies.sh          # copies both values to the clipboard
@@ -132,8 +150,8 @@ machine as your browser, you can skip the tunnel.
 6. **Apply them**: paste into `.env`, or send `/setcookie` to the bot and paste there
    — the latter needs no restart.
 
-> The first login from a new country will likely trigger 2FA and a new-device
-> notification. That is expected, and it settles afterwards.
+> - Because every run uses a fresh profile, Google may ask for 2FA or send a new-device notice each time; this is expected.
+> - Never sign out in that window, since that invalidates the cookie. Never open the bot's session in another browser, because two clients rotating one session get it logged out.
 
 ### Cookies rotate on their own
 
