@@ -351,6 +351,22 @@ T3.4 的 `/setcookie` 熱更新可能需要。
 - **完全隔離背景任務**：透過 `ContextVar` 隔離請求作用域，非 Medium 請求以及背景任務（如 cookie 輪替）取得的皆為未經改寫的原生 session，不受任何影響。
 - **改寫為 all-or-nothing 且 fail-safe**：改寫前會嚴格檢查 `f.req` 與 header 的結構。若 payload 形狀不符合預期（如上游結構漂移），轉接層會記錄 `WARNING`，並將請求維持原樣（以 High 送出），絕不會因為轉接層拋出例外導致使用者請求失敗。
 
+### 回應端：各等級是否回傳思考內容（2026-10-12 擷取）
+
+本專案之 Bot 在 Medium 等級未顯示思考區塊。為釐清原因，Commander 於 2026-10-12 以被動式頁面監聽（passive in-page monitor）擷取官方 gemini.google.com 的 StreamGenerate 回應。此擷取為 HUMAN-gated（由使用者選擇等級並點擊送出）。測試模型為 3.8 Flash，相同 prompt 於 Medium 與 High 各取樣一次（Low 未進行擷取，故不對 Low 的回應作任何陳述）。
+
+| Level | Request value | Thought text in the response |
+|---|---|---|
+| Medium | `f.req` inner list 索引 80 = 4，model header = 4 | 每個 response candidate 均有索引 37，但 `candidate[37][0]` 為 `null`；整份回應完全未包含思考文字，唯一的長文字即為回答。官方網頁在該輪亦未顯示思考面板，僅有「Show code」與回答。 |
+| High | 數值為 2 與 2 | `candidate[37][0][0]` 包含思考文字（該取樣中為 654 字元）。此欄位即上游 `gemini-webapi` 2.1.1 於 `client.py` 第 2113 行所讀取之位置：`thoughts = get_nested_value(candidate_data, [37, 0, 0]) or ""`。 |
+
+**對本專案的影響**：
+
+- **上游既有行為而非轉接層失敗**：在 Medium 等級下，Bot 收到 0 個思考字元且不顯示思考區塊，此屬 Google 上游行為。Bot 自身的 Medium 請求確實以 Medium 送出，且未記錄任何 fallback WARNING。
+- **正式環境日誌**：日誌中出現 `Thinking result for model … at level medium: requested but received 0 thought characters …` 的 INFO 記錄，在 Medium 等級下為預期行為。
+- **使用者決策（2026-10-12）**：維持現有行為，Bot 不為 Medium 額外新增耗時行（elapsed-time line）。
+- **未來相容性**：若 Gemini 日後開始在 `candidate[37][0][0]` 中回傳 Medium 思考內容，因 Bot 讀取同一欄位，無需修改程式碼即可自動顯示。
+
 ### 版本鎖定與升級流程
 
 - **版本釘選**：`gemini-webapi` 於 `pyproject.toml` 嚴格鎖定為 `==2.1.1`，因正式環境透過 `uv pip install` 安裝會忽略 `uv.lock`。測試 `tests/test_thinking.py::test_upstream_version_pin` 會在安裝版本不符時失敗。
