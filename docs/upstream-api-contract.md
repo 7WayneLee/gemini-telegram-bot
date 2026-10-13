@@ -360,17 +360,72 @@ T3.4 的 `/setcookie` 熱更新可能需要。
 | Medium | `f.req` inner list 索引 80 = 4，model header = 4 | 每個 response candidate 均有索引 37，但 `candidate[37][0]` 為 `null`；整份回應完全未包含思考文字，唯一的長文字即為回答。官方網頁在該輪亦未顯示思考面板，僅有「Show code」與回答。 |
 | High | 數值為 2 與 2 | `candidate[37][0][0]` 包含思考文字（該取樣中為 654 字元）。此欄位即上游 `gemini-webapi` 2.1.1 於 `client.py` 第 2113 行所讀取之位置：`thoughts = get_nested_value(candidate_data, [37, 0, 0]) or ""`。 |
 
-**對本專案的影響**：
+**思考內容回傳取決於 Prompt（2026-10-13 實測修正）**：
 
-- **上游既有行為而非轉接層失敗**：在 Medium 等級下，Bot 收到 0 個思考字元且不顯示思考區塊，此屬 Google 上游行為。Bot 自身的 Medium 請求確實以 Medium 送出，且未記錄任何 fallback WARNING。
-- **正式環境日誌**：日誌中出現 `Thinking result for model … at level medium: requested but received 0 thought characters …` 的 INFO 記錄，在 Medium 等級下為預期行為。
-- **使用者決策（2026-10-12）**：維持現有行為，Bot 不為 Medium 額外新增耗時行（elapsed-time line）。
-- **未來相容性**：若 Gemini 日後開始在 `candidate[37][0][0]` 中回傳 Medium 思考內容，因 Bot 讀取同一欄位，無需修改程式碼即可自動顯示。
+- **2026-10-12 初始取樣**：當時以簡單算術 prompt 測試，Medium 未回傳思考文字（0 字元），且官方網頁亦未顯示思考面板。早期推論曾認為 Medium 原則上不回傳思考文字，此推論已被證實不正確。
+- **2026-10-13 正式環境實測**：一筆正式環境的私聊請求（Medium）成功回傳了 328 字元的思考內容，Bot 亦正常呈現思考區塊。該請求確實以 Medium 發出（日誌中未記錄任何 fallback WARNING）。
+- **結論**：Medium 等級是否回傳思考文字**取決於 Prompt**（prompt-dependent），而非 Medium 等級一律回傳 0 字元。當 Prompt 觸發模型的深入推理時，Gemini 仍會在 `candidate[37][0][0]` 中回傳思考文字。
+- **對本專案的影響**：
+  - **轉接層正常運作**：無論是 2026-10-12 回傳 0 字元，還是 2026-10-13 回傳 328 字元，Bot 向上游發出的 Medium 請求皆維持在 Medium，未發生回退至 High 的情況。
+  - **自動相容呈現**：上游 `gemini-webapi` 2.1.1 於 `client.py` 第 2113 行讀取 `candidate[37][0][0]` 作為 `thoughts`；當 Gemini 回傳思考文字時，Bot 即正常顯示思考區塊；若回傳 0 字元，Bot 則僅輸出回覆文字並記錄 INFO 日誌，不需特殊分支處理。
 
 ### 版本鎖定與升級流程
 
 - **版本釘選**：`gemini-webapi` 於 `pyproject.toml` 嚴格鎖定為 `==2.1.1`，因正式環境透過 `uv pip install` 安裝會忽略 `uv.lock`。測試 `tests/test_thinking.py::test_upstream_version_pin` 會在安裝版本不符時失敗。
 - **升級流程**：日後升級 `gemini-webapi` 時，必須重新檢視新版本原始碼確認傳輸層行為，並重跑 `tests/test_thinking.py`。若上游未來原生支援思考等級參數，應移除轉接層並改用上游官方參數。
+
+---
+
+## 二之三、串流停滯、找回與重試（2026-10-13）
+
+上游 `gemini-webapi` 2.1.1 在處理長串流或停滯時具備自動恢復與重試機制，但在高延遲或併發場景下會引發顯著的副作用。
+
+### 上游機制與原始碼分析
+
+依據 `.venv/lib/python3.12/site-packages/gemini_webapi/` 原始碼實測確認之機制：
+
+1. **Watchdog（看門狗停滯偵測）**：
+   串流讀取迴圈（`client.py` 第 1825–1877 行）中，當串流在 `stall_threshold` 內未產出新內容（若模型未標記為 `is_thinking` 或 `is_queueing`，則門檻為 `min(self.timeout, self.watchdog_timeout)`，預設 120 秒），watchdog 會記錄 DEBUG 日誌（`client.py` 第 1871–1874 行）並呼叫 `await self.close()`（第 1875 行），主動中斷串流並進入找回流程。
+2. **Recovery（對話歷史找回）**：
+   若串流未完成且具有對話 ID（`cid`）（`client.py` 第 1887–1930 行），上游會以 `read_chat(cid)` 輪詢對話歷史，輪詢上限 `recovery_deadline` 預設為 `min(timeout, watchdog_timeout)`（即 120 秒，第 1906–1910 行）。若輪詢逾時且先前未產生任何內文（`has_generated_text` 為 `False`），則拋出 `APIError`（第 1926–1929 行；若已有部分內文則拋出 `GeminiError`）。
+3. **Retries（重試與退避）**：
+   串流生成方法 `_generate` 由 `@running(retry=5)` 修飾（`client.py` 第 1376 行）。當捕獲 `APIError` 時，裝飾器會自動進行重試（`utils/decorators.py` 第 49–59 行）：
+   - 退避延遲係數為 `_DELAY_FACTOR = 5`（`utils/decorators.py` 第 8 行），5 次重試分別等待 5、10、15、20、25 秒（`delay = (retry - current_retry + 1) * _DELAY_FACTOR`，第 51 行）。
+   - 每次重試前，若 client 不處於運行狀態（因 watchdog 已呼叫 `close()`），裝飾器會重新呼叫 `await client.init(...)`（第 31–40 行）重建連線。
+4. **Shared Session（共用 HTTP Session 截斷效應）**：
+   `GeminiClient.close()` 會直接關閉底層的共用 HTTP 連線工作階段（`client.py` 第 352–406 行，特別是第 384–387 行 `await self.client.close()`）。當併發數（`MAX_CONCURRENCY`）大於 1 時，若其中一筆請求因停滯觸發 watchdog 或拋錯而呼叫 `close()`，**其他正在併發串流的請求連線將被直接切斷**。
+5. **多併發下失敗請求的行為**：
+   從原始碼可知，當某筆請求停滯觸發 `self.close()` 時，共用 session 被關閉，其他併發請求在讀取串流 chunk 時會遇到底層傳輸層例外（例如 `curl_cffi` 或 `httpx` 例外）。因為 `@running(retry=5)` 僅攔截 `APIError`，其他非 `APIError` 例外不會觸發該裝飾器的重試，導致其他併發請求直接失敗。而觸發 watchdog 的停滯請求若找回失敗拋出 `APIError`，會在退避後重新 `init()` 並重試。若該請求為新對話的第一則訊息（無既有 CID），每一次重試都會重新發送 prompt，從而產生全新的 conversation id。
+
+### 單一請求最壞耗時約 30 分鐘
+
+在最壞情況下，一筆請求若用盡 5 次重試（共 6 次嘗試）：
+- 每次失敗嘗試經歷：約 120 秒串流無進展 + 約 120 秒 `read_chat` 找回逾時 = 約 240 秒。
+- 5 次失敗重試累積等待：約 `5 * 240 = 1200` 秒。
+- 5 次重試之指數退避延遲：`5 + 10 + 15 + 20 + 25 = 75` 秒。
+- 5 次失敗合計約 1275 秒（超過 21 分鐘）。
+- 加上第 6 次嘗試之執行時間（或各階段網路逾時），單一請求耗時可長達約 30 分鐘。
+
+### 正式環境觀測紀錄
+
+Commander 於正式環境日誌中記錄之真實案例：
+
+- **2026-10-13 私聊請求**：
+  一筆私聊請求（Medium）耗時長達 29.6 分鐘，共進行了 6 次嘗試。前 5 次失敗嘗試中，每筆皆是在約 120 秒未收到新內容後，進入對話歷史輪詢 120 秒未果；第 6 次嘗試則於 2 分 19 秒成功完成。由於該請求為新對話的第一則訊息，每一次重試均建立了全新的對話，日誌中的 WARNING 訊息出現了 5 個互不相同的 conversation id。
+- **2026-10-11 01:34–01:40 UTC 群組請求**：
+  在尚未引入思考等級轉接層的舊版本上，一筆群組請求耗時 329 秒。其 DEBUG 追蹤顯示：
+  - `"Connection idle for 120s (queueing=False)"`
+  - 12 次 `"Response not ready"` 輪詢與 recovery 逾時
+  - 隨後的重試在 10 秒內完成。
+
+### 觀測詮釋
+
+- **【詮釋／推論】**：Gemini 偶發性的串流停滯現象早已存在，早在思考等級轉接層引入之前就已發生，並非轉接層所引起。
+
+### 併發影響與本專案防護措施
+
+1. **併發風險**：上游 `GeminiClient` 全局共用單一底層 HTTP session，若 `MAX_CONCURRENCY` 設高，單一請求停滯引發的 `close()` 會中斷其他正常串流的請求。因此單一 Gemini 帳號建議保持 `MAX_CONCURRENCY=1`（或不超過 3）。
+2. **總逾時防護（`REQUEST_TIMEOUT_SEC`）**：為避免單一請求陷入長達 30 分鐘的停滯重試輪迴並霸佔佇列槽位，本專案現已引入 `REQUEST_TIMEOUT_SEC`（預設 600 秒）。當互動式請求自取得槽位起的總耗時超過限制時，主動中斷請求並提示使用者重新發送，保護系統可用性。
 
 ---
 

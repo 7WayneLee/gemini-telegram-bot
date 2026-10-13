@@ -186,11 +186,12 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `GEMINI_SECURE_1PSID` | Gemini cookie |
 | `GEMINI_SECURE_1PSIDTS` | Gemini cookie |
 
-其餘皆有安全預設值，其中三個值得注意：
+其餘皆有安全預設值，其中四個值得注意：
 
 | 變數 | 預設 | 理由 |
 |---|---|---|
-| `MAX_CONCURRENCY` | `1` | 單一 Gemini 帳號本有配額上限，併發效益有限 |
+| `MAX_CONCURRENCY` | `1` | 不同的聊天室在此上限內平行處理，而單一聊天室的訊息維持依序執行。請求最多等待 30 秒以取得可用槽位，逾時則回覆忙碌。單一 Gemini 帳號建議維持在 3 以下：併發對突破上游配額效益有限，且單一請求失敗可能會中斷其他進行中的併發請求（因上游會關閉共用的 HTTP session） |
+| `REQUEST_TIMEOUT_SEC` | `600` | 取得槽位後，互動式請求（一般訊息、`/gemini`、`/img`）的總時間上限（秒）；逾時將中止請求並提示使用者重新發送（Deep Research 保留 `RESEARCH_TIMEOUT_SEC`） |
 | `ENABLE_VIDEO_GENERATION` | `false` | 單支影片可達數十 MB |
 | `ENABLE_AUDIO_GENERATION` | `false` | 同上 |
 
@@ -207,6 +208,8 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 ---
 
 ## 指令
+
+`/status`、`/help`、`/start`、`/research_status` 以及管理指令即使該聊天室已有請求正在執行中，也會立即回覆。
 
 ### 白名單內的使用者
 

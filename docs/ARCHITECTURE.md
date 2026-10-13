@@ -170,12 +170,24 @@ reply contains no formatting — the final edit is skipped rather than rejected 
 
 ---
 
+## Concurrency model
+
+The bot balances parallel processing across chats with strict ordering within each chat, bounded by upstream resource limits:
+
+- **Update processor (`PerChatUpdateProcessor`)**: A custom Telegram `BaseUpdateProcessor` runs up to 64 updates concurrently across the bot. Updates destined for the same chat are queued behind a per-chat `asyncio.Lock` and executed strictly one at a time in arrival order, preventing race conditions and interleaving responses.
+- **Lock-free commands**: Commands that do not mutate conversation history or require conversational ordering skip the per-chat lock and respond immediately even while that chat has a generation running. These include informational queries (`/start`, `/help`, `/status`, `/research_status`) and all administrative commands (`/setcookie`, `/allow`, `/deny`, `/allow_chat`, `/deny_chat`, `/access`, `/health`).
+- **Gemini semaphore (`RequestQueue`)**: Access to upstream Gemini generation is guarded by a global `asyncio.Semaphore` bounded by `MAX_CONCURRENCY` (default `1`). When all slots are busy, a new request waits up to 30 seconds (`SEMAPHORE_ACQUIRE_TIMEOUT_SECONDS`) for a free slot; if none becomes available, it fails fast with the standard busy response.
+- **Request time limit (`REQUEST_TIMEOUT_SEC`)**: Interactive generation requests (plain text prompts, `/gemini`, `/img`) are bounded by a total time limit (`REQUEST_TIMEOUT_SEC`, default 600 s), measured from the moment the concurrency slot is acquired. If the total duration (including any upstream stalls or retries) exceeds this deadline, the request is cancelled and the user is asked to send the prompt again. Deep Research is managed separately by `ResearchManager` and retains its dedicated `RESEARCH_TIMEOUT_SEC` (default 900 s).
+- **Credential reload (`/setcookie`)**: When an administrator issues `/setcookie` to hot-reload credentials, `GeminiService.reinit()` waits for all in-flight requests to complete before closing the active client and reinitializing with the new credentials. This ensures ongoing requests are not abruptly terminated by an administrative update.
+
+---
+
 ## Flood control
 
 Every Telegram send goes through the shared transport in `telegram/sending.py`, which
 bounds `RetryAfter` waits at 30 seconds and **releases the concurrency slot while
 waiting**. Without that release, one flood-controlled request would block every other
-user behind the `MAX_CONCURRENCY=1` semaphore.
+user behind the `MAX_CONCURRENCY` semaphore (default 1).
 
 A test in `tests/test_handlers.py` walks the AST to ensure no send site bypasses it.
 If you add one, route it through `sending.py` rather than removing the guard.

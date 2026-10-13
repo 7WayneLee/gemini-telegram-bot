@@ -204,11 +204,12 @@ Use `socks5h`, not `socks5` — the `h` sends DNS through the tunnel too.
 | `GEMINI_SECURE_1PSID` | Gemini cookie |
 | `GEMINI_SECURE_1PSIDTS` | Gemini cookie |
 
-Everything else has a safe default. Three worth knowing:
+Everything else has a safe default. Four worth knowing:
 
 | Variable | Default | Why |
 |---|---|---|
-| `MAX_CONCURRENCY` | `1` | A single Gemini account has its own quota ceiling, so concurrency buys little |
+| `MAX_CONCURRENCY` | `1` | Different chats run in parallel up to this number, while messages within one chat stay in order. A request waits up to 30 seconds for a free slot before returning busy. Keep at 3 or below for a single Gemini account: concurrency buys little against upstream quotas, and one failing request can interrupt other concurrent requests because upstream closes the shared HTTP session |
+| `REQUEST_TIMEOUT_SEC` | `600` | Total time limit in seconds for an interactive request (messages, `/gemini`, `/img`), measured after acquiring a concurrency slot; when it expires, the request stops and asks the user to send it again (Deep Research keeps `RESEARCH_TIMEOUT_SEC`) |
 | `ENABLE_VIDEO_GENERATION` | `false` | A single clip can be tens of MB |
 | `ENABLE_AUDIO_GENERATION` | `false` | Same |
 
@@ -225,6 +226,8 @@ Group mode adds five more:
 ---
 
 ## Commands
+
+`/status`, `/help`, `/start`, `/research_status` and the admin commands answer immediately even while that chat has a request running.
 
 ### Everyone on the allowlist
 
