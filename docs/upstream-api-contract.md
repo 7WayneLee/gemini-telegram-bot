@@ -368,6 +368,7 @@ T3.4 的 `/setcookie` 熱更新可能需要。
 - **對本專案的影響**：
   - **轉接層正常運作**：無論是 2026-10-12 回傳 0 字元，還是 2026-10-13 回傳 328 字元，Bot 向上游發出的 Medium 請求皆維持在 Medium，未發生回退至 High 的情況。
   - **自動相容呈現**：上游 `gemini-webapi` 2.1.1 於 `client.py` 第 2113 行讀取 `candidate[37][0][0]` 作為 `thoughts`；當 Gemini 回傳思考文字時，Bot 即正常顯示思考區塊；若回傳 0 字元，Bot 則僅輸出回覆文字並記錄 INFO 日誌，不需特殊分支處理。
+  - **使用者決策（2026-10-12）**：Gemini 未回傳思考內容時，Bot 不另外顯示耗時行，維持現狀。
 
 ### 版本鎖定與升級流程
 
@@ -395,7 +396,7 @@ T3.4 的 `/setcookie` 熱更新可能需要。
 4. **Shared Session（共用 HTTP Session 截斷效應）**：
    `GeminiClient.close()` 會直接關閉底層的共用 HTTP 連線工作階段（`client.py` 第 352–406 行，特別是第 384–387 行 `await self.client.close()`）。當併發數（`MAX_CONCURRENCY`）大於 1 時，若其中一筆請求因停滯觸發 watchdog 或拋錯而呼叫 `close()`，**其他正在併發串流的請求連線將被直接切斷**。
 5. **多併發下失敗請求的行為**：
-   從原始碼可知，當某筆請求停滯觸發 `self.close()` 時，共用 session 被關閉，其他併發請求在讀取串流 chunk 時會遇到底層傳輸層例外（例如 `curl_cffi` 或 `httpx` 例外）。因為 `@running(retry=5)` 僅攔截 `APIError`，其他非 `APIError` 例外不會觸發該裝飾器的重試，導致其他併發請求直接失敗。而觸發 watchdog 的停滯請求若找回失敗拋出 `APIError`，會在退避後重新 `init()` 並重試。若該請求為新對話的第一則訊息（無既有 CID），每一次重試都會重新發送 prompt，從而產生全新的 conversation id。
+   當某筆請求停滯觸發 `self.close()` 時，共用 session 被關閉，其他正在串流的併發請求會在讀取 chunk 時收到傳輸層例外。上游在 `client.py` 第 2053–2064 行以 `except Exception` 將這類例外轉換為 `APIError`，因此這些請求同樣會被 `@running(retry=5)` 退避後重新 `init()` 並重送 prompt（新對話的第一則訊息會產生新的 conversation id）。例外是 `ReadTimeout`：第 2041–2045 行將其轉為 `TimeoutError`，不會重試。也就是說，單一請求停滯會讓其他併發請求被迫重送、延長完成時間，而不是直接失敗；本專案以 `REQUEST_TIMEOUT_SEC` 限制每筆請求的總耗時。
 
 ### 單一請求最壞耗時約 30 分鐘
 
@@ -424,7 +425,7 @@ Commander 於正式環境日誌中記錄之真實案例：
 
 ### 併發影響與本專案防護措施
 
-1. **併發風險**：上游 `GeminiClient` 全局共用單一底層 HTTP session，若 `MAX_CONCURRENCY` 設高，單一請求停滯引發的 `close()` 會中斷其他正常串流的請求。因此單一 Gemini 帳號建議保持 `MAX_CONCURRENCY=1`（或不超過 3）。
+1. **併發風險**：上游 `GeminiClient` 全局共用單一底層 HTTP session，單一請求停滯引發的 `close()` 會中斷其他進行中的併發請求，使其退避後重送。單一 Gemini 帳號建議 `MAX_CONCURRENCY` 不超過 3。**使用者決策（2026-10-13）**：正式環境設為 3。
 2. **總逾時防護（`REQUEST_TIMEOUT_SEC`）**：為避免單一請求陷入長達 30 分鐘的停滯重試輪迴並霸佔佇列槽位，本專案現已引入 `REQUEST_TIMEOUT_SEC`（預設 600 秒）。當互動式請求自取得槽位起的總耗時超過限制時，主動中斷請求並提示使用者重新發送，保護系統可用性。
 
 ---
