@@ -209,6 +209,11 @@ class Settings(BaseSettings):
         validation_alias="USER_RATE_LIMIT_PER_MIN",
         gt=0,
     )
+    request_timeout_sec: int = Field(
+        default=600,
+        validation_alias="REQUEST_TIMEOUT_SEC",
+        gt=0,
+    )
     research_timeout_sec: int = Field(
         default=900,
         validation_alias="RESEARCH_TIMEOUT_SEC",

@@ -35,6 +35,7 @@ from gemini_tg_bot.telegram.handlers import (
     register_handlers,
 )
 from gemini_tg_bot.telegram.streaming import PLACEHOLDER_TEXT
+from gemini_tg_bot.telegram.update_processor import PerChatUpdateProcessor
 
 
 LOGGER = logging.getLogger(__name__)
@@ -146,6 +147,7 @@ async def _run_polling(settings: Settings) -> None:
         application = (
             Application.builder()
             .token(settings.telegram_bot_token.get_secret_value())
+            .concurrent_updates(PerChatUpdateProcessor())
             .build()
         )
         research = ResearchManager(
@@ -168,6 +170,7 @@ async def _run_polling(settings: Settings) -> None:
             secure_1psid=settings.gemini_secure_1psid,
             database=database,
             research=research,
+            request_timeout_sec=settings.request_timeout_sec,
         )
         register_handlers(application, auth=auth, handlers=handlers)
 

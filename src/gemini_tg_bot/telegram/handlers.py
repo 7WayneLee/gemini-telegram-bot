@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import re
 import time
-from collections.abc import Callable
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, date, datetime
 from html import escape
 from pathlib import Path
@@ -287,6 +289,10 @@ class EgressMeter:
             self._bytes = 0
 
 
+class _GenerationTimeout(TimeoutError):
+    """The interactive request's total deadline expired."""
+
+
 class TelegramHandlers:
     """Bind Telegram updates to the queue, service, and session registry."""
 
@@ -304,6 +310,7 @@ class TelegramHandlers:
         research: ResearchManager | None = None,
         media_handler: MediaHandler | None = None,
         now: Callable[[], datetime] | None = None,
+        request_timeout_sec: int = 600,
     ) -> None:
         self._service = service
         self._sessions = sessions
@@ -318,6 +325,7 @@ class TelegramHandlers:
         self._auth: AuthMiddleware | None = None
         self._awaiting_cookie_users: set[int] = set()
         self._now = now or (lambda: datetime.now(UTC))
+        self._request_timeout_sec = request_timeout_sec
 
     def bind_auth(self, auth: AuthMiddleware) -> None:
         """Bind the application-scoped authorization middleware."""
@@ -1392,6 +1400,34 @@ class TelegramHandlers:
             group_parent_message_id=group_parent_message_id,
         )
 
+    @asynccontextmanager
+    async def _generation_timeout(self) -> AsyncIterator[None]:
+        """Bound generation and retries together, starting after queue acquisition."""
+
+        deadline = asyncio.timeout(self._request_timeout_sec)
+        try:
+            async with deadline:
+                yield
+        except TimeoutError as error:
+            if deadline.expired():
+                raise _GenerationTimeout from error
+            raise
+
+    async def _reply_request_timeout(self, message: Any, language: str) -> None:
+        LOGGER.warning(
+            "Interactive Gemini request exceeded its total time limit (%ss)",
+            self._request_timeout_sec,
+        )
+        await send_text_or_busy(
+            message,
+            translate(
+                "gemini.request_timeout",
+                language,
+                minutes=math.ceil(self._request_timeout_sec / 60),
+            ),
+            language=language,
+        )
+
     async def _stream_prompt(
         self,
         identity: tuple[int, int, Any],
@@ -1450,64 +1486,65 @@ class TelegramHandlers:
                         )
 
                 async with self._request_queue.request(user_id) as permit:
-                    restored = False
-                    if is_group:
-                        session, restored = (
-                            await self._sessions.start_group_session(
-                                chat_id,
-                                group_parent_message_id,
-                            )
-                        )
-                    elif new_private:
-                        session = await self._sessions.start_new(chat_id)
-                    else:
-                        session = await self._sessions.get_or_create(chat_id)
-
-                    async def run_stream() -> Any:
-                        generate_kwargs: dict[str, Any] = {
-                            "temporary": temporary,
-                        }
-                        if upload is not None:
-                            generate_kwargs["files"] = upload.files
-                        with thinking_request(level) as thinking_kwargs:
-                            return await self._service.execute(
-                                lambda _client: stream_response(
-                                    stream_message,
-                                    session,
-                                    prompt,
-                                    language=language,
-                                    show_thoughts=show_thoughts,
-                                    flood_wait=permit.wait_for_flood_control,
-                                    **generate_kwargs,
-                                    **thinking_kwargs,
+                    async with self._generation_timeout():
+                        restored = False
+                        if is_group:
+                            session, restored = (
+                                await self._sessions.start_group_session(
+                                    chat_id,
+                                    group_parent_message_id,
                                 )
                             )
+                        elif new_private:
+                            session = await self._sessions.start_new(chat_id)
+                        else:
+                            session = await self._sessions.get_or_create(chat_id)
 
-                    try:
-                        streamed = await run_stream()
-                    except Exception as error:
-                        if not restored:
-                            raise
-                        LOGGER.warning(
-                            "Unable to restore group conversation (%s); "
-                            "starting a new conversation",
-                            type(error).__name__,
-                        )
-                        await _delete_placeholder(stream_message.placeholder)
-                        await send_text_or_busy(
-                            message,
-                            translate("gemini.thread_expired", language),
-                            language=language,
-                            do_quote=True,
-                        )
-                        session, _ = await self._sessions.start_group_session(
-                            chat_id
-                        )
-                        stream_message = _StreamingMessageProxy(
-                            message,
-                            quote=True,
-                        )
-                        streamed = await run_stream()
+                        async def run_stream() -> Any:
+                            generate_kwargs: dict[str, Any] = {
+                                "temporary": temporary,
+                            }
+                            if upload is not None:
+                                generate_kwargs["files"] = upload.files
+                            with thinking_request(level) as thinking_kwargs:
+                                return await self._service.execute(
+                                    lambda _client: stream_response(
+                                        stream_message,
+                                        session,
+                                        prompt,
+                                        language=language,
+                                        show_thoughts=show_thoughts,
+                                        flood_wait=permit.wait_for_flood_control,
+                                        **generate_kwargs,
+                                        **thinking_kwargs,
+                                    )
+                                )
+
+                        try:
+                            streamed = await run_stream()
+                        except Exception as error:
+                            if not restored:
+                                raise
+                            LOGGER.warning(
+                                "Unable to restore group conversation (%s); "
+                                "starting a new conversation",
+                                type(error).__name__,
+                            )
+                            await _delete_placeholder(stream_message.placeholder)
+                            await send_text_or_busy(
+                                message,
+                                translate("gemini.thread_expired", language),
+                                language=language,
+                                do_quote=True,
+                            )
+                            session, _ = await self._sessions.start_group_session(
+                                chat_id
+                            )
+                            stream_message = _StreamingMessageProxy(
+                                message,
+                                quote=True,
+                            )
+                            streamed = await run_stream()
                 if upload is not None:
                     self._media.record_upload(upload)
             if show_thoughts:
@@ -1548,6 +1585,9 @@ class TelegramHandlers:
                     session,
                 )
             ok = True
+        except _GenerationTimeout:
+            error_kind = "timeout"
+            await self._reply_request_timeout(stream_message, language)
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
             await _reply_rate_limited(stream_message, error, language)
@@ -1684,48 +1724,49 @@ class TelegramHandlers:
                 language=language,
             ) as upload:
                 async with self._request_queue.request(user_id):
-                    restored = False
-                    if is_group:
-                        session, restored = (
-                            await self._sessions.start_group_session(
-                                chat_id,
-                                group_parent_message_id,
-                            )
-                        )
-                    else:
-                        session = await self._sessions.get_or_create(chat_id)
-
-                    async def send_upload() -> Any:
-                        with thinking_request(level) as thinking_kwargs:
-                            return await self._service.execute(
-                                lambda _client: session.send_message(
-                                    upload.prompt,
-                                    files=upload.files,
-                                    temporary=temporary,
-                                    **thinking_kwargs,
+                    async with self._generation_timeout():
+                        restored = False
+                        if is_group:
+                            session, restored = (
+                                await self._sessions.start_group_session(
+                                    chat_id,
+                                    group_parent_message_id,
                                 )
                             )
+                        else:
+                            session = await self._sessions.get_or_create(chat_id)
 
-                    try:
-                        output = await send_upload()
-                    except Exception as error:
-                        if not restored:
-                            raise
-                        LOGGER.warning(
-                            "Unable to restore group conversation (%s); "
-                            "starting a new conversation",
-                            type(error).__name__,
-                        )
-                        await send_text_or_busy(
-                            message,
-                            translate("gemini.thread_expired", language),
-                            language=language,
-                            do_quote=True,
-                        )
-                        session, _ = await self._sessions.start_group_session(
-                            chat_id
-                        )
-                        output = await send_upload()
+                        async def send_upload() -> Any:
+                            with thinking_request(level) as thinking_kwargs:
+                                return await self._service.execute(
+                                    lambda _client: session.send_message(
+                                        upload.prompt,
+                                        files=upload.files,
+                                        temporary=temporary,
+                                        **thinking_kwargs,
+                                    )
+                                )
+
+                        try:
+                            output = await send_upload()
+                        except Exception as error:
+                            if not restored:
+                                raise
+                            LOGGER.warning(
+                                "Unable to restore group conversation (%s); "
+                                "starting a new conversation",
+                                type(error).__name__,
+                            )
+                            await send_text_or_busy(
+                                message,
+                                translate("gemini.thread_expired", language),
+                                language=language,
+                                do_quote=True,
+                            )
+                            session, _ = await self._sessions.start_group_session(
+                                chat_id
+                            )
+                            output = await send_upload()
                 self._media.record_upload(upload)
             if not is_group:
                 await self._sessions.persist(chat_id, session)
@@ -1740,6 +1781,9 @@ class TelegramHandlers:
         except MediaUploadError as error:
             error_kind = "media_rejected"
             await send_text_or_busy(reply_target, str(error), language=language)
+        except _GenerationTimeout:
+            error_kind = "timeout"
+            await self._reply_request_timeout(reply_target, language)
         except RateLimitExceeded as error:
             error_kind = "rate_limit"
             await _reply_rate_limited(reply_target, error, language)

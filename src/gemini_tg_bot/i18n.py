@@ -345,6 +345,15 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Usage: /gemini <question>",
         LANGUAGE_CHINESE: "用法：/gemini <問題>",
     },
+    "gemini.request_timeout": {
+        LANGUAGE_ENGLISH: (
+            "Gemini did not finish within {minutes} minutes, so this request "
+            "was stopped. Please send it again."
+        ),
+        LANGUAGE_CHINESE: (
+            "Gemini 超過 {minutes} 分鐘仍未完成，這次請求已停止，請重新傳送。"
+        ),
+    },
     "gemini.thread_expired": {
         LANGUAGE_ENGLISH: (
             "The original conversation is no longer available. "
