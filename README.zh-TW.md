@@ -23,8 +23,8 @@ cookie 的處理才是這個專案真正的重點。
   會自動使用中文，其餘一律使用英文
 - **圖片以相簿送出**，能直傳的就交給 Telegram 自己抓，不經過你的伺服器
 - **檔案上傳** —— 丟一張圖或 PDF 就能提問
-- **動態選擇模型與 gem**（`/model`、`/gem`）
-- **Deep Research** 背景任務，重啟後仍會繼續
+- **動態選擇模型**（`/model`）
+- **選配的影片生成** —— 私訊可用 `/video`，生成完成後自動送達
 - **預設白名單** —— 沒設定的 bot 誰都不理
 - **群組模式** —— 可以把 bot 加進群組，以聊天為單位授權而非以使用者為單位，
   群組內使用固定的設定
@@ -186,22 +186,23 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `GEMINI_SECURE_1PSID` | Gemini cookie |
 | `GEMINI_SECURE_1PSIDTS` | Gemini cookie |
 
-其餘皆有安全預設值，其中四個值得注意：
+其餘皆有安全預設值，其中五個值得注意：
 
 | 變數 | 預設 | 理由 |
 |---|---|---|
 | `MAX_CONCURRENCY` | `1` | 不同的聊天室在此上限內平行處理，而單一聊天室的訊息維持依序執行。請求最多等待 30 秒以取得可用槽位，逾時則回覆忙碌。單一 Gemini 帳號建議維持在 3 以下：併發對突破上游配額效益有限，且單一請求失敗可能會中斷其他進行中的併發請求（因上游會關閉共用的 HTTP session） |
-| `REQUEST_TIMEOUT_SEC` | `600` | 取得槽位後，互動式請求（一般訊息、`/gemini`、`/img`）的總時間上限（秒）；逾時將中止請求並提示使用者重新發送（Deep Research 保留 `RESEARCH_TIMEOUT_SEC`） |
-| `ENABLE_VIDEO_GENERATION` | `false` | 單支影片可達數十 MB |
-| `ENABLE_AUDIO_GENERATION` | `false` | 同上 |
+| `REQUEST_TIMEOUT_SEC` | `600` | 取得槽位後，互動式請求（一般訊息、`/gemini`、`/img`）的總時間上限（秒）；逾時將中止請求並提示使用者重新發送。此時間上限也限制 `/video` 的初始請求與其影片傳送 |
+| `ENABLE_VIDEO_GENERATION` | `false` | 啟用私訊中的 `/video`；生成的影片通常經由伺服器轉傳（測試中約每部 3.5 MB） |
+| `VIDEO_TIMEOUT_SEC` | `300` | 等待 Gemini 完成影片生成的時間上限（秒） |
+| `ENABLE_AUDIO_GENERATION` | `false` | 單支音訊可達數十 MB |
 
 群組模式另外有五項：
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
 | `ALLOWED_CHAT_IDS` | 空 | 逗號分隔的群組 chat id（負數）。留空代表不核准任何群組 |
-| `GROUP_MODEL` | `flash` | 群組固定使用的模型，由上游動態解析取得，並非硬編碼 |
-| `GROUP_THINKING_LEVEL` | `medium` | 所有群組對話使用的思考等級（`low`、`medium` 或 `high`） |
+| `GROUP_MODEL` | `flash` | 群組預設使用的模型，由上游動態解析取得，並非硬編碼；管理員可在執行階段以 `/group_model` 覆寫 |
+| `GROUP_THINKING_LEVEL` | `medium` | 所有群組對話預設使用的思考等級（`low`、`medium` 或 `high`）；管理員可在執行階段以 `/group_model` 覆寫 |
 | `GROUP_THREAD_RETENTION_DAYS` | `30` | 群組對話串記錄的保留天數 |
 | `GROUP_THREAD_MAX_PER_CHAT` | `200` | 每個群組保留的對話串上限 |
 
@@ -209,22 +210,20 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 
 ## 指令
 
-`/status`、`/help`、`/start`、`/research_status` 以及管理指令即使該聊天室已有請求正在執行中，也會立即回覆。
+`/status`、`/start` 以及管理指令即使該聊天室已有請求正在執行中，也會立即回覆。
 
 ### 白名單內的使用者
 
 | 指令 | 行為 |
 |---|---|
-| `/start`、`/help` | 顯示可用指令。`/help` 不在指令選單中，但仍可使用 |
+| `/start` | 顯示可用指令；`/help` 仍可使用但未列出 |
 | `/gemini <問題>` | 以這個問題開始一段新對話。作為回覆送出時，被引用訊息的內容會一併成為脈絡 |
 | `/new` | 結束目前對話，開始新的一輪 |
 | `/model` | 選擇模型與思考等級，各聊天室獨立儲存（預設 Medium） |
-| `/gem` | 選擇要套用於對話的 gem |
 | `/temp` | 切換暫時模式 —— 不寫入 Gemini 歷史 |
 | `/language` | 切換 bot 自身介面的語言（不影響 Gemini 回覆語言），可選英文或正體中文；選擇後，該聊天室的指令選單也會隨之切換 |
 | `/img <prompt>` | **明確要求生成圖片。** 未明示時 Gemini 傾向回傳網路搜尋結果而非 AI 生成圖 |
-| `/research <topic>` | 送出 Deep Research 任務，立即回傳 task id |
-| `/research_status` | 該聊天室的研究任務狀態 |
+| `/video <prompt>` | 在私訊中生成影片（需 `ENABLE_VIDEO_GENERATION=true`）；完成後於背景送達 |
 | `/status` | 模型與思考等級、session id、cookie 最後刷新時間、佇列深度、用量、egress 估算 |
 | 純文字 | 以串流方式回覆 |
 | 圖片／文件 | 送給 Gemini，caption 作為 prompt |
@@ -238,6 +237,7 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | `/deny <user_id>` | 移出白名單。deny 優先於靜態清單 |
 | `/allow_chat <chat_id>` | 核准一個群組，即時生效。僅限私訊 |
 | `/deny_chat <chat_id>` | 撤銷一個群組的核准，即時生效。僅限私訊 |
+| `/group_model` | 選擇群組對話使用的模型與思考等級，或重設為預設值。僅限私訊 |
 | `/health` | client 健康狀態、最近錯誤、資料庫狀態 |
 
 ---
@@ -251,8 +251,8 @@ GEMINI_PROXY=socks5h://127.0.0.1:1080
 | | 私訊 | 群組 |
 |---|---|---|
 | 對話 | 一段連續的對話。直接打字即可延續，`/new` 重置 | 一次一問。`/gemini <問題>` 每次都開始一段新對話；**回覆 bot 的訊息**才能延續該段對話。純文字不會送到 bot |
-| 設定 | 模型、gem、暫時模式、思考等級（以 `/model` 調整）、介面語言都可以調整 | 固定且不可更改：模型為 `GROUP_MODEL`、思考等級固定為 `GROUP_THINKING_LEVEL`、介面為英文、不套用 gem |
-| 可用指令 | 全部 | `/gemini`、`/img`、`/help` |
+| 設定 | 模型、暫時模式、思考等級（以 `/model` 調整）、介面語言都可以調整 | 模型與思考等級來自 `GROUP_MODEL` / `GROUP_THINKING_LEVEL`，除非管理員以 `/group_model` 變更；成員無法自行修改。介面為英文 |
+| 可用指令 | 全部 | `/start`、`/gemini`、`/img` |
 
 ### 為什麼群組需要指令或回覆
 

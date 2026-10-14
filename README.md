@@ -27,8 +27,8 @@ API key — which makes cookie handling the part that actually matters.
 - **Images** sent as albums, passed to Telegram by URL where possible so they never
   transit your server
 - **File uploads** — send a photo or PDF and ask about it
-- **Dynamic model and gem selection** via `/model` and `/gem`
-- **Deep Research** as a background task that survives a restart
+- **Dynamic model selection** via `/model`
+- **Opt-in video generation** with `/video` in direct messages, delivered when ready
 - **Allowlist by default** — an unconfigured bot talks to nobody
 - **Group chats** — add the bot to a group, authorise it per chat rather than per
   user, and it answers there with a fixed set of settings
@@ -204,22 +204,23 @@ Use `socks5h`, not `socks5` — the `h` sends DNS through the tunnel too.
 | `GEMINI_SECURE_1PSID` | Gemini cookie |
 | `GEMINI_SECURE_1PSIDTS` | Gemini cookie |
 
-Everything else has a safe default. Four worth knowing:
+Everything else has a safe default. Five worth knowing:
 
 | Variable | Default | Why |
 |---|---|---|
 | `MAX_CONCURRENCY` | `1` | Different chats run in parallel up to this number, while messages within one chat stay in order. A request waits up to 30 seconds for a free slot before returning busy. Keep at 3 or below for a single Gemini account: concurrency buys little against upstream quotas, and one failing request can interrupt other concurrent requests because upstream closes the shared HTTP session |
-| `REQUEST_TIMEOUT_SEC` | `600` | Total time limit in seconds for an interactive request (messages, `/gemini`, `/img`), measured after acquiring a concurrency slot; when it expires, the request stops and asks the user to send it again (Deep Research keeps `RESEARCH_TIMEOUT_SEC`) |
-| `ENABLE_VIDEO_GENERATION` | `false` | A single clip can be tens of MB |
-| `ENABLE_AUDIO_GENERATION` | `false` | Same |
+| `REQUEST_TIMEOUT_SEC` | `600` | Total time limit in seconds for an interactive request (messages, `/gemini`, `/img`), measured after acquiring a concurrency slot; when it expires, the request stops and asks the user to send it again. It also bounds `/video`'s initial request and its delivery |
+| `ENABLE_VIDEO_GENERATION` | `false` | Enables `/video` in direct messages; clips are usually relayed through the server (about 3.5 MB each in testing) |
+| `VIDEO_TIMEOUT_SEC` | `300` | How long the bot waits for Gemini to finish a clip |
+| `ENABLE_AUDIO_GENERATION` | `false` | A single clip can be tens of MB |
 
 Group mode adds five more:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ALLOWED_CHAT_IDS` | empty | Comma-separated group chat ids (negative numbers). Empty means no group is approved |
-| `GROUP_MODEL` | `flash` | The model groups always use, resolved dynamically from upstream rather than hardcoded |
-| `GROUP_THINKING_LEVEL` | `medium` | Thinking level used for all group conversations (`low`, `medium`, or `high`) |
+| `GROUP_MODEL` | `flash` | Default model used for group conversations, resolved dynamically from upstream rather than hardcoded; the admin can override this at runtime with `/group_model` |
+| `GROUP_THINKING_LEVEL` | `medium` | Default thinking level used for all group conversations (`low`, `medium`, or `high`); the admin can override this at runtime with `/group_model` |
 | `GROUP_THREAD_RETENTION_DAYS` | `30` | How long group thread records are kept, in days |
 | `GROUP_THREAD_MAX_PER_CHAT` | `200` | Maximum threads kept per group |
 
@@ -227,22 +228,20 @@ Group mode adds five more:
 
 ## Commands
 
-`/status`, `/help`, `/start`, `/research_status` and the admin commands answer immediately even while that chat has a request running.
+`/status`, `/start` and the admin commands answer immediately even while that chat has a request running.
 
 ### Everyone on the allowlist
 
 | Command | Behaviour |
 |---|---|
-| `/start`, `/help` | Show available commands. `/help` is not in the command menu, but still works |
+| `/start` | Show available commands. `/help` still works but is not listed |
 | `/gemini <question>` | Start a new conversation with this question. Sent as a reply, the quoted message is included as context |
 | `/new` | End the current conversation and start a fresh one |
 | `/model` | Pick a model, then pick a thinking level; saved per chat (default Medium) |
-| `/gem` | Pick a gem to apply to the conversation |
 | `/temp` | Toggle temporary mode — nothing written to Gemini history |
 | `/language` | Switch the bot's own interface between English and Traditional Chinese (not the language of Gemini's replies); this chat's command menu switches to match |
 | `/img <prompt>` | **Explicitly ask for generation.** Without that wording Gemini tends to return web search results instead of an AI-generated image |
-| `/research <topic>` | Submit a Deep Research task; returns a task id immediately |
-| `/research_status` | Status of this chat's research tasks |
+| `/video <prompt>` | Generate a video clip in a direct message when `ENABLE_VIDEO_GENERATION=true`; delivered in the background when ready |
 | `/status` | Model and thinking level, session id, last cookie refresh, queue depth, usage, egress estimate |
 | Plain text | Answered with streaming |
 | Photo / document | Passed to Gemini; the caption becomes the prompt |
@@ -256,6 +255,7 @@ Group mode adds five more:
 | `/deny <user_id>` | Remove from the allowlist. Deny beats the static list |
 | `/allow_chat <chat_id>` | Approve a group, effective immediately. Direct messages only |
 | `/deny_chat <chat_id>` | Revoke a group's approval, effective immediately. Direct messages only |
+| `/group_model` | Choose the model and thinking level used for group chats, or reset to defaults. Direct messages only |
 | `/health` | Client health, recent errors, database status |
 
 ---
@@ -270,8 +270,8 @@ the differences are deliberate.
 | | Direct message | Group |
 |---|---|---|
 | Conversation | One continuous conversation. Plain text continues it, `/new` resets it | One question at a time. `/gemini <question>` always starts a new conversation; **replying to one of the bot's messages** continues that conversation. Plain text does not reach the bot |
-| Settings | Model, gem, temporary mode, thinking level (adjustable with `/model`), and interface language are all adjustable | Fixed and not changeable: the model is `GROUP_MODEL`, the thinking level is fixed at `GROUP_THINKING_LEVEL`, the interface is English, and no gem is applied |
-| Available commands | All of them | `/gemini`, `/img`, `/help` |
+| Settings | Model, temporary mode, thinking level (adjustable with `/model`), and interface language are all adjustable | The model and thinking level come from `GROUP_MODEL` / `GROUP_THINKING_LEVEL` unless the admin changed them with `/group_model`; members cannot change them. The interface is English |
+| Available commands | All of them | `/start`, `/gemini`, `/img` |
 
 ### Why a group needs a command or a reply
 

@@ -134,6 +134,15 @@ arriving on a bill.
 
 See [`egress-findings.md`](egress-findings.md) for the measurements behind this.
 
+### Video generation (`/video`)
+
+Video generation via `/video <prompt>` runs in direct messages when `ENABLE_VIDEO_GENERATION=true`:
+- **Fresh conversation**: Each request executes in an isolated, disposable Gemini conversation rather than the chat's persistent session, avoiding pollution of conversation history.
+- **Request adapter**: Upstream `gemini-webapi` 2.1.1 lacks video generation parameters. The bot's request adapter (`ThinkingLevelGeminiClient`) rewrites the Low-effort request payload to match the official web client (see [`upstream-api-contract.md`](upstream-api-contract.md) §五之二).
+- **Background job**: Gemini initially acknowledges generation with a status response. The bot sends this status and releases the chat lock and concurrency slot immediately. A background job (`VideoJobManager`, one per chat) polls conversation history every 10 seconds without holding a concurrency slot, bounded by `VIDEO_TIMEOUT_SEC` (default 300 s).
+- **Delivery**: When the clip is ready, delivery first offers Telegram the video URL directly. If Telegram rejects the URL, the bot falls back to relaying the file using the account's cookies, recording egress in the egress estimate. Delivery is bounded by `REQUEST_TIMEOUT_SEC` (default 600 s), and clips over 50 MB are refused.
+- **Jobs lost on restart**: Background polling jobs are kept in memory only; any video still being generated is lost if the process restarts.
+
 ---
 
 ## Rendering
@@ -175,9 +184,9 @@ reply contains no formatting — the final edit is skipped rather than rejected 
 The bot balances parallel processing across chats with strict ordering within each chat, bounded by upstream resource limits:
 
 - **Update processor (`PerChatUpdateProcessor`)**: A custom Telegram `BaseUpdateProcessor` runs up to 64 updates concurrently across the bot. Updates destined for the same chat are queued behind a per-chat `asyncio.Lock` and executed strictly one at a time in arrival order, preventing race conditions and interleaving responses.
-- **Lock-free commands**: Commands that do not mutate conversation history or require conversational ordering skip the per-chat lock and respond immediately even while that chat has a generation running. These include informational queries (`/start`, `/help`, `/status`, `/research_status`) and all administrative commands (`/setcookie`, `/allow`, `/deny`, `/allow_chat`, `/deny_chat`, `/access`, `/health`).
+- **Lock-free commands**: Commands that do not mutate conversation history or require conversational ordering skip the per-chat lock and respond immediately even while that chat has a generation running. These include informational queries (`/start`, `/help`, `/status`) and all administrative commands (`/setcookie`, `/allow`, `/deny`, `/allow_chat`, `/deny_chat`, `/access`, `/health`, `/group_model`).
 - **Gemini semaphore (`RequestQueue`)**: Access to upstream Gemini generation is guarded by a global `asyncio.Semaphore` bounded by `MAX_CONCURRENCY` (default `1`). When all slots are busy, a new request waits up to 30 seconds (`SEMAPHORE_ACQUIRE_TIMEOUT_SECONDS`) for a free slot; if none becomes available, it fails fast with the standard busy response.
-- **Request time limit (`REQUEST_TIMEOUT_SEC`)**: Interactive generation requests (plain text prompts, `/gemini`, `/img`) are bounded by a total time limit (`REQUEST_TIMEOUT_SEC`, default 600 s), measured from the moment the concurrency slot is acquired. If the total duration (including any upstream stalls or retries) exceeds this deadline, the request is cancelled and the user is asked to send the prompt again. Deep Research is managed separately by `ResearchManager` and retains its dedicated `RESEARCH_TIMEOUT_SEC` (default 900 s).
+- **Request time limit (`REQUEST_TIMEOUT_SEC`)**: Interactive generation requests (plain text prompts, `/gemini`, `/img`) are bounded by a total time limit (`REQUEST_TIMEOUT_SEC`, default 600 s), measured from the moment the concurrency slot is acquired. If the total duration (including any upstream stalls or retries) exceeds this deadline, the request is cancelled and the user is asked to send the prompt again. `/video` uses the same limit for its initial request and for delivery.
 - **Credential reload (`/setcookie`)**: When an administrator issues `/setcookie` to hot-reload credentials, `GeminiService.reinit()` waits for all in-flight requests to complete before closing the active client and reinitializing with the new credentials. This ensures ongoing requests are not abruptly terminated by an administrative update.
 
 ---
@@ -200,11 +209,12 @@ SQLite via `aiosqlite`, migrated with `PRAGMA user_version`:
 
 | Table | Contents |
 |---|---|
-| `chat_sessions` | Telegram chat → Gemini conversation, model, gem, temporary flag, thinking level |
-| `research_tasks` | Deep Research state, including the serialised plan needed to resume polling after a restart |
+| `chat_sessions` | Telegram chat → Gemini conversation, model, temporary flag, thinking level (`gem_id` column kept but no longer set) |
+| `research_tasks` | Kept for compatibility, unused since 2026-10-14 |
 | `usage_log` | Per-request outcome, error kind, latency |
 | `telegram_user_access` | Runtime allow/deny overrides from `/allow` and `/deny` |
 | `admin_notifications` | Digest and timestamp of each administrator page, so a restart loop cannot repeat one |
+| `group_model_override` | Runtime group model and thinking level override (schema version 10, single row) |
 
 Schema v9 adds `chat_sessions.thinking_level` (TEXT; `NULL` means the default, Medium). Chats that had extended thinking enabled are migrated to High, while `extended_thinking` is retained as an unused legacy column so that fresh and migrated databases match.
 
