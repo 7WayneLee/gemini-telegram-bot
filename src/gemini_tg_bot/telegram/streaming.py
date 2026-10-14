@@ -30,6 +30,7 @@ from .sending import (
     edit_text,
     send_text,
 )
+from .timing import RequestTiming
 
 
 PLACEHOLDER_TEXT = translate("stream.placeholder", DEFAULT_LANGUAGE)
@@ -71,6 +72,7 @@ async def stream_response(
     sleep: _Sleep = asyncio.sleep,
     flood_wait: _Sleep | None = None,
     clock: _Clock = time.monotonic,
+    timing: RequestTiming | None = None,
     **generate_kwargs: Any,
 ) -> StreamResult:
     """Stream a Gemini response into a Telegram placeholder message.
@@ -116,9 +118,27 @@ async def stream_response(
     thoughts_started_at: float | None = None
     answer_started_at: float | None = None
 
-    stream = session.send_message_stream(prompt, **generate_kwargs)
-    iterator = stream.__aiter__()
-    next_chunk: asyncio.Future[Any] | None = asyncio.ensure_future(anext(iterator))
+    upstream_timing = timing.start_upstream(clock) if timing is not None else None
+    try:
+        stream = session.send_message_stream(prompt, **generate_kwargs)
+        iterator = stream.__aiter__()
+    except BaseException:
+        if upstream_timing is not None:
+            upstream_timing.finish()
+        raise
+
+    async def read_chunk() -> Any:
+        try:
+            chunk = await anext(iterator)
+        except BaseException:
+            if upstream_timing is not None:
+                upstream_timing.finish()
+            raise
+        if upstream_timing is not None:
+            upstream_timing.observe(chunk.text, getattr(chunk, "thoughts", None))
+        return chunk
+
+    next_chunk: asyncio.Future[Any] | None = asyncio.ensure_future(read_chunk())
     timer: asyncio.Future[Any] | None = None
 
     async def edit_plain_text() -> None:
@@ -189,7 +209,7 @@ async def stream_response(
                 next_chunk = None
                 break
 
-            next_chunk = asyncio.ensure_future(anext(iterator))
+            next_chunk = asyncio.ensure_future(read_chunk())
             latest_output = chunk
             latest_text = chunk.text
             # Reasoning arrives before the answer and is absent on models that
@@ -212,6 +232,8 @@ async def stream_response(
     finally:
         await _cancel(timer)
         await _cancel(next_chunk)
+        if upstream_timing is not None:
+            upstream_timing.finish()
 
     thought_seconds = (
         max(

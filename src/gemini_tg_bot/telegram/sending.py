@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import Any, TypeVar
 
 from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
+
+from .timing import CURRENT_TIMING
 
 
 MAX_FLOOD_WAIT_SECONDS = 30.0
@@ -56,37 +59,43 @@ async def call_telegram(
     retrying it could create a duplicate, which is worse than one failed send.
     """
 
-    waited_seconds = 0.0
-    flood_retries = 0
-    network_retries = 0
-    wait = flood_wait or sleep or asyncio.sleep
-    while True:
-        try:
-            return await operation(*args, **kwargs)
-        except RetryAfter as error:
-            delay = max(0.0, _retry_delay(error))
-            remaining = MAX_FLOOD_WAIT_SECONDS - waited_seconds
-            if flood_retries == MAX_FLOOD_RETRIES or delay > remaining:
-                raise FloodControlExceeded(delay, waited_seconds) from error
-            await wait(delay)
-            waited_seconds += delay
-            flood_retries += 1
-        except BadRequest as error:
-            if "message is not modified" in str(error).casefold():
-                return None
-            raise
-        except NetworkError as error:
-            retryable = isinstance(error, NetworkError) and not isinstance(
-                error, BadRequest
-            )
-            if (
-                not retry_on_network
-                or not retryable
-                or network_retries == MAX_NETWORK_RETRIES
-            ):
+    timing = CURRENT_TIMING.get()
+    with timing.telegram_call() if timing is not None else nullcontext():
+        waited_seconds = 0.0
+        flood_retries = 0
+        network_retries = 0
+        wait = flood_wait or sleep or asyncio.sleep
+        while True:
+            try:
+                return await operation(*args, **kwargs)
+            except RetryAfter as error:
+                delay = max(0.0, _retry_delay(error))
+                remaining = MAX_FLOOD_WAIT_SECONDS - waited_seconds
+                if flood_retries == MAX_FLOOD_RETRIES or delay > remaining:
+                    raise FloodControlExceeded(delay, waited_seconds) from error
+                await wait(delay)
+                waited_seconds += delay
+                if timing is not None:
+                    timing.flood_wait += delay
+                flood_retries += 1
+            except BadRequest as error:
+                if "message is not modified" in str(error).casefold():
+                    return None
                 raise
-            await wait(NETWORK_RETRY_DELAY_SECONDS)
-            network_retries += 1
+            except NetworkError as error:
+                retryable = isinstance(error, NetworkError) and not isinstance(
+                    error, BadRequest
+                )
+                if (
+                    not retry_on_network
+                    or not retryable
+                    or network_retries == MAX_NETWORK_RETRIES
+                ):
+                    raise
+                await wait(NETWORK_RETRY_DELAY_SECONDS)
+                network_retries += 1
+                if timing is not None:
+                    timing.network_retries += 1
 
 
 async def send_text(message: Any, text: str, **kwargs: Any) -> Any:

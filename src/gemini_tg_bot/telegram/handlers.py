@@ -69,6 +69,7 @@ from .sending import (
     send_text_or_busy,
 )
 from .streaming import stream_response
+from .timing import CURRENT_TIMING, RequestTiming
 
 if TYPE_CHECKING:
     from gemini_tg_bot.gemini.research import ResearchManager
@@ -255,6 +256,46 @@ class _StreamingMessageProxy:
         return reply
 
 
+class _UploadMessageProxy:
+    """Time getFile without changing the upload path's existing retry policy."""
+
+    def __init__(self, message: Any, timing: RequestTiming) -> None:
+        self._message = message
+        self._timing = timing
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._message, name)
+
+    @property
+    def photo(self) -> list[Any]:
+        return [
+            _UploadAttachmentProxy(photo, self._timing)
+            for photo in (getattr(self._message, "photo", None) or ())
+        ]
+
+    @property
+    def document(self) -> Any | None:
+        document = getattr(self._message, "document", None)
+        return (
+            _UploadAttachmentProxy(document, self._timing)
+            if document is not None
+            else None
+        )
+
+
+class _UploadAttachmentProxy:
+    def __init__(self, attachment: Any, timing: RequestTiming) -> None:
+        self._attachment = attachment
+        self._timing = timing
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._attachment, name)
+
+    async def get_file(self) -> Any:
+        with self._timing.telegram_call():
+            return await self._attachment.get_file()
+
+
 class EgressMeter:
     """Count media bytes relayed through the VM during the current month."""
 
@@ -311,6 +352,7 @@ class TelegramHandlers:
         media_handler: MediaHandler | None = None,
         now: Callable[[], datetime] | None = None,
         request_timeout_sec: int = 600,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._service = service
         self._sessions = sessions
@@ -326,6 +368,7 @@ class TelegramHandlers:
         self._awaiting_cookie_users: set[int] = set()
         self._now = now or (lambda: datetime.now(UTC))
         self._request_timeout_sec = request_timeout_sec
+        self._clock = clock or time.monotonic
 
     def bind_auth(self, auth: AuthMiddleware) -> None:
         """Bind the application-scoped authorization middleware."""
@@ -783,6 +826,7 @@ class TelegramHandlers:
             telegram_code=_telegram_language_code(update),
             is_group=_is_group_update(update),
             attachment_message=attachment_message,
+            command="img",
         )
 
     async def gemini(self, update: Update, context: CallbackContext) -> None:
@@ -819,6 +863,7 @@ class TelegramHandlers:
             is_group=is_group,
             new_private=not is_group,
             attachment_message=attachment_message,
+            command="gemini",
         )
 
     async def research_status(
@@ -1438,11 +1483,12 @@ class TelegramHandlers:
         group_parent_message_id: int | None = None,
         new_private: bool = False,
         attachment_message: Any | None = None,
+        command: str = "message",
     ) -> None:
         """Stream one prompt, optionally including one Telegram attachment."""
 
         user_id, chat_id, message = identity
-        started = time.monotonic()
+        started = self._clock()
         if is_group:
             language = LANGUAGE_ENGLISH
             temporary = False
@@ -1458,6 +1504,8 @@ class TelegramHandlers:
         ok = False
         error_kind: str | None = None
         stream_message = _StreamingMessageProxy(message, quote=is_group)
+        timing = RequestTiming(self._clock)
+        timing_token = CURRENT_TIMING.set(timing)
         try:
             self._ensure_service_accepting_requests()
             async with AsyncExitStack() as upload_stack:
@@ -1466,7 +1514,7 @@ class TelegramHandlers:
                     try:
                         upload = await upload_stack.enter_async_context(
                             self._media.prepare_upload(
-                                attachment_message,
+                                _UploadMessageProxy(attachment_message, timing),
                                 language=language,
                             )
                         )
@@ -1485,7 +1533,9 @@ class TelegramHandlers:
                             is_group=is_group,
                         )
 
+                slot_started = self._clock()
                 async with self._request_queue.request(user_id) as permit:
+                    timing.slot_wait = self._clock() - slot_started
                     async with self._generation_timeout():
                         restored = False
                         if is_group:
@@ -1515,6 +1565,8 @@ class TelegramHandlers:
                                         language=language,
                                         show_thoughts=show_thoughts,
                                         flood_wait=permit.wait_for_flood_control,
+                                        clock=self._clock,
+                                        timing=timing,
                                         **generate_kwargs,
                                         **thinking_kwargs,
                                     )
@@ -1623,14 +1675,26 @@ class TelegramHandlers:
                 language=language,
             )
         finally:
-            await self._record_usage(
-                user_id=user_id,
-                chat_id=chat_id,
-                model=usage_model,
-                ok=ok,
-                error_kind=error_kind,
-                latency_ms=round((time.monotonic() - started) * 1000),
-            )
+            total = self._clock() - started
+            try:
+                await self._record_usage(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    model=usage_model,
+                    ok=ok,
+                    error_kind=error_kind,
+                    latency_ms=round(total * 1000),
+                )
+                timing.log(
+                    chat="group" if is_group else "private",
+                    command=command,
+                    model=usage_model,
+                    level=level.value,
+                    outcome="ok" if ok else (error_kind or "unknown"),
+                    total=total,
+                )
+            finally:
+                CURRENT_TIMING.reset(timing_token)
 
     async def _persist_group_answers(
         self,
@@ -1696,7 +1760,7 @@ class TelegramHandlers:
             )
             if group_parent_message_id is None:
                 return
-        started = time.monotonic()
+        started = self._clock()
         if is_group:
             language = LANGUAGE_ENGLISH
             temporary = False
@@ -1716,14 +1780,18 @@ class TelegramHandlers:
         reply_target = (
             _StreamingMessageProxy(message, quote=True) if is_group else message
         )
+        timing = RequestTiming(self._clock)
+        timing_token = CURRENT_TIMING.set(timing)
 
         try:
             self._ensure_service_accepting_requests()
             async with self._media.prepare_upload(
-                message,
+                _UploadMessageProxy(message, timing),
                 language=language,
             ) as upload:
+                slot_started = self._clock()
                 async with self._request_queue.request(user_id):
+                    timing.slot_wait = self._clock() - slot_started
                     async with self._generation_timeout():
                         restored = False
                         if is_group:
@@ -1737,15 +1805,25 @@ class TelegramHandlers:
                             session = await self._sessions.get_or_create(chat_id)
 
                         async def send_upload() -> Any:
-                            with thinking_request(level) as thinking_kwargs:
-                                return await self._service.execute(
-                                    lambda _client: session.send_message(
+                            async def generate(_client: Any) -> Any:
+                                upstream_timing = timing.start_upstream()
+                                try:
+                                    output = await session.send_message(
                                         upload.prompt,
                                         files=upload.files,
                                         temporary=temporary,
                                         **thinking_kwargs,
                                     )
-                                )
+                                    timing.text_chars = len(output.text)
+                                    timing.thought_chars = len(
+                                        getattr(output, "thoughts", None) or ""
+                                    )
+                                    return output
+                                finally:
+                                    upstream_timing.finish()
+
+                            with thinking_request(level) as thinking_kwargs:
+                                return await self._service.execute(generate)
 
                         try:
                             output = await send_upload()
@@ -1819,14 +1897,26 @@ class TelegramHandlers:
                 language=language,
             )
         finally:
-            await self._record_usage(
-                user_id=user_id,
-                chat_id=chat_id,
-                model=usage_model,
-                ok=ok,
-                error_kind=error_kind,
-                latency_ms=round((time.monotonic() - started) * 1000),
-            )
+            total = self._clock() - started
+            try:
+                await self._record_usage(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    model=usage_model,
+                    ok=ok,
+                    error_kind=error_kind,
+                    latency_ms=round(total * 1000),
+                )
+                timing.log(
+                    chat="group" if is_group else "private",
+                    command="upload",
+                    model=usage_model,
+                    level=level.value,
+                    outcome="ok" if ok else (error_kind or "unknown"),
+                    total=total,
+                )
+            finally:
+                CURRENT_TIMING.reset(timing_token)
 
     async def _reply_output(
         self,
@@ -1877,24 +1967,14 @@ class TelegramHandlers:
         caption: str | None = None,
     ) -> None:
         if output is None:
-            LOGGER.debug("Gemini response text='' image_count=0")
+            LOGGER.debug("Gemini response image_count=0")
             return
 
         images = getattr(output, "images", ())
         LOGGER.debug(
-            "Gemini response text=%r image_count=%d",
-            output.text,
+            "Gemini response image_count=%d",
             len(images),
         )
-        for index, image in enumerate(images):
-            LOGGER.debug(
-                "Gemini response image index=%d url=%s title=%r alt=%r",
-                index,
-                image.url,
-                image.title,
-                image.alt,
-            )
-
         if images:
             await self._media.send_output_images(message, output, caption=caption)
 

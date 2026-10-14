@@ -603,6 +603,7 @@ async def test_unknown_upload_size_is_rejected_before_download() -> None:
 async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Image delivery must retain diagnostics without leaking response or image content."""
     image = WebImage(
         url="https://example.test/generated.png",
         title="Generated",
@@ -680,10 +681,11 @@ async def test_handler_cleans_artifact_only_text_sends_image_and_logs_metadata(
     assert delivery_order == ["delete-placeholder", "send-photo"]
     assert "_551" not in str(placeholder.edit_text.await_args_list)
     message.reply_photo.assert_awaited_once_with(image.url, caption=None)
-    assert "text='_551' image_count=1" in caplog.text
-    assert image.url in caplog.text
-    assert "title='Generated'" in caplog.text
-    assert "alt='A generated test image'" in caplog.text
+    assert "image_count=1" in caplog.text
+    assert output.text not in caplog.text
+    assert image.url not in caplog.text
+    assert image.title not in caplog.text
+    assert image.alt not in caplog.text
 
 
 async def test_handler_passes_upload_as_files_and_cleans_it_after_send(

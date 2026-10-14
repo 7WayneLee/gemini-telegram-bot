@@ -470,6 +470,29 @@ class GeminiService:
         self._account_status = self._client_account_status(client)
         if self._account_status is not AccountStatus.AVAILABLE:
             raise AccountStatusError(self._account_status)
+        self._log_model_registry(client)
+
+    @staticmethod
+    def _log_model_registry(client: GeminiClient) -> None:
+        """Report the dynamic model registry without affecting client lifecycle."""
+
+        try:
+            models = client.list_models()
+            registry = (
+                "unavailable"
+                if models is None
+                else ", ".join(
+                    f"{model.model_name}({model.display_name}, "
+                    f"number={model.model_number}, "
+                    f"capacity={model.capacity}/{model.capacity_field})"
+                    for model in models
+                )
+            )
+        except Exception:
+            # Diagnostics must not turn a successful initialization into a
+            # failure; exception strings can contain credential material.
+            registry = "unavailable"
+        LOGGER.info("Model registry: %s", registry)
 
     async def _record_lifecycle_failure(
         self,
