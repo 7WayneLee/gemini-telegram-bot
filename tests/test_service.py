@@ -673,10 +673,9 @@ async def test_unauthenticated_startup_starts_polling_and_pages_once(
     notifier = AsyncMock()
     service = GeminiService(settings, notifier)
     sessions = SimpleNamespace(restore_all=AsyncMock())
-    research = SimpleNamespace(restore_running=AsyncMock())
     updater = SimpleNamespace(start_polling=AsyncMock())
 
-    await _initialize_and_start_polling(service, sessions, research, updater)
+    await _initialize_and_start_polling(service, sessions, updater)
 
     assert service.state is ServiceState.DEGRADED
     assert service.health.degraded_reason is DegradedReason.AUTH

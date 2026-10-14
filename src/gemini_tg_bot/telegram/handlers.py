@@ -72,7 +72,6 @@ from .streaming import stream_response
 from .timing import CURRENT_TIMING, RequestTiming
 
 if TYPE_CHECKING:
-    from gemini_tg_bot.gemini.research import ResearchManager
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
     from gemini_tg_bot.storage.db import Database
 
@@ -83,32 +82,26 @@ CALLBACK_DATA_LIMIT = 64
 ACCESS_NAME_LOOKUP_LIMIT = 50
 MODEL_CALLBACK_PREFIX = "model:"
 MODEL_LEVEL_CALLBACK_PREFIX = "mlvl:"
-GEM_CALLBACK_PREFIX = "gem:"
 LANGUAGE_CALLBACK_PREFIX = "lang:"
 
 HELP_COMMAND = "help"
 
 _AVAILABLE_PUBLIC_COMMAND_KEYS = (
     ("start", "command.start.description"),
-    (HELP_COMMAND, "command.help.description"),
     ("gemini", "command.gemini.description"),
     ("new", "command.new.description"),
     ("model", "command.model.description"),
-    ("gem", "command.gem.description"),
     ("temp", "command.temp.description"),
     ("language", "command.language.description"),
     ("img", "command.img.description"),
-    ("research", "command.research.description"),
-    ("research_status", "command.research_status.description"),
     ("status", "command.status.description"),
 )
 
-# Available command sets drive handler access and help text.  Their derived menu
-# sets hide the /help alias without making that established command unavailable.
+# Listed commands drive menus and help text. The /help alias remains available
+# through its handler and the group command gate.
 PUBLIC_MENU_COMMANDS = frozenset(
     command
     for command, _description_key in _AVAILABLE_PUBLIC_COMMAND_KEYS
-    if command != HELP_COMMAND
 )
 GROUP_COMMANDS = frozenset({"start", HELP_COMMAND, "img", "gemini"})
 GROUP_MENU_COMMANDS = GROUP_COMMANDS - {HELP_COMMAND}
@@ -162,7 +155,6 @@ PUBLIC_BOT_COMMANDS = _commands_for_language(DEFAULT_LANGUAGE)
 HELP_TEXT = _help_text(DEFAULT_LANGUAGE)
 
 MODEL_LIST_UNAVAILABLE = translate("model.list_unavailable", DEFAULT_LANGUAGE)
-GEM_LIST_UNAVAILABLE = translate("gem.list_unavailable", DEFAULT_LANGUAGE)
 SERVICE_UNAVAILABLE = translate("service.unavailable", DEFAULT_LANGUAGE)
 GENERIC_FAILURE = translate("generic.failure", DEFAULT_LANGUAGE)
 ADMIN_ONLY = translate("admin.only", DEFAULT_LANGUAGE)
@@ -187,8 +179,6 @@ def _looks_like_credentials(text: str | None) -> bool:
     """Report whether a message carries Gemini credential material."""
 
     return bool(text) and _CREDENTIAL_VALUE_RE.search(text) is not None
-RESEARCH_USAGE = translate("research.usage", DEFAULT_LANGUAGE)
-RESEARCH_UNAVAILABLE = translate("research.unavailable", DEFAULT_LANGUAGE)
 IMAGE_USAGE = translate("image.usage", DEFAULT_LANGUAGE)
 IMAGE_GENERATION_PREFIX = (
     "Generate an original AI image based on the following request. "
@@ -348,7 +338,6 @@ class TelegramHandlers:
         cookie_path: Path,
         secure_1psid: SecretStr,
         database: Database | None = None,
-        research: ResearchManager | None = None,
         media_handler: MediaHandler | None = None,
         now: Callable[[], datetime] | None = None,
         request_timeout_sec: int = 600,
@@ -362,7 +351,6 @@ class TelegramHandlers:
         self._cookie_path = cookie_path
         self._secure_1psid = secure_1psid
         self._database = database
-        self._research = research
         self._media = media_handler or MediaHandler(egress_meter=egress_meter)
         self._auth: AuthMiddleware | None = None
         self._awaiting_cookie_users: set[int] = set()
@@ -526,76 +514,6 @@ class TelegramHandlers:
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
-    async def gem(self, update: Update, context: CallbackContext) -> None:
-        """Dynamically list the account's visible Gems."""
-
-        del context
-        identity = await self._require_private_command(update)
-        if identity is None:
-            return
-        user_id, chat_id, message = identity
-        language = await self._chat_language(update, chat_id)
-
-        try:
-            self._ensure_service_accepting_requests()
-            async with self._request_queue.request(user_id):
-                gem_jar = await self._service.execute(
-                    lambda client: client.fetch_gems(include_hidden=False)
-                )
-        except RateLimitExceeded as error:
-            await _reply_rate_limited(message, error, language)
-            return
-        except QueueAcquireTimeout:
-            await send_text_or_busy(
-                message,
-                translate("generic.service_busy", language),
-                language=language,
-            )
-            return
-        except ServiceUnavailableError as error:
-            await send_text_or_busy(
-                message,
-                _service_unavailable_message(error, language),
-                language=language,
-            )
-            return
-        except Exception as error:
-            _log_handler_error("gem list", error)
-            await send_text_or_busy(
-                message,
-                translate("gem.list_unavailable", language),
-                language=language,
-            )
-            return
-
-        buttons: list[list[InlineKeyboardButton]] = []
-        if gem_jar is not None:
-            for gem in gem_jar.values():
-                callback_data = f"{GEM_CALLBACK_PREFIX}{gem.id}"
-                if not _valid_callback_data(callback_data):
-                    LOGGER.warning(
-                        "Skipping Gem whose Telegram callback data exceeds %d bytes",
-                        CALLBACK_DATA_LIMIT,
-                    )
-                    continue
-                buttons.append(
-                    [InlineKeyboardButton(gem.name, callback_data=callback_data)]
-                )
-
-        if not buttons:
-            await send_text_or_busy(
-                message,
-                translate("gem.list_unavailable", language),
-                language=language,
-            )
-            return
-        await send_text_or_busy(
-            message,
-            translate("gem.choose", language),
-            language=language,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-
     async def temp(self, update: Update, context: CallbackContext) -> None:
         """Toggle the persisted temporary-conversation setting."""
 
@@ -747,53 +665,6 @@ class TelegramHandlers:
             language=language,
         )
 
-    async def research(self, update: Update, context: CallbackContext) -> None:
-        """Submit Deep Research work and return its task id immediately."""
-
-        identity = await self._require_private_command(update)
-        if identity is None:
-            return
-        _, chat_id, message = identity
-        language = await self._chat_language(update, chat_id)
-        prompt = _command_prompt(context)
-        if prompt is None:
-            await send_text_or_busy(
-                message,
-                translate("research.usage", language),
-                language=language,
-            )
-            return
-        if self._research is None:
-            await send_text_or_busy(
-                message,
-                translate("research.unavailable", language),
-                language=language,
-            )
-            return
-
-        try:
-            task_id = await self._research.submit(chat_id, prompt)
-        except ValueError:
-            await send_text_or_busy(
-                message,
-                translate("research.usage", language),
-                language=language,
-            )
-            return
-        except Exception as error:
-            _log_handler_error("research submission", error)
-            await send_text_or_busy(
-                message,
-                translate("research.unavailable", language),
-                language=language,
-            )
-            return
-        await send_text_or_busy(
-            message,
-            translate("research.submitted", language, task_id=task_id),
-            language=language,
-        )
-
     async def img(self, update: Update, context: CallbackContext) -> None:
         """Generate an image through the existing streaming media path."""
 
@@ -865,57 +736,6 @@ class TelegramHandlers:
             attachment_message=attachment_message,
             command="gemini",
         )
-
-    async def research_status(
-        self,
-        update: Update,
-        context: CallbackContext,
-    ) -> None:
-        """List persisted Deep Research task states for the current chat."""
-
-        del context
-        identity = await self._require_private_command(update)
-        if identity is None:
-            return
-        _, chat_id, message = identity
-        language = await self._chat_language(update, chat_id)
-        if self._research is None:
-            await send_text_or_busy(
-                message,
-                translate("research.unavailable", language),
-                language=language,
-            )
-            return
-
-        try:
-            tasks = await self._research.status(chat_id)
-        except Exception as error:
-            _log_handler_error("research status", error)
-            await send_text_or_busy(
-                message,
-                translate("research.unavailable", language),
-                language=language,
-            )
-            return
-        if not tasks:
-            await send_text_or_busy(
-                message,
-                translate("research.none", language),
-                language=language,
-            )
-            return
-
-        lines = [translate("research.status_heading", language)]
-        lines.extend(
-            translate(
-                "research.status_line",
-                language,
-                task_id=task.task_id,
-                status=task.status.value,
-            )
-            for task in tasks
-        )
-        await send_text_or_busy(message, "\n".join(lines), language=language)
 
     async def admin_command(
         self,
@@ -1366,14 +1186,6 @@ class TelegramHandlers:
                 user_id=user.id,
                 chat_id=chat.id,
                 model_name=data[len(MODEL_CALLBACK_PREFIX) :],
-                language=language,
-            )
-        elif data.startswith(GEM_CALLBACK_PREFIX):
-            await self._select_gem(
-                query=query,
-                user_id=user.id,
-                chat_id=chat.id,
-                gem_id=data[len(GEM_CALLBACK_PREFIX) :],
                 language=language,
             )
         elif data.startswith(LANGUAGE_CALLBACK_PREFIX):
@@ -2082,74 +1894,6 @@ class TelegramHandlers:
             reply_markup=InlineKeyboardMarkup([buttons]),
         )
 
-    async def _select_gem(
-        self,
-        *,
-        query: Any,
-        user_id: int,
-        chat_id: int,
-        gem_id: str,
-        language: str,
-    ) -> None:
-        if not gem_id:
-            await edit_message_text_or_busy(
-                query,
-                translate("gem.invalid", language),
-                language=language,
-            )
-            return
-
-        try:
-            self._ensure_service_accepting_requests()
-            async with self._request_queue.request(user_id):
-                gem_jar = await self._service.execute(
-                    lambda client: client.fetch_gems(include_hidden=False)
-                )
-        except RateLimitExceeded as error:
-            await edit_message_text_or_busy(
-                query,
-                _rate_limit_message(error, language),
-                language=language,
-            )
-            return
-        except QueueAcquireTimeout:
-            await edit_message_text_or_busy(
-                query,
-                translate("generic.service_busy", language),
-                language=language,
-            )
-            return
-        except ServiceUnavailableError as error:
-            await edit_message_text_or_busy(
-                query,
-                _service_unavailable_message(error, language),
-                language=language,
-            )
-            return
-        except Exception as error:
-            _log_handler_error("gem selection", error)
-            await edit_message_text_or_busy(
-                query,
-                translate("gem.list_unavailable", language),
-                language=language,
-            )
-            return
-
-        selected = None if gem_jar is None else gem_jar.get(id=gem_id)
-        if selected is None:
-            await edit_message_text_or_busy(
-                query,
-                translate("gem.unavailable", language),
-                language=language,
-            )
-            return
-        await self._sessions.set_gem(chat_id, selected.id)
-        await edit_message_text_or_busy(
-            query,
-            translate("gem.selected", language, gem=selected.name),
-            language=language,
-        )
-
     async def _chat_language(self, update: Update, chat_id: int) -> str:
         if _is_group_update(update):
             return LANGUAGE_ENGLISH
@@ -2479,7 +2223,6 @@ def register_handlers(
     )
     application.add_handler(CommandHandler("new", handlers.new), group=1)
     application.add_handler(CommandHandler("model", handlers.model), group=1)
-    application.add_handler(CommandHandler("gem", handlers.gem), group=1)
     application.add_handler(CommandHandler("temp", handlers.temp), group=1)
     application.add_handler(
         CommandHandler("language", handlers.language),
@@ -2488,14 +2231,6 @@ def register_handlers(
     application.add_handler(CommandHandler("status", handlers.status), group=1)
     application.add_handler(CommandHandler("img", handlers.img), group=1)
     application.add_handler(CommandHandler("gemini", handlers.gemini), group=1)
-    application.add_handler(
-        CommandHandler("research", handlers.research),
-        group=1,
-    )
-    application.add_handler(
-        CommandHandler("research_status", handlers.research_status),
-        group=1,
-    )
     application.add_handler(
         CommandHandler(
             [
@@ -2515,7 +2250,7 @@ def register_handlers(
         CallbackQueryHandler(
             handlers.callback,
             pattern=(
-                rf"^(?:{MODEL_CALLBACK_PREFIX}|{MODEL_LEVEL_CALLBACK_PREFIX}|{GEM_CALLBACK_PREFIX}|"
+                rf"^(?:{MODEL_CALLBACK_PREFIX}|{MODEL_LEVEL_CALLBACK_PREFIX}|"
                 rf"{LANGUAGE_CALLBACK_PREFIX})"
             ),
         )
@@ -2536,6 +2271,20 @@ async def register_command_menu(
     who choose Chinese through ``/language`` instead receive the existing
     chat-scoped menu, which does not require a language code.
     """
+
+    # Older versions published an English language-specific default menu.
+    # Telegram prefers it over the current language-neutral default menu.
+    try:
+        await call_telegram(
+            application.bot.delete_my_commands,
+            language_code=LANGUAGE_ENGLISH,
+        )
+    except Exception as error:
+        LOGGER.warning(
+            "Unable to delete Telegram command menu for %s (%s)",
+            LANGUAGE_ENGLISH,
+            type(error).__name__,
+        )
 
     try:
         await call_telegram(

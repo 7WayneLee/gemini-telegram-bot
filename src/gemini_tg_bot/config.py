@@ -214,11 +214,6 @@ class Settings(BaseSettings):
         validation_alias="REQUEST_TIMEOUT_SEC",
         gt=0,
     )
-    research_timeout_sec: int = Field(
-        default=900,
-        validation_alias="RESEARCH_TIMEOUT_SEC",
-        gt=0,
-    )
     log_level: LogLevel = Field(
         default="INFO",
         validation_alias="LOG_LEVEL",

@@ -516,6 +516,12 @@ async def test_setcookie_reload_waits_for_all_active_requests(harness_factory, m
         await service.close()
 
 
+def test_removed_research_status_is_not_lock_free() -> None:
+    """Removing the command must also remove its special ordering exemption."""
+
+    assert "research_status" not in LOCK_FREE_COMMANDS
+
+
 @pytest.mark.parametrize("command", sorted(LOCK_FREE_COMMANDS))
 async def test_lock_free_command_names_and_mentions(command) -> None:
     """Every specified read/admin command must bypass a held chat lock with bot suffixes."""

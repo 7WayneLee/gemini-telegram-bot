@@ -5,6 +5,7 @@ import ast
 import inspect
 import os
 from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -39,12 +40,12 @@ from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import (
     AdminNotificationDAO,
+    ChatSessionDAO,
     UsageLog,
     UsageLogDAO,
 )
 from gemini_tg_bot.telegram.handlers import (
     CALLBACK_DATA_LIMIT,
-    GEM_LIST_UNAVAILABLE,
     IMAGE_GENERATION_PREFIX,
     IMAGE_USAGE,
     MODEL_LIST_UNAVAILABLE,
@@ -89,7 +90,6 @@ except ModuleNotFoundError:
         ) -> None: ...
         async def reset(self, chat_id: int) -> None: ...
         async def set_model(self, chat_id: int, model: str | None) -> None: ...
-        async def set_gem(self, chat_id: int, gem_id: str | None) -> None: ...
         async def set_temporary(self, chat_id: int, temporary: bool) -> None: ...
         async def set_model_and_thinking_level(
             self, chat_id: int, model: str | None, level: ThinkingLevel
@@ -310,7 +310,6 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
         usage_dao: UsageLogDAO | AsyncMock | None = None,
         egress_meter: EgressMeter | None = None,
         cookie_path: Path | None = None,
-        research: AsyncMock | None = None,
         request_queue: RequestQueue | None = None,
         media_handler: MediaHandler | None = None,
     ) -> tuple[TelegramHandlers, MagicMock]:
@@ -327,7 +326,6 @@ def handlers_factory(tmp_path: Path, registry: AsyncMock):
             egress_meter=egress_meter or EgressMeter(now=lambda: NOW),
             cookie_path=cookie_path or tmp_path,
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
-            research=research,  # type: ignore[arg-type]
             media_handler=media_handler,
             now=lambda: NOW,
         )
@@ -362,13 +360,10 @@ async def test_help_and_new_commands(
     "command",
     [
         "model",
-        "gem",
         "temp",
         "language",
         "new",
         "status",
-        "research",
-        "research_status",
     ],
 )
 async def test_private_only_commands_are_inert_in_groups(
@@ -427,7 +422,7 @@ async def test_group_help_and_image_commands_remain_available(
 
     for help_message in (start_update, help_update):
         help_text = help_message.effective_message.reply_text.await_args.args[0]
-        assert _help_commands(help_text) == GROUP_COMMANDS
+        assert _help_commands(help_text) == GROUP_MENU_COMMANDS
     image_update.effective_message.reply_text.assert_awaited_once_with(
         translate("image.usage", LANGUAGE_ENGLISH)
     )
@@ -451,9 +446,9 @@ def test_help_lists_exact_commands_for_chat_scope(
 
     help_text = _help_text(language, group_only=group_only)
     expected = (
-        GROUP_COMMANDS
+        GROUP_MENU_COMMANDS
         if group_only
-        else PUBLIC_MENU_COMMANDS | {HELP_COMMAND}
+        else PUBLIC_MENU_COMMANDS
     )
 
     assert _help_commands(help_text) == expected
@@ -499,16 +494,12 @@ def test_group_help_explains_how_to_continue_a_conversation(
             LANGUAGE_ENGLISH,
             "Available commands:\n"
             "/start — Show usage instructions\n"
-            "/help — Show usage instructions\n"
             "/gemini — Ask Gemini in a new conversation\n"
             "/new — Start a new conversation\n"
             "/model — Choose a Gemini model\n"
-            "/gem — Choose a Gem\n"
             "/temp — Toggle temporary chat mode\n"
             "/language — Choose interface language\n"
             "/img — Generate an image\n"
-            "/research — Submit a Deep Research task\n"
-            "/research_status — View Deep Research task status\n"
             "/status — View current status\n\n"
             "Send text directly to continue the current conversation.",
         ),
@@ -516,26 +507,22 @@ def test_group_help_explains_how_to_continue_a_conversation(
             LANGUAGE_CHINESE,
             "可用指令：\n"
             "/start — 顯示使用說明\n"
-            "/help — 顯示使用說明\n"
             "/gemini — 以新對話詢問 Gemini\n"
             "/new — 開始新的對話\n"
             "/model — 選擇 Gemini 模型\n"
-            "/gem — 選擇 Gem\n"
             "/temp — 切換暫時對話模式\n"
             "/language — 選擇介面語言\n"
             "/img — 生成圖片\n"
-            "/research — 提交 Deep Research 任務\n"
-            "/research_status — 查看 Deep Research 任務狀態\n"
             "/status — 查看目前狀態\n\n"
             "直接傳送文字即可延續目前對話。",
         ),
     ],
 )
-def test_private_help_output_remains_unchanged(
+def test_private_help_preserves_remaining_command_text(
     language: str,
     expected: str,
 ) -> None:
-    """Group-specific guidance must not alter established private-chat help."""
+    """Removing commands must preserve all remaining private-chat help copy."""
 
     assert _help_text(language) == expected
 
@@ -550,7 +537,7 @@ def test_group_help_reads_group_commands_at_render_time(
 
     assert _help_commands(
         _help_text(LANGUAGE_ENGLISH, group_only=True)
-    ) == changed_commands
+    ) == changed_commands - {HELP_COMMAND}
 
 
 async def test_gemini_without_question_returns_quoted_group_usage(
@@ -702,7 +689,9 @@ async def test_group_img_uses_fixed_fresh_sessions_and_records_reply_threads(
         )
         handlers._sessions = registry
         await registry.set_model(-1001, "saved-private-model")
-        await registry.set_gem(-1001, "saved-private-gem")
+        dao = ChatSessionDAO(database.connection)
+        saved = await dao.get(-1001)
+        await dao.upsert(replace(saved, gem_id="saved-private-gem"))
         await registry.set_temporary(-1001, True)
         await registry.set_model_and_thinking_level(-1001, (await registry.get_state(-1001)).model, ThinkingLevel.HIGH)
         await registry.set_language(-1001, LANGUAGE_CHINESE)
@@ -1200,7 +1189,7 @@ async def test_language_callback_persists_selection_and_chat_menu(
 
     handlers, _ = handlers_factory()
     update = _callback_update(f"lang:{language}")
-    bot = SimpleNamespace(set_my_commands=AsyncMock())
+    bot = SimpleNamespace(delete_my_commands=AsyncMock(), set_my_commands=AsyncMock())
 
     await handlers.callback(update, SimpleNamespace(bot=bot))
 
@@ -1317,83 +1306,6 @@ async def test_temp_toggles_from_registry_state(
     ]
 
 
-async def test_research_submits_topic_and_immediately_replies_with_task_id(
-    handlers_factory,
-) -> None:
-    research = AsyncMock()
-    research.submit.return_value = "research-task-123"
-    handlers, _ = handlers_factory(research=research)
-    update = _update(text="/research orbital solar power")
-
-    await handlers.research(
-        update,
-        SimpleNamespace(args=["orbital", "solar", "power"]),
-    )
-
-    research.submit.assert_awaited_once_with(202, "orbital solar power")
-    update.effective_message.reply_text.assert_awaited_once_with(
-        translate(
-            "research.submitted",
-            LANGUAGE_ENGLISH,
-            task_id="research-task-123",
-        )
-    )
-
-
-async def test_research_rejects_an_empty_topic(handlers_factory) -> None:
-    research = AsyncMock()
-    handlers, _ = handlers_factory(research=research)
-    update = _update(text="/research")
-
-    await handlers.research(update, SimpleNamespace(args=[]))
-
-    research.submit.assert_not_awaited()
-    update.effective_message.reply_text.assert_awaited_once_with(
-        translate("research.usage", LANGUAGE_ENGLISH)
-    )
-
-
-async def test_research_status_lists_only_manager_results_for_chat(
-    handlers_factory,
-) -> None:
-    research = AsyncMock()
-    research.status.return_value = [
-        SimpleNamespace(
-            task_id="research-task-123",
-            status=SimpleNamespace(value="running"),
-        ),
-        SimpleNamespace(
-            task_id="research-task-456",
-            status=SimpleNamespace(value="done"),
-        ),
-    ]
-    handlers, _ = handlers_factory(research=research)
-    update = _update(text="/research_status")
-
-    await handlers.research_status(update, SimpleNamespace())
-
-    research.status.assert_awaited_once_with(202)
-    update.effective_message.reply_text.assert_awaited_once_with(
-        "\n".join(
-            (
-                translate("research.status_heading", LANGUAGE_ENGLISH),
-                translate(
-                    "research.status_line",
-                    LANGUAGE_ENGLISH,
-                    task_id="research-task-123",
-                    status="running",
-                ),
-                translate(
-                    "research.status_line",
-                    LANGUAGE_ENGLISH,
-                    task_id="research-task-456",
-                    status="done",
-                ),
-            )
-        )
-    )
-
-
 async def test_img_explicitly_requests_generation_and_uses_media_handler(
     handlers_factory,
     registry: AsyncMock,
@@ -1461,7 +1373,6 @@ async def test_img_explicitly_requests_generation_and_uses_media_handler(
     registry.get_or_create.assert_awaited_once_with(202)
     registry.start_group_session.assert_not_awaited()
     registry.set_model.assert_not_awaited()
-    registry.set_gem.assert_not_awaited()
     registry.persist.assert_awaited_once_with(202, session)
 
 
@@ -2374,54 +2285,6 @@ async def test_model_callback_revalidates_and_resolves_stable_name(
     )
 
 
-async def test_gem_lists_and_selects_from_fresh_gem_jar(
-    handlers_factory,
-    registry: AsyncMock,
-) -> None:
-    gem = SimpleNamespace(id="gem-id", name="My Gem")
-    gem_jar = MagicMock()
-    gem_jar.values.return_value = [gem]
-    gem_jar.get.return_value = gem
-    client = MagicMock()
-    client.fetch_gems = AsyncMock(return_value=gem_jar)
-    handlers, _ = handlers_factory(client)
-    command_update = _update()
-
-    await handlers.gem(command_update, SimpleNamespace())
-
-    client.fetch_gems.assert_awaited_once_with(include_hidden=False)
-    keyboard = command_update.effective_message.reply_text.await_args.kwargs[
-        "reply_markup"
-    ].inline_keyboard
-    assert keyboard[0][0].text == "My Gem"
-    assert keyboard[0][0].callback_data == "gem:gem-id"
-
-    callback_update = _callback_update("gem:gem-id")
-    await handlers.callback(callback_update, SimpleNamespace())
-
-    assert client.fetch_gems.await_count == 2
-    gem_jar.get.assert_called_once_with(id="gem-id")
-    registry.set_gem.assert_awaited_once_with(202, "gem-id")
-    assert "My Gem" in (
-        callback_update.callback_query.edit_message_text.await_args.args[0]
-    )
-
-
-async def test_gem_handles_empty_jar(handlers_factory) -> None:
-    gem_jar = MagicMock()
-    gem_jar.values.return_value = []
-    client = MagicMock()
-    client.fetch_gems = AsyncMock(return_value=gem_jar)
-    handlers, _ = handlers_factory(client)
-    update = _update()
-
-    await handlers.gem(update, SimpleNamespace())
-
-    update.effective_message.reply_text.assert_awaited_once_with(
-        GEM_LIST_UNAVAILABLE
-    )
-
-
 async def test_text_uses_current_session_service_renders_and_persists_usage(
     handlers_factory,
     registry: AsyncMock,
@@ -2994,8 +2857,8 @@ def test_registration_places_auth_in_first_group(
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
     assert calls[1].kwargs == {"group": 0}
-    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:14])
-    assert len(calls) == 16
+    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:11])
+    assert len(calls) == 13
     registered_commands = {
         command
         for registered in calls
@@ -3005,7 +2868,8 @@ def test_registration_places_auth_in_first_group(
     assert {"start", "help"} <= registered_commands
     assert "lang" not in registered_commands
     assert "think" not in registered_commands
-    assert {"img", "research", "research_status"} <= registered_commands
+    assert "img" in registered_commands
+    assert {"gem", "research", "research_status"}.isdisjoint(registered_commands)
     assert {"allow_chat", "deny_chat", "access"} <= registered_commands
 
 
@@ -3013,7 +2877,7 @@ async def test_startup_registers_public_command_menu() -> None:
     """Both Telegram menus must hide /help while preserving the /start entry."""
 
     application = SimpleNamespace(
-        bot=SimpleNamespace(set_my_commands=AsyncMock()),
+        bot=SimpleNamespace(delete_my_commands=AsyncMock(), set_my_commands=AsyncMock()),
         start=AsyncMock(),
     )
 
@@ -3033,12 +2897,9 @@ async def test_startup_registers_public_command_menu() -> None:
         "gemini",
         "new",
         "model",
-        "gem",
         "temp",
         "language",
         "img",
-        "research",
-        "research_status",
         "status",
     }
     assert "help" not in registered_commands
@@ -3099,7 +2960,7 @@ async def test_startup_never_registers_zh_hant_command_menu(caplog) -> None:
 
     set_my_commands = AsyncMock(side_effect=reject_invalid_language_code)
     application = SimpleNamespace(
-        bot=SimpleNamespace(set_my_commands=set_my_commands),
+        bot=SimpleNamespace(delete_my_commands=AsyncMock(), set_my_commands=set_my_commands),
         start=AsyncMock(),
     )
 
@@ -3119,19 +2980,16 @@ async def test_startup_sequence_restores_state_before_polling() -> None:
         state=ServiceState.DEGRADED,
     )
     sessions = SimpleNamespace(restore_all=AsyncMock())
-    research = SimpleNamespace(restore_running=AsyncMock())
     updater = SimpleNamespace(start_polling=AsyncMock())
 
     await _initialize_and_start_polling(
         service,
         sessions,
-        research,
         updater,
     )
 
     service.init.assert_awaited_once_with()
     sessions.restore_all.assert_awaited_once_with()
-    research.restore_running.assert_awaited_once_with()
     updater.start_polling.assert_awaited_once()
 
 
@@ -3140,6 +2998,7 @@ async def test_command_menu_failure_does_not_prevent_startup(caplog) -> None:
 
     application = SimpleNamespace(
         bot=SimpleNamespace(
+            delete_my_commands=AsyncMock(),
             set_my_commands=AsyncMock(side_effect=RuntimeError("offline"))
         ),
         start=AsyncMock(),
@@ -3160,6 +3019,7 @@ async def test_group_command_menu_failure_only_logs_a_warning(caplog) -> None:
 
     application = SimpleNamespace(
         bot=SimpleNamespace(
+            delete_my_commands=AsyncMock(),
             set_my_commands=AsyncMock(
                 side_effect=[None, RuntimeError("group menu offline")]
             )
@@ -3475,7 +3335,7 @@ async def test_startup_republishes_stored_language_menus_best_effort(tmp_path, h
             await dao.upsert(ChatSession(chat_id=chat_id, language=language, updated_at="test"))
         handlers, _ = handlers_factory()
         handlers._database = database
-        bot = SimpleNamespace(set_my_commands=AsyncMock(
+        bot = SimpleNamespace(delete_my_commands=AsyncMock(), set_my_commands=AsyncMock(
             side_effect=[None, None, RuntimeError("FAKE_TELEGRAM_ERROR") if fails else None, None]
         ))
         application = SimpleNamespace(bot=bot, start=AsyncMock())

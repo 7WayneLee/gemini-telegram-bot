@@ -1,17 +1,14 @@
 """Offline regression tests for startup with unavailable Gemini credentials."""
 
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from pydantic import BaseModel, SecretStr
+from pydantic import SecretStr
 from telegram import Update
 
 from gemini_tg_bot.__main__ import _initialize_and_start_polling, _start_application
-from gemini_tg_bot.gemini import research as research_module
-from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import (
     DegradedReason,
     ServiceState,
@@ -158,58 +155,34 @@ async def test_recovery_lazily_rebuilds_stored_context(tmp_path: Path):
         )
 
 
-class FakePlan(BaseModel):
-    research_id: str
-    cid: str
-
-
 async def test_degraded_startup_reaches_polling_and_republishes_menus(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ):
-    """Stored chats and research must allow polling and menus for cookie recovery."""
+    """Stored chats must allow polling and menus for cookie recovery."""
 
-    monkeypatch.setattr(research_module, "DeepResearchPlan", FakePlan)
     service = FakeService()
     updater = SimpleNamespace(start_polling=AsyncMock())
     application = SimpleNamespace(
-        bot=SimpleNamespace(set_my_commands=AsyncMock()), start=AsyncMock(),
+        bot=SimpleNamespace(delete_my_commands=AsyncMock(), set_my_commands=AsyncMock()), start=AsyncMock(),
     )
     async with Database(tmp_path / "bot.sqlite3") as database:
         await seed_sessions(database)
         sessions = ChatSessionRegistry(service, database)
-        research = ResearchManager(service, database, timeout_sec=60)
-        await research._ensure_schema()
-        timestamp = datetime.now(UTC).isoformat()
-        await database.connection.execute(
-            """INSERT INTO research_tasks
-               (task_id, chat_id, prompt, status, created_at, updated_at, plan_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                "FAKE_TASK", 101, "FAKE_TOPIC", "running", timestamp, timestamp,
-                FakePlan(research_id="FAKE_RESEARCH", cid="FAKE_CID").model_dump_json(),
-            ),
-        )
-        await database.connection.commit()
-        research.restore_running = AsyncMock(wraps=research.restore_running)
         handlers = TelegramHandlers(
             service=service, sessions=sessions,
             request_queue=RequestQueue(max_concurrency=1, user_rate_limit_per_min=1),
             usage_dao=None, egress_meter=EgressMeter(),
             cookie_path=tmp_path / "FAKE_COOKIE_CACHE",
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
-            database=database, research=research,
+            database=database,
         )
-        try:
-            await _initialize_and_start_polling(service, sessions, research, updater)
-            await _start_application(application, handlers=handlers)
+        await _initialize_and_start_polling(service, sessions, updater)
+        await _start_application(application, handlers=handlers)
 
-            service.init.assert_awaited_once_with()
-            research.restore_running.assert_awaited_once_with()
-            updater.start_polling.assert_awaited_once_with(allowed_updates=Update.ALL_TYPES)
-            application.start.assert_awaited_once_with()
-            scoped_calls = application.bot.set_my_commands.await_args_list[2:]
-            assert [item.kwargs["scope"].chat_id for item in scoped_calls] == [101, 102]
-            assert sessions._sessions == {}
-            assert service.client_reads == 0
-        finally:
-            await research.close()
+        service.init.assert_awaited_once_with()
+        updater.start_polling.assert_awaited_once_with(allowed_updates=Update.ALL_TYPES)
+        application.start.assert_awaited_once_with()
+        scoped_calls = application.bot.set_my_commands.await_args_list[2:]
+        assert [item.kwargs["scope"].chat_id for item in scoped_calls] == [101, 102]
+        assert sessions._sessions == {}
+        assert service.client_reads == 0

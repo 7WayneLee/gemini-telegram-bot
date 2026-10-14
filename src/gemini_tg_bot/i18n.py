@@ -64,10 +64,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Show usage instructions",
         LANGUAGE_CHINESE: "顯示使用說明",
     },
-    "command.help.description": {
-        LANGUAGE_ENGLISH: "Show usage instructions",
-        LANGUAGE_CHINESE: "顯示使用說明",
-    },
     "command.new.description": {
         LANGUAGE_ENGLISH: "Start a new conversation",
         LANGUAGE_CHINESE: "開始新的對話",
@@ -75,10 +71,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "command.model.description": {
         LANGUAGE_ENGLISH: "Choose a Gemini model",
         LANGUAGE_CHINESE: "選擇 Gemini 模型",
-    },
-    "command.gem.description": {
-        LANGUAGE_ENGLISH: "Choose a Gem",
-        LANGUAGE_CHINESE: "選擇 Gem",
     },
     "command.temp.description": {
         LANGUAGE_ENGLISH: "Toggle temporary chat mode",
@@ -95,14 +87,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "command.gemini.description": {
         LANGUAGE_ENGLISH: "Ask Gemini in a new conversation",
         LANGUAGE_CHINESE: "以新對話詢問 Gemini",
-    },
-    "command.research.description": {
-        LANGUAGE_ENGLISH: "Submit a Deep Research task",
-        LANGUAGE_CHINESE: "提交 Deep Research 任務",
-    },
-    "command.research_status.description": {
-        LANGUAGE_ENGLISH: "View Deep Research task status",
-        LANGUAGE_CHINESE: "查看 Deep Research 任務狀態",
     },
     "command.status.description": {
         LANGUAGE_ENGLISH: "View current status",
@@ -188,28 +172,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Selected model: {model} · {level}",
         LANGUAGE_CHINESE: "已選擇模型：{model} · {level}",
     },
-    "gem.list_unavailable": {
-        LANGUAGE_ENGLISH: (
-            "The Gem list is temporarily unavailable. Please try again later."
-        ),
-        LANGUAGE_CHINESE: "Gem 清單暫時無法取得，請稍後再試。",
-    },
-    "gem.choose": {
-        LANGUAGE_ENGLISH: "Choose a Gem:",
-        LANGUAGE_CHINESE: "請選擇 Gem：",
-    },
-    "gem.invalid": {
-        LANGUAGE_ENGLISH: "Invalid Gem. Please run /gem again.",
-        LANGUAGE_CHINESE: "無效的 Gem，請重新執行 /gem。",
-    },
-    "gem.unavailable": {
-        LANGUAGE_ENGLISH: "This Gem is no longer available. Please run /gem again.",
-        LANGUAGE_CHINESE: "此 Gem 已無法使用，請重新執行 /gem。",
-    },
-    "gem.selected": {
-        LANGUAGE_ENGLISH: "Selected Gem: {gem}",
-        LANGUAGE_CHINESE: "已選擇 Gem：{gem}",
-    },
     "temp.enabled": {
         LANGUAGE_ENGLISH: "Temporary mode is on.",
         LANGUAGE_CHINESE: "Temporary mode 已開啟。",
@@ -293,49 +255,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "status.monthly_egress": {
         LANGUAGE_ENGLISH: "Estimated monthly egress: {egress}",
         LANGUAGE_CHINESE: "本月累計 egress 估算值：{egress}",
-    },
-    "research.usage": {
-        LANGUAGE_ENGLISH: "Usage: /research <topic>",
-        LANGUAGE_CHINESE: "用法：/research <topic>",
-    },
-    "research.unavailable": {
-        LANGUAGE_ENGLISH: (
-            "Deep Research is currently unavailable. Please try again later."
-        ),
-        LANGUAGE_CHINESE: "Deep Research 服務目前無法使用，請稍後再試。",
-    },
-    "research.submitted": {
-        LANGUAGE_ENGLISH: "Deep Research task submitted: {task_id}",
-        LANGUAGE_CHINESE: "Deep Research 任務已提交：{task_id}",
-    },
-    "research.none": {
-        LANGUAGE_ENGLISH: "There are no Deep Research tasks.",
-        LANGUAGE_CHINESE: "目前沒有 Deep Research 任務。",
-    },
-    "research.status_heading": {
-        LANGUAGE_ENGLISH: "Deep Research task status:",
-        LANGUAGE_CHINESE: "Deep Research 任務狀態：",
-    },
-    "research.status_line": {
-        LANGUAGE_ENGLISH: "{task_id}: {status}",
-        LANGUAGE_CHINESE: "{task_id}：{status}",
-    },
-    "research.completed": {
-        LANGUAGE_ENGLISH: "Deep Research task {task_id} is complete.",
-        LANGUAGE_CHINESE: "Deep Research 任務 {task_id} 已完成。",
-    },
-    "research.failed": {
-        LANGUAGE_ENGLISH: "Deep Research task {task_id} failed.",
-        LANGUAGE_CHINESE: "Deep Research 任務 {task_id} 執行失敗。",
-    },
-    "research.timeout": {
-        LANGUAGE_ENGLISH: (
-            "Deep Research task {task_id} timed out. Use /research_status to "
-            "check again."
-        ),
-        LANGUAGE_CHINESE: (
-            "Deep Research 任務 {task_id} 已逾時；可用 /research_status 再查。"
-        ),
     },
     "image.usage": {
         LANGUAGE_ENGLISH: "Usage: /img <prompt>",

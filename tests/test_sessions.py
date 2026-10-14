@@ -6,6 +6,7 @@ import json
 
 import pytest
 from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
@@ -126,7 +127,9 @@ async def test_settings_are_per_chat_and_rebuild_session_with_context(
         await registry.persist(1, first)  # type: ignore[arg-type]
 
         await registry.set_model(1, "model-selected-at-runtime")
-        await registry.set_gem(1, "gem-selected-at-runtime")
+        dao = ChatSessionDAO(database.connection)
+        saved = await dao.get(1)
+        await dao.upsert(replace(saved, gem_id="gem-selected-at-runtime"))
         await registry.set_temporary(1, True)
 
         rebuilt = await registry.get_or_create(1)
@@ -195,7 +198,9 @@ async def test_persist_preserves_every_setting_and_updates_context(
             database,
         )
         await registry.set_model(2, "configured-model")
-        await registry.set_gem(2, "configured-gem")
+        dao = ChatSessionDAO(database.connection)
+        saved = await dao.get(2)
+        await dao.upsert(replace(saved, gem_id="configured-gem"))
         await registry.set_temporary(2, True)
         await registry.set_model_and_thinking_level(2, (await registry.get_state(2)).model, ThinkingLevel.HIGH)
         await registry.set_language(2, "zh-hant")
@@ -239,7 +244,9 @@ async def test_reset_discards_conversation_and_preserves_settings(
             database,
         )
         await registry.set_model(7, "chosen-model")
-        await registry.set_gem(7, "chosen-gem")
+        dao = ChatSessionDAO(database.connection)
+        saved = await dao.get(7)
+        await dao.upsert(replace(saved, gem_id="chosen-gem"))
         await registry.set_temporary(7, True)
         await registry.set_language(7, "zh-hant")
         assert await registry.get_or_create(7) is old_session
@@ -306,7 +313,9 @@ async def test_restart_restores_sqlite_metadata_and_continues_conversation(
             first_database,
         )
         await first_registry.set_model(99, "persisted-model")
-        await first_registry.set_gem(99, "persisted-gem")
+        dao = ChatSessionDAO(first_database.connection)
+        saved = await dao.get(99)
+        await dao.upsert(replace(saved, gem_id="persisted-gem"))
         await first_registry.set_temporary(99, True)
         assert await first_registry.get_or_create(99) is original
         await first_registry.persist(99, original)  # type: ignore[arg-type]
@@ -388,7 +397,9 @@ async def test_group_sessions_are_fresh_and_ignore_saved_chat_settings(
             group_model="configured-group-model",
         )
         await registry.set_model(-1001, "saved-private-model")
-        await registry.set_gem(-1001, "saved-private-gem")
+        dao = ChatSessionDAO(database.connection)
+        saved = await dao.get(-1001)
+        await dao.upsert(replace(saved, gem_id="saved-private-gem"))
         await registry.set_temporary(-1001, True)
         await registry.set_model_and_thinking_level(-1001, (await registry.get_state(-1001)).model, ThinkingLevel.HIGH)
         await registry.set_language(-1001, "zh-hant")
@@ -564,7 +575,9 @@ async def test_start_new_preserves_private_settings_and_replaces_context(
             database,
         )
         await registry.set_model(1, "private-model")
-        await registry.set_gem(1, "private-gem")
+        dao = ChatSessionDAO(database.connection)
+        saved = await dao.get(1)
+        await dao.upsert(replace(saved, gem_id="private-gem"))
         await registry.set_temporary(1, True)
         await registry.set_model_and_thinking_level(1, (await registry.get_state(1)).model, ThinkingLevel.HIGH)
         await registry.set_language(1, "zh-hant")

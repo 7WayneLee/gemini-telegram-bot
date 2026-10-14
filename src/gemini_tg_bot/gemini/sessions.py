@@ -231,17 +231,6 @@ class ChatSessionRegistry:
             # ChatSession accepts its model only at construction time.
             self._sessions.pop(chat_id, None)
 
-    async def set_gem(self, chat_id: int, gem_id: str | None) -> None:
-        """Set the Gem ID, using ``None`` to disable Gems for this chat."""
-
-        async with self._lock:
-            current = await self._dao.get(chat_id)
-            await self._dao.upsert(
-                _updated_record(chat_id, current, gem_id=gem_id)
-            )
-            # ChatSession accepts its Gem only at construction time.
-            self._sessions.pop(chat_id, None)
-
     async def set_temporary(self, chat_id: int, temporary: bool) -> None:
         """Persist whether subsequent messages should be temporary."""
 
@@ -398,7 +387,6 @@ def _updated_record(
     current: StoredChatSession | None,
     *,
     model: str | None | object = _UNSET,
-    gem_id: str | None | object = _UNSET,
     temporary: bool | object = _UNSET,
     thinking_level: str | None | object = _UNSET,
     language: str | None | object = _UNSET,
@@ -419,11 +407,7 @@ def _updated_record(
             if model is _UNSET
             else cast(str | None, model)
         ),
-        gem_id=(
-            previous_gem_id
-            if gem_id is _UNSET
-            else cast(str | None, gem_id)
-        ),
+        gem_id=previous_gem_id,
         temporary=(
             previous_temporary
             if temporary is _UNSET

@@ -19,10 +19,8 @@ from telegram.constants import ChatType
 from telegram.ext import Application
 
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME, Settings
-from gemini_tg_bot.gemini.research import ResearchManager
 from gemini_tg_bot.gemini.service import GeminiService
 from gemini_tg_bot.gemini.thinking import ThinkingLevel, thinking_request
-from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 from gemini_tg_bot.log_redaction import TokenRedactingFormatter
 from gemini_tg_bot.queue import RequestQueue
 from gemini_tg_bot.storage.db import Database
@@ -125,11 +123,7 @@ async def _run_polling(settings: Settings) -> None:
             parse_mode=parse_mode,
         )
 
-    async def notify_research(chat_id: int, text: str) -> None:
-        await application.bot.send_message(chat_id=chat_id, text=text)
-
     service = GeminiService(settings, admin_notifier=notify_admin)
-    research: ResearchManager | None = None
     try:
         # Deliberately delayed: T2.3 owns this implementation and may land in
         # the shared worktree after this entry point is imported by unit tests.
@@ -150,13 +144,6 @@ async def _run_polling(settings: Settings) -> None:
             .concurrent_updates(PerChatUpdateProcessor())
             .build()
         )
-        research = ResearchManager(
-            service,
-            database,
-            timeout_sec=settings.research_timeout_sec,
-            notify=notify_research,
-            default_language=settings.default_language,
-        )
         handlers = TelegramHandlers(
             service=service,
             sessions=sessions,
@@ -169,7 +156,6 @@ async def _run_polling(settings: Settings) -> None:
             cookie_path=settings.gemini_cookie_path,
             secure_1psid=settings.gemini_secure_1psid,
             database=database,
-            research=research,
             request_timeout_sec=settings.request_timeout_sec,
         )
         register_handlers(application, auth=auth, handlers=handlers)
@@ -193,7 +179,6 @@ async def _run_polling(settings: Settings) -> None:
                 await _initialize_and_start_polling(
                     service,
                     sessions,
-                    research,
                     updater,
                 )
                 try:
@@ -204,33 +189,26 @@ async def _run_polling(settings: Settings) -> None:
                         await updater.stop()
                     if application.running:
                         await application.stop()
-                    await research.close()
                     await service.close()
         finally:
             for signum in installed_signals:
                 loop.remove_signal_handler(signum)
     finally:
         try:
-            if research is not None:
-                await research.close()
+            await service.close()
         finally:
-            try:
-                await service.close()
-            finally:
-                await database.close()
+            await database.close()
 
 
 async def _initialize_and_start_polling(
     service: GeminiService,
     sessions: Any,
-    research: ResearchManager,
     updater: Any,
 ) -> None:
     """Restore runtime state and start polling even if Gemini is degraded."""
 
     await service.init()
     await sessions.restore_all()
-    await research.restore_running()
     await updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
 
@@ -326,22 +304,6 @@ class _DryRunService:
         result = operation(self.client)
         return await result if inspect.isawaitable(result) else result
 
-class _DryRunResearch:
-    def __init__(self) -> None:
-        self.task = SimpleNamespace(
-            task_id="dry-run-research-task",
-            status=SimpleNamespace(value="pending"),
-        )
-        self.submissions: list[tuple[int, str]] = []
-
-    async def submit(self, chat_id: int, prompt: str) -> str:
-        self.submissions.append((chat_id, prompt))
-        return self.task.task_id
-
-    async def status(self, chat_id: int) -> list[Any]:
-        assert chat_id == 7002
-        return [self.task]
-
 
 class _DryRunApplication:
     def __init__(self) -> None:
@@ -366,7 +328,6 @@ async def _run_dry_run() -> None:
         )
         service = _DryRunService()
         sessions = _DryRunRegistry()
-        research = _DryRunResearch()
         handlers = TelegramHandlers(
             service=service,  # type: ignore[arg-type]
             sessions=sessions,  # type: ignore[arg-type]
@@ -379,7 +340,6 @@ async def _run_dry_run() -> None:
             cookie_path=Path("unused-dry-run-cookie-cache"),
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"),
             database=database,
-            research=research,  # type: ignore[arg-type]
         )
         fake_application = _DryRunApplication()
         register_handlers(
@@ -399,31 +359,6 @@ async def _run_dry_run() -> None:
         await auth(update, context)  # type: ignore[arg-type]
         await handlers.text_message(update, context)  # type: ignore[arg-type]
 
-        research_message = _DryRunMessage("/research dry-run topic")
-        research_update = SimpleNamespace(
-            effective_user=SimpleNamespace(id=user_id),
-            effective_chat=SimpleNamespace(id=chat_id, type=ChatType.PRIVATE),
-            effective_message=research_message,
-        )
-        research_context = SimpleNamespace(args=["dry-run", "topic"])
-        await auth(research_update, research_context)  # type: ignore[arg-type]
-        await handlers.research(
-            research_update,  # type: ignore[arg-type]
-            research_context,  # type: ignore[arg-type]
-        )
-
-        status_message = _DryRunMessage("/research_status")
-        status_update = SimpleNamespace(
-            effective_user=SimpleNamespace(id=user_id),
-            effective_chat=SimpleNamespace(id=chat_id, type=ChatType.PRIVATE),
-            effective_message=status_message,
-        )
-        await auth(status_update, context)  # type: ignore[arg-type]
-        await handlers.research_status(
-            status_update,  # type: ignore[arg-type]
-            context,  # type: ignore[arg-type]
-        )
-
         usage = await UsageLogDAO(database.connection).list_for_chat(chat_id)
         assert fake_application.handlers[0][0] == -1
         assert service.execute_count == 1
@@ -442,39 +377,12 @@ async def _run_dry_run() -> None:
         ]
         assert await handlers._database_healthy() is True
         assert len(usage) == 1 and usage[0].ok is True
-        assert research.submissions == [(chat_id, "dry-run topic")]
-        assert research_message.replies == [
-            (
-                translate(
-                    "research.submitted",
-                    DEFAULT_LANGUAGE,
-                    task_id="dry-run-research-task",
-                ),
-                {},
-            )
-        ]
-        assert status_message.replies == [
-            (
-                "\n".join(
-                    (
-                        translate("research.status_heading", DEFAULT_LANGUAGE),
-                        translate(
-                            "research.status_line",
-                            DEFAULT_LANGUAGE,
-                            task_id="dry-run-research-task",
-                            status="pending",
-                        ),
-                    )
-                ),
-                {},
-            )
-        ]
     finally:
         await database.close()
 
     print(
         "dry-run: receive -> allowlist -> queue -> service -> stream -> "
-        "render -> send -> research -> database: ok"
+        "render -> send -> database: ok"
     )
 
 

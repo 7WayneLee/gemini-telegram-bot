@@ -38,7 +38,6 @@ ENVIRONMENT_VARIABLES = {
     "DEFAULT_LANGUAGE",
     "MAX_CONCURRENCY",
     "USER_RATE_LIMIT_PER_MIN",
-    "RESEARCH_TIMEOUT_SEC",
     "LOG_LEVEL",
     "ENABLE_VIDEO_GENERATION",
     "ENABLE_AUDIO_GENERATION",
@@ -208,7 +207,6 @@ def test_loads_dotenv_and_normalizes_optional_values(tmp_path: Path) -> None:
         ("ADMIN_USER_ID", 0),
         ("MAX_CONCURRENCY", 0),
         ("USER_RATE_LIMIT_PER_MIN", 0),
-        ("RESEARCH_TIMEOUT_SEC", 0),
         ("LOG_LEVEL", "verbose"),
     ],
 )
@@ -308,3 +306,15 @@ def test_invalid_runtime_credentials_warns_and_falls_back(
     assert "Runtime credential override is unreadable or invalid" in caplog.text
     assert "FAKE_1PSID_FOR_TEST" not in caplog.text
     assert "FAKE_1PSIDTS_FOR_TEST" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["900", "0", "obsolete"])
+def test_stale_research_timeout_env_key_is_ignored(tmp_path, value) -> None:
+    """Old production env files must remain valid after the setting is removed."""
+
+    stale_config = tmp_path / "FAKE_SETTINGS.env"
+    stale_config.write_text(f"RESEARCH_TIMEOUT_SEC={value}\n", encoding="utf-8")
+    settings = Settings(_env_file=stale_config, **REQUIRED_SETTINGS)
+
+    assert "research_timeout_sec" not in Settings.model_fields
+    assert settings.admin_user_id == REQUIRED_SETTINGS["ADMIN_USER_ID"]

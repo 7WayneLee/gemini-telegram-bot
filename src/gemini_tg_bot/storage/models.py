@@ -117,19 +117,6 @@ class GroupThread:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ResearchTask:
-    task_id: str
-    chat_id: int
-    cid: str | None = None
-    research_id: str | None = None
-    prompt: str
-    status: str
-    result_path: str | None = None
-    created_at: str
-    updated_at: str
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class UsageLog:
     id: int | None = None
     user_id: int
@@ -296,83 +283,6 @@ class GroupThreadDAO:
         return expired_count + excess_count
 
 
-class ResearchTaskDAO:
-    def __init__(self, connection: aiosqlite.Connection) -> None:
-        self._connection = connection
-
-    async def upsert(self, task: ResearchTask) -> None:
-        await self._connection.execute(
-            """
-            INSERT INTO research_tasks (
-                task_id, chat_id, cid, research_id, prompt, status, result_path,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(task_id) DO UPDATE SET
-                chat_id = excluded.chat_id,
-                cid = excluded.cid,
-                research_id = excluded.research_id,
-                prompt = excluded.prompt,
-                status = excluded.status,
-                result_path = excluded.result_path,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                task.task_id,
-                task.chat_id,
-                task.cid,
-                task.research_id,
-                task.prompt,
-                task.status,
-                task.result_path,
-                task.created_at,
-                task.updated_at,
-            ),
-        )
-        await self._connection.commit()
-
-    async def get(self, task_id: str) -> ResearchTask | None:
-        async with self._connection.execute(
-            "SELECT * FROM research_tasks WHERE task_id = ?", (task_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-        return _research_task_from_row(row) if row is not None else None
-
-    async def list_for_chat(self, chat_id: int) -> list[ResearchTask]:
-        async with self._connection.execute(
-            """
-            SELECT * FROM research_tasks
-            WHERE chat_id = ?
-            ORDER BY created_at, task_id
-            """,
-            (chat_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return [_research_task_from_row(row) for row in rows]
-
-    async def list_running(self) -> list[ResearchTask]:
-        async with self._connection.execute(
-            """
-            SELECT * FROM research_tasks
-            WHERE status = 'running'
-            ORDER BY created_at, task_id
-            """
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return [_research_task_from_row(row) for row in rows]
-
-    async def delete(self, task_id: str) -> bool:
-        cursor = await self._connection.execute(
-            "DELETE FROM research_tasks WHERE task_id = ?", (task_id,)
-        )
-        try:
-            deleted = cursor.rowcount > 0
-        finally:
-            await cursor.close()
-        await self._connection.commit()
-        return deleted
-
-
 class UsageLogDAO:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
@@ -504,20 +414,6 @@ def _group_thread_from_row(row: aiosqlite.Row) -> GroupThread:
         cid=row["cid"],
         metadata=deserialize_metadata(row["metadata_json"]),
         created_at=row["created_at"],
-    )
-
-
-def _research_task_from_row(row: aiosqlite.Row) -> ResearchTask:
-    return ResearchTask(
-        task_id=row["task_id"],
-        chat_id=row["chat_id"],
-        cid=row["cid"],
-        research_id=row["research_id"],
-        prompt=row["prompt"],
-        status=row["status"],
-        result_path=row["result_path"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
     )
 
 

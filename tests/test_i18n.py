@@ -26,6 +26,18 @@ def test_every_message_has_both_supported_languages() -> None:
         assert set(translations) == expected, key
 
 
+def test_removed_command_translations_are_deleted() -> None:
+    """Unused picker, research, and help-listing copy must leave both catalogs."""
+
+    assert not any(key.startswith(("gem.", "research.")) for key in MESSAGES)
+    assert {
+        "command.help.description",
+        "command.gem.description",
+        "command.research.description",
+        "command.research_status.description",
+    }.isdisjoint(MESSAGES)
+
+
 @pytest.mark.parametrize(
     ("language", "expected"),
     [

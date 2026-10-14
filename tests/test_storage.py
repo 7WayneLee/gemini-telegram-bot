@@ -13,8 +13,6 @@ from gemini_tg_bot.storage.models import (
     ChatSessionDAO,
     GroupThread,
     GroupThreadDAO,
-    ResearchTask,
-    ResearchTaskDAO,
     UsageLog,
     UsageLogDAO,
     deserialize_metadata,
@@ -353,44 +351,14 @@ async def test_group_thread_cleanup_enforces_age_and_per_chat_limits(
 
 
 @pytest.mark.asyncio
-async def test_research_and_usage_daos(tmp_path) -> None:
+async def test_usage_dao(tmp_path) -> None:
+    """Usage accounting must survive removal of the unused research DAO."""
     async with Database(tmp_path / "bot.sqlite3") as database:
-        research_dao = ResearchTaskDAO(database.connection)
         usage_dao = UsageLogDAO(database.connection)
-        running = ResearchTask(
-            task_id="task-1",
-            chat_id=202,
-            cid="cid-research",
-            research_id="research-1",
-            prompt="Research a topic",
-            status="running",
-            created_at="2026-09-07T02:00:00+00:00",
-            updated_at="2026-09-07T02:01:00+00:00",
-        )
-        await research_dao.upsert(running)
-        await research_dao.upsert(
-            ResearchTask(
-                task_id="task-2",
-                chat_id=202,
-                prompt="Already done",
-                status="done",
-                result_path="/tmp/result.txt",
-                created_at="2026-09-07T02:02:00+00:00",
-                updated_at="2026-09-07T02:03:00+00:00",
-            )
-        )
-
-        assert await research_dao.get("task-1") == running
-        assert await research_dao.list_running() == [running]
-        assert [task.task_id for task in await research_dao.list_for_chat(202)] == [
-            "task-1",
-            "task-2",
-        ]
-
         entry = UsageLog(
             user_id=303,
             chat_id=202,
-            command="research",
+            command="message",
             model="dynamic-model-name",
             ok=False,
             error_kind="rate_limit",
@@ -404,7 +372,7 @@ async def test_research_and_usage_daos(tmp_path) -> None:
                 id=1,
                 user_id=303,
                 chat_id=202,
-                command="research",
+                command="message",
                 model="dynamic-model-name",
                 ok=False,
                 error_kind="rate_limit",
