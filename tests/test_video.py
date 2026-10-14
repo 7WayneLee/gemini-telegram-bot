@@ -156,6 +156,7 @@ class Harness:
         )
         self.handlers._video_jobs._sleep = self.clock.sleep
         self.malformed = malformed
+        self.initial_output = SimpleNamespace(text=REPLY, videos=[])
         self.status = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
         self.relay_payloads = []
 
@@ -185,7 +186,7 @@ class Harness:
         assert state is not None
         rewrite_video_request({"f.req": "bad"} if self.malformed else sample_request(), state)
         self.clock.now += 2
-        return SimpleNamespace(text=REPLY, videos=[])
+        return self.initial_output
 
     async def start(self):
         await self.handlers.video(self.update, self.context)
@@ -351,7 +352,7 @@ async def test_happy_path_relays_and_releases_queue(harness, caplog):
 
     h = harness()
     video = FakeVideo()
-    h.client.fetch_latest_chat_response.side_effect = [SimpleNamespace(videos=[]), SimpleNamespace(videos=[video])]
+    h.client.fetch_latest_chat_response.side_effect = [SimpleNamespace(text="", videos=[]), SimpleNamespace(text="", videos=[video])]
     with caplog.at_level(logging.INFO):
         task = await h.start()
         h.status.edit_text.assert_awaited_once_with(translate("video.generating", "en") + "\n\n" + REPLY, parse_mode=None)
@@ -365,8 +366,8 @@ async def test_happy_path_relays_and_releases_queue(harness, caplog):
     h.session.send_message.assert_awaited_once_with(PROMPT, extended_thinking=False)
     for entry in h.client.fetch_latest_chat_response.await_args_list:
         assert entry.args == (CID,) and entry.kwargs["limit"] == 5
-        assert not entry.kwargs["match"](SimpleNamespace(videos=[]))
-        assert entry.kwargs["match"](SimpleNamespace(videos=[video]))
+        assert not entry.kwargs["match"](SimpleNamespace(text="", videos=[]))
+        assert entry.kwargs["match"](SimpleNamespace(text="", videos=[video]))
     assert h.message.reply_video.await_count == 2
     assert h.message.reply_video.await_args_list[0] == call(URL)
     assert h.relay_payloads[0][0] == bytes(12)
@@ -385,36 +386,175 @@ async def test_happy_path_relays_and_releases_queue(harness, caplog):
     assert "first_output=- generation=-" in timing[0]
 
 
-async def test_nonmatching_output_keeps_polling(harness):
-    """fetch_latest_chat_response can return nonmatching text and must not complete the job."""
+async def test_first_reply_video_is_delivered_without_polling(harness, caplog):
+    """A ready first reply must avoid extra latency and account for direct delivery once."""
 
     h = harness()
+    first, second = FakeVideo(), FakeVideo(size=19)
+    h.initial_output = SimpleNamespace(text=REPLY, videos=[first, second])
+    with caplog.at_level(logging.INFO):
+        assert await h.start() is None
+    h.client.fetch_latest_chat_response.assert_not_awaited()
+    assert h.clock.sleeps.empty() and not h.handlers._video_jobs._jobs
+    h.status.edit_text.assert_not_awaited()
+    h.status.delete.assert_awaited_once_with()
+    assert len(h.relay_payloads) == 1 and h.relay_payloads[0][0] == bytes(12)
+    assert first.paths and not second.paths
+    assert all(not path.exists() and not path.parent.exists() for path in first.paths)
+    rows = await h.rows()
+    assert len(rows) == 1 and rows[0].ok and rows[0].error_kind is None
+    assert rows[0].command == "video" and rows[0].latency_ms == 2000
+    diagnostic = [r.getMessage() for r in caplog.records if r.name == "gemini_tg_bot.telegram.video"]
+    assert diagnostic == [
+        f"Video job finished outcome=ok immediate=yes polls=0 text_chars={len(REPLY)} videos=2"
+    ]
+    assert len([r for r in caplog.records if r.name == "gemini_tg_bot.timing"]) == 1
+
+
+@pytest.mark.parametrize("language", [LANGUAGE_ENGLISH, LANGUAGE_CHINESE])
+async def test_same_text_without_video_stops_after_first_poll(harness, caplog, language):
+    """A final refusal must retain Gemini's reason instead of polling for five minutes."""
+
+    h = harness()
+    h.sessions.get_state.return_value.language = language
     h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[], text=REPLY)
-    task = await h.start()
-    await h.clock.tick()
-    await h.clock.tick()
-    await asyncio.sleep(0)
-    assert not task.done()
-    assert h.client.fetch_latest_chat_response.await_count == 2
+    with caplog.at_level(logging.INFO):
+        task = await h.start()
+        assert await h.clock.tick() == 10
+        await asyncio.wait_for(task, 1)
+    h.client.fetch_latest_chat_response.assert_awaited_once()
     h.message.reply_video.assert_not_awaited()
-    assert await h.rows() == []
+    assert h.status.edit_text.await_args == call(
+        translate("video.no_video", language) + "\n\n" + REPLY, parse_mode=None,
+    )
+    h.status.delete.assert_not_awaited()
+    assert not h.handlers._video_jobs._jobs
+    rows = await h.rows()
+    assert len(rows) == 1 and not rows[0].ok and rows[0].error_kind == "no_video"
+    assert rows[0].latency_ms == 12000
+    assert len([r for r in caplog.records if r.name == "gemini_tg_bot.timing"]) == 1
+    diagnostic = [r.getMessage() for r in caplog.records if r.name == "gemini_tg_bot.telegram.video"]
+    assert diagnostic == [
+        f"Video job finished outcome=no_video immediate=no polls=1 text_chars={len(REPLY)} videos=0"
+    ]
+
+
+async def test_empty_or_changing_text_keeps_polling(harness):
+    """Empty or changing observations must not confirm a text-only final result."""
+
+    h = harness()
+    texts = ["", "", REPLY, "", REPLY, "FAKE_CHANGED_TEXT"]
+    h.client.fetch_latest_chat_response.side_effect = [
+        *(SimpleNamespace(videos=[], text=text) for text in texts),
+        SimpleNamespace(videos=[FakeVideo()], text=""),
+    ]
+    task = await h.start()
+    for polls in range(1, len(texts) + 1):
+        await h.clock.tick()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert h.client.fetch_latest_chat_response.await_count == polls
+        h.message.reply_video.assert_not_awaited()
+        assert await h.rows() == []
+    await h.clock.tick()
+    await asyncio.wait_for(task, 1)
+    assert (await h.rows())[0].ok
 
 
 async def test_timeout_removes_job_and_accounts_once(harness, caplog):
     """The video deadline must free the chat and record timeout over the full latency."""
 
     h = harness(timeout=25)
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[])
     with caplog.at_level(logging.INFO):
         task = await h.start()
         assert [await h.clock.tick(), await h.clock.tick(), await h.clock.tick()] == [10, 10, 5]
         await asyncio.wait_for(task, 1)
     assert not h.handlers._video_jobs._jobs
-    assert h.status.edit_text.await_args == call(translate("video.timeout", "en"), parse_mode=None)
+    assert h.status.edit_text.await_args == call(translate("video.timeout", "en") + "\n\n" + REPLY, parse_mode=None)
     rows = await h.rows()
     assert len(rows) == 1 and not rows[0].ok and rows[0].error_kind == "timeout"
     assert rows[0].command == "video" and rows[0].latency_ms == 27000
     assert len([r for r in caplog.records if r.name == "gemini_tg_bot.timing"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("initial_text", "poll_texts", "last_text"),
+    [
+        (REPLY, ["", "", ""], REPLY),
+        (REPLY, ["FAKE_NEW_REASON", "FAKE_LAST_REASON", ""], "FAKE_LAST_REASON"),
+        ("", ["", "", ""], ""),
+    ],
+)
+async def test_timeout_preserves_last_nonempty_text(harness, caplog, initial_text, poll_texts, last_text):
+    """Timeout must preserve the last reason, including when later observations are empty."""
+
+    h = harness(timeout=35)
+    h.initial_output = SimpleNamespace(text=initial_text, videos=[])
+    h.client.fetch_latest_chat_response.side_effect = [
+        SimpleNamespace(text=text, videos=[]) for text in poll_texts
+    ]
+    with caplog.at_level(logging.INFO):
+        task = await h.start()
+        assert [await h.clock.tick() for _ in range(4)] == [10, 10, 10, 5]
+        await asyncio.wait_for(task, 1)
+    expected = translate("video.timeout", "en")
+    if last_text:
+        expected += "\n\n" + last_text
+    assert h.status.edit_text.await_args == call(expected, parse_mode=None)
+    assert h.client.fetch_latest_chat_response.await_count == 3
+    rows = await h.rows()
+    assert len(rows) == 1 and rows[0].error_kind == "timeout"
+    assert len([r for r in caplog.records if r.name == "gemini_tg_bot.timing"]) == 1
+    diagnostic = [r.getMessage() for r in caplog.records if r.name == "gemini_tg_bot.telegram.video"]
+    assert diagnostic == [
+        "Video job finished outcome=timeout immediate=no polls=3 text_chars=0 videos=0"
+    ]
+
+
+@pytest.mark.parametrize("immediate", [True, False])
+async def test_finished_diagnostic_is_content_free(harness, caplog, immediate):
+    """The new completion line must expose counts without prompts, reasons, URLs or identities."""
+
+    h = harness()
+    h.handlers._usage_dao = AsyncMock()
+    if immediate:
+        h.initial_output = SimpleNamespace(text=REPLY, videos=[FakeVideo()])
+    else:
+        h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text=REPLY, videos=[])
+    with caplog.at_level(logging.INFO, logger="gemini_tg_bot.telegram.video"):
+        task = await h.start()
+        if task is not None:
+            await h.clock.tick()
+            await asyncio.wait_for(task, 1)
+    records = [r for r in caplog.records if r.name == "gemini_tg_bot.telegram.video"]
+    assert len(records) == 1 and records[0].levelno == logging.INFO
+    line = records[0].getMessage()
+    assert line.startswith("Video job finished outcome=")
+    for value in (PROMPT, REPLY, URL, CID, str(CHAT_ID), str(USER_ID)):
+        assert value not in line
+
+
+@pytest.mark.parametrize("outcome", ["no_video", "timeout"])
+async def test_final_reason_is_plain_text_and_fits_telegram(harness, outcome):
+    """Both final status paths must keep long reasons without markup or UTF-16 overflow."""
+
+    h = harness(timeout=15)
+    reason = "<b>FAKE_REFUSAL</b>" + "😀" * 5000
+    h.initial_output = SimpleNamespace(text=reason, videos=[])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(
+        text=reason if outcome == "no_video" else "", videos=[],
+    )
+    task = await h.start()
+    await h.clock.tick()
+    if outcome == "timeout":
+        await h.clock.tick()
+    await asyncio.wait_for(task, 1)
+    text = h.status.edit_text.await_args.args[0]
+    assert text.startswith(translate("video." + outcome, "en") + "\n\n<b>FAKE_REFUSAL</b>")
+    assert len(text.encode("utf-16-le")) <= 4096 * 2
+    assert h.status.edit_text.await_args.kwargs == {"parse_mode": None}
+    assert (await h.rows())[0].error_kind == outcome
 
 
 async def test_second_video_is_rejected_while_running(harness):
@@ -466,7 +606,7 @@ async def test_no_content_leaks_to_logs(harness, caplog):
     h = harness()
     # Isolate application logging from aiosqlite's DEBUG SQL parameter tracing.
     h.handlers._usage_dao = AsyncMock()
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[FakeVideo()])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[FakeVideo()])
     with caplog.at_level(logging.DEBUG):
         task = await h.start()
         await h.clock.tick()
@@ -482,7 +622,7 @@ async def test_url_success_skips_relay(harness):
     h = harness()
     h.message.reply_video.side_effect = None
     video = FakeVideo()
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[video])
     task = await h.start()
     await h.clock.tick()
     await asyncio.wait_for(task, 1)
@@ -496,7 +636,7 @@ async def test_relay_uses_video_path_and_cleans_thumbnail(harness):
 
     h = harness()
     video = FakeVideo(size=19, with_thumbnail=True)
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[video])
     task = await h.start()
     await h.clock.tick()
     await asyncio.wait_for(task, 1)
@@ -524,7 +664,7 @@ async def test_save_without_video_is_unavailable(harness, missing_key):
 
     h = harness()
     video = MissingVideo(with_thumbnail=True)
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[video])
     task = await h.start()
     await h.clock.tick()
     await asyncio.wait_for(task, 1)
@@ -551,7 +691,7 @@ async def test_late_video_has_a_separate_delivery_deadline(harness, monkeypatch)
             return await super().save(path=path)
 
     video = SlowVideo(with_thumbnail=True)
-    h.client.fetch_latest_chat_response.side_effect = [SimpleNamespace(videos=[]), SimpleNamespace(videos=[video])]
+    h.client.fetch_latest_chat_response.side_effect = [SimpleNamespace(text="", videos=[]), SimpleNamespace(text="", videos=[video])]
     task = await h.start()
     assert await h.clock.tick() == 10
     assert await h.clock.tick() == 10
@@ -578,13 +718,13 @@ async def test_delivery_deadline_reports_timeout_and_cleans_files(harness, monke
             return result
 
     video = SlowVideo(with_thumbnail=True)
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[video])
     task = await h.start()
     assert await h.clock.tick() == 10
     assert await h.clock.tick() == 8
     await asyncio.wait_for(task, 1)
 
-    assert h.status.edit_text.await_args == call(translate("video.timeout", "en"), parse_mode=None)
+    assert h.status.edit_text.await_args == call(translate("video.timeout", "en") + "\n\n" + REPLY, parse_mode=None)
     h.status.delete.assert_not_awaited()
     h.message.reply_video.assert_awaited_once_with(URL)
     assert not h.relay_payloads and h.egress.month_to_date_bytes == 0
@@ -594,12 +734,47 @@ async def test_delivery_deadline_reports_timeout_and_cleans_files(harness, monke
     assert len(rows) == 1 and not rows[0].ok and rows[0].error_kind == "timeout"
 
 
+async def test_immediate_video_uses_delivery_deadline(harness, monkeypatch, caplog):
+    """Direct delivery must stop at REQUEST_TIMEOUT_SEC and clean a stalled relay too."""
+
+    h = harness(timeout=300, delivery_timeout=7)
+    monkeypatch.setattr(asyncio, "timeout", h.clock.timeout)
+
+    class SlowVideo(FakeVideo):
+        async def save(self, *, path):
+            result = await super().save(path=path)
+            await h.clock.sleep(8)
+            return result
+
+    video = SlowVideo(with_thumbnail=True)
+    h.initial_output = SimpleNamespace(text=REPLY, videos=[video])
+    with caplog.at_level(logging.INFO):
+        task = asyncio.create_task(h.start())
+        assert await h.clock.tick() == 8
+        assert await asyncio.wait_for(task, 1) is None
+    h.client.fetch_latest_chat_response.assert_not_awaited()
+    h.status.delete.assert_not_awaited()
+    assert h.status.edit_text.await_args == call(
+        translate("video.timeout", "en") + "\n\n" + REPLY, parse_mode=None,
+    )
+    assert not h.relay_payloads and h.egress.month_to_date_bytes == 0
+    assert all(not path.exists() and not path.parent.exists() for path in video.paths)
+    assert not h.handlers._video_jobs._jobs
+    rows = await h.rows()
+    assert len(rows) == 1 and rows[0].error_kind == "timeout"
+    diagnostic = [r.getMessage() for r in caplog.records if r.name == "gemini_tg_bot.telegram.video"]
+    assert diagnostic == [
+        f"Video job finished outcome=timeout immediate=yes polls=0 text_chars={len(REPLY)} videos=1"
+    ]
+    assert len([r for r in caplog.records if r.name == "gemini_tg_bot.timing"]) == 1
+
+
 async def test_large_video_is_not_uploaded(harness):
     """The relay must reject a file above 50 MB and still delete temporary files."""
 
     h = harness()
     video = FakeVideo(size=MAX_VIDEO_BYTES + 1)
-    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(text="", videos=[video])
     task = await h.start()
     await h.clock.tick()
     await asyncio.wait_for(task, 1)
@@ -634,7 +809,7 @@ async def test_status_is_plain_text_and_fits_telegram(harness):
 
     async def initial(*args, **kwargs):
         await h.initial_send(*args, **kwargs)
-        return SimpleNamespace(text="<b>FAKE_REFUSAL</b>" + "😀" * 5000)
+        return SimpleNamespace(text="<b>FAKE_REFUSAL</b>" + "😀" * 5000, videos=[])
 
     h.session.send_message.side_effect = initial
     await h.start()

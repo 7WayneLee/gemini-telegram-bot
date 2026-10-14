@@ -667,6 +667,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Video generation timed out. Please try again later.",
         LANGUAGE_CHINESE: "影片生成逾時，請稍後再試。",
     },
+    "video.no_video": {
+        LANGUAGE_ENGLISH: "Gemini finished without producing a video.",
+        LANGUAGE_CHINESE: "Gemini 已完成回覆，但未產生影片。",
+    },
     "video.too_large": {
         LANGUAGE_ENGLISH: "The video exceeds Telegram's 50 MB upload limit.",
         LANGUAGE_CHINESE: "影片超過 Telegram 的 50 MB 上傳限制。",

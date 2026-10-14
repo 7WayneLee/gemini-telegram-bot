@@ -20,6 +20,46 @@ LOGGER = logging.getLogger(__name__)
 Finish = Callable[[bool, str | None], Awaitable[None]]
 
 
+def video_status_text(key: str, language: str, text: str = "") -> str:
+    """Keep Gemini's plain-text reason within Telegram's UTF-16 length limit."""
+
+    status_text = translate(key, language)
+    if text:
+        status_text += "\n\n" + text
+    return status_text.encode("utf-16-le")[:4096 * 2].decode("utf-16-le", errors="ignore")
+
+
+@dataclass(slots=True)
+class VideoJobState:
+    """Track observations and content-free diagnostics for one video request."""
+
+    immediate: bool = False
+    polls: int = 0
+    text: str = ""
+    last_nonempty_text: str = ""
+    videos: int = 0
+
+    def observe(self, output: Any) -> bool:
+        """Confirm a text-only result only when consecutive nonempty texts match."""
+
+        previous_text, previous_videos = self.text, self.videos
+        self.text = output.text or "" if output is not None else ""
+        self.videos = len(output.videos) if output is not None else 0
+        if self.text:
+            self.last_nonempty_text = self.text
+        return bool(
+            not self.videos and not previous_videos
+            and self.text and self.text == previous_text
+        )
+
+    def log_finished(self, ok: bool, error_kind: str | None) -> None:
+        LOGGER.info(
+            "Video job finished outcome=%s immediate=%s polls=%d text_chars=%d videos=%d",
+            "ok" if ok else (error_kind or "unknown"),
+            "yes" if self.immediate else "no", self.polls, len(self.text), self.videos,
+        )
+
+
 @dataclass(slots=True)
 class _Job:
     finish: Finish
@@ -75,40 +115,68 @@ class VideoJobManager:
         status: Any,
         language: str,
         finish: Finish,
+        output: Any,
+        state: VideoJobState,
     ) -> None:
         """Transfer the reserved chat and final accounting to a background task."""
 
         job = _Job(finish)
         self._jobs[chat_id] = job
         job.task = asyncio.create_task(
-            self._run(chat_id, job, cid, message, status, language),
+            self._run(chat_id, job, cid, message, status, language, output, state),
             name="video-generation",
         )
 
+    async def deliver(
+        self,
+        chat_id: int,
+        *,
+        cid: str,
+        message: Any,
+        status: Any,
+        language: str,
+        finish: Finish,
+        output: Any,
+        state: VideoJobState,
+    ) -> None:
+        """Deliver an initial video using the same bounds without starting a poller."""
+
+        state.immediate = True
+        job = _Job(finish, task=asyncio.current_task())
+        self._jobs[chat_id] = job
+        await self._run(chat_id, job, cid, message, status, language, output, state)
+
     async def _run(
-        self, chat_id: int, job: _Job, cid: str, message: Any, status: Any, language: str
+        self, chat_id: int, job: _Job, cid: str, message: Any, status: Any,
+        language: str, output: Any, state: VideoJobState,
     ) -> None:
         ok = False
         error_kind: str | None = "cancelled"
         try:
-            deadline = self._clock() + self._timeout_sec
-            async with asyncio.timeout(self._timeout_sec):
-                while True:
-                    remaining = deadline - self._clock()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    await self._sleep(min(self._poll_interval, remaining))
-                    if self._clock() >= deadline:
-                        raise TimeoutError
-                    output = await self._service.execute(
-                        lambda client: client.fetch_latest_chat_response(
-                            cid, limit=5, match=lambda output: bool(output.videos)
+            if not output.videos:
+                deadline = self._clock() + self._timeout_sec
+                async with asyncio.timeout(self._timeout_sec):
+                    while True:
+                        remaining = deadline - self._clock()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        await self._sleep(min(self._poll_interval, remaining))
+                        if self._clock() >= deadline:
+                            raise TimeoutError
+                        state.polls += 1
+                        output = await self._service.execute(
+                            lambda client: client.fetch_latest_chat_response(
+                                cid, limit=5, match=lambda output: bool(output.videos)
+                            )
                         )
-                    )
-                    # Upstream returns the newest output even if match failed.
-                    if output is None or not output.videos:
-                        continue
-                    break
+                        # Upstream returns the newest output even if match failed.
+                        no_video = state.observe(output)
+                        if state.videos:
+                            break
+                        if no_video:
+                            error_kind = "no_video"
+                            await self._show_error(status, "video.no_video", language, state.text)
+                            return
             async with asyncio.timeout(self._delivery_timeout_sec):
                 await self._media.send_video(message, output.videos[0])
             try:
@@ -120,7 +188,7 @@ class VideoJobManager:
             raise
         except TimeoutError:
             error_kind = "timeout"
-            await self._show_error(status, "video.timeout", language)
+            await self._show_error(status, "video.timeout", language, state.last_nonempty_text)
         except VideoTooLargeError:
             error_kind = "too_large"
             await self._show_error(status, "video.too_large", language)
@@ -134,9 +202,9 @@ class VideoJobManager:
             finally:
                 self.release(chat_id)
 
-    async def _show_error(self, status: Any, key: str, language: str) -> None:
+    async def _show_error(self, status: Any, key: str, language: str, text: str = "") -> None:
         try:
-            await edit_text(status, translate(key, language), parse_mode=None)
+            await edit_text(status, video_status_text(key, language, text), parse_mode=None)
         except Exception as error:
             LOGGER.warning("Unable to edit video status (%s)", type(error).__name__)
 

@@ -71,7 +71,7 @@ from .sending import (
 )
 from .streaming import stream_response
 from .timing import CURRENT_TIMING, RequestTiming
-from .video import VideoJobManager
+from .video import VideoJobManager, VideoJobState, video_status_text
 
 if TYPE_CHECKING:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
@@ -745,7 +745,7 @@ class TelegramHandlers:
         )
 
     async def video(self, update: Update, context: CallbackContext) -> None:
-        """Send a fresh Low-effort video request, then release the chat to polling."""
+        """Send a fresh Low-effort video request, delivering now or polling as needed."""
 
         identity = _message_identity(update)
         if identity is None:
@@ -755,12 +755,14 @@ class TelegramHandlers:
         language = await self._chat_language(update, chat_id)
         timing = RequestTiming(self._clock)
         token = CURRENT_TIMING.set(timing)
+        video_state = VideoJobState()
         handed_off = reserved = False
         error_kind: str | None = "cancelled"
         placeholder = None
         keep_status = False
 
         async def finish(ok: bool, kind: str | None) -> None:
+            video_state.log_finished(ok, kind)
             total = self._clock() - started
             await self._record_usage(
                 user_id=user_id, chat_id=chat_id, model=None, command="video",
@@ -807,19 +809,26 @@ class TelegramHandlers:
                             session, output = await self._service.execute(initial_send)
                         finally:
                             timing.upstream = self._clock() - upstream_started
+            video_state.observe(output)
             if adaptation.failed or not adaptation.applied:
                 error_kind = "unavailable"
                 await edit_text(placeholder, translate("video.unavailable", language), parse_mode=None)
                 keep_status = True
                 return
-            status_text = translate("video.generating", language)
-            if output.text:
-                status_text += "\n\n" + output.text
-            status_text = status_text.encode("utf-16-le")[:4096 * 2].decode("utf-16-le", errors="ignore")
-            await edit_text(placeholder, status_text, parse_mode=None)
+            if output.videos:
+                handed_off = True
+                await self._video_jobs.deliver(
+                    chat_id, cid=session.cid, message=message, status=placeholder,
+                    language=language, finish=finish, output=output, state=video_state,
+                )
+                return
+            await edit_text(
+                placeholder, video_status_text("video.generating", language, output.text),
+                parse_mode=None,
+            )
             self._video_jobs.start(
                 chat_id, cid=session.cid, message=message, status=placeholder,
-                language=language, finish=finish,
+                language=language, finish=finish, output=output, state=video_state,
             )
             handed_off = True
         except _GenerationTimeout:
