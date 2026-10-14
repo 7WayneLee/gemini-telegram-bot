@@ -783,6 +783,128 @@ async def save(
 
 ---
 
+## 五之二、影片生成（2026-10-14 擷取）
+
+> 偵察背景：使用者詢問 Bot 是否可新增 `/video` 指令。Commander 依使用者明確指示，於使用者的 Chrome 瀏覽器 session 中親自操作頁面進行偵察（HUMAN-gated）。
+> - 該 session 為使用者的 Google AI Pro 帳號，非 Bot 自身之帳號。
+> - 本次測試共擷取並成功生成 1 次影片。
+> - **驗證狀態**：Bot 端以 Bot 帳號發送請求之行為目前仍待驗證（pending verification）。
+
+### 一、網頁介面操作流程
+
+在 Chat 模式中，點擊「+」按鈕（`aria-label="Upload and tools"`）展開選單：
+- Upload files、Add from Drive、More uploads
+- Create image、Create video、Create music
+- More tools
+
+點擊「Create video」進入 Videos 頁面：
+- 提供影片範本（video templates）；
+- 輸入框（composer）顯示「Describe your video」，並附帶「Videos」chip；
+- 模型選擇器（Flash）；
+- 圖片參考按鈕（image-reference button）；
+- 長寬比下拉選單（aspect-ratio dropdown）顯示「Landscape」。
+
+本次測試使用 3.8 Flash 於 Low 等級，測試 prompt 為 `"A small paper boat drifting on a calm lake at sunset, gentle ripples, soft warm light"`。
+
+### 二、請求結構（StreamGenerate）
+
+請求發往與一般對話相同的 `StreamGenerate` 端點（`Endpoint.GENERATE`）。其 `f.req` inner list 共有 99 個元素。
+
+以下為官方影片請求非空欄位與上游 2.1.1 一般請求（`client.py` 第 1454–1506 行建構之 81 元素 list）的對照表：
+
+| `f.req` 內部索引 | 官方影片請求 | 上游 2.1.1 一般請求 |
+|---|---|---|
+| 0 (`message_content`) | 10 個元素：`[prompt, 0, null, null, null, null, 0, null, null, [null,null,null,null,null,null,[[null,null,null,1]]]]` | 7 個元素：`[prompt, 0, None, files, None, None, 0]` |
+| 1 | `["en-GB"]` | `[language]` |
+| 3 | `"!"` 後接 2224 字元的不透明字串（opaque string） | 僅在 `deep_research` 時設定：`"!" + secrets.token_urlsafe(2600)` |
+| 4 | 32 字元 16 進位字串（hex characters） | 僅在 `deep_research` 時設定：`uuid4().hex` |
+| 6, 7, 10, 11, 17, 18, 27, 41, 53 | `[1]`, `1`, `1`, `0`, `[[0]]`, `0`, `1`, `[1]`, `0` | 數值完全相同（其中索引 7 為 `STREAMING_FLAG_INDEX`） |
+| 30 | `[4,16,19]` | `[4]` |
+| 49 | `11` | 僅在 `deep_research` 時設定：`1` |
+| 55 | `[[16]]` | 僅在 `deep_research` 時設定：`[[1]]` |
+| 59 | 36 字元 UUID | 大寫 `uuid4` |
+| 67 | `0` | 未設定（None） |
+| 68 | `2` | `1` |
+| 79 | `1`（3.8 Flash 之模型編號） | 模型編號（model number） |
+| 80 | `1`（Low） | `1` 或 `2` |
+| 91, 96, 98 | `1`, `0`, `1` | 未設定（上游 list 僅 81 個元素） |
+
+#### 表格解讀與推論
+
+- 本次未擷取官方 normal-chat 作為基準線（baseline），故哪些差異純屬影片專屬尚未嚴格證實。
+- 類比上游 Deep Research 旗標（49 = 1 與 55 = `[[1]]`），索引 49 = 11、55 = `[[16]]` 以及 `message_content[9]` 最可能為影片專屬欄位。
+- `message_content[9]` 亦可能承載長寬比（aspect ratio），此點尚待驗證。
+- 其餘差異可能為官方網頁客戶端在所有請求中皆會送出的欄位。
+- 未來實作應重現官方影片請求的每一個欄位。
+
+### 三、即時回應
+
+- **到達時間與長度**：送出後約 4 秒到達，總長約 956 字元。
+- **結構**：sparse bundle 格式的 frames。
+- **依序包含之內容**：
+  1. Title frame：`{"11": ["Sunset Drift on Calm Waters"]}`。
+  2. Text frame：`{"7": [...]}`：
+     - 文字內容："I'm generating your video. This could take a few minutes, so check back to see when your video is ready."；
+     - 接續工具標記（tool marker）：`["video_generation", [null, null, "Video Generation", <gstatic icon URL>], 1, ...]}`。
+  3. 結尾 frame：key 為 `"46"`，包含一個 id 與空字串。
+- **StreamGenerate 即時回應中不包含任何影片。**
+
+### 四、完成與歷史讀取
+
+- **時效**：送出後約 50 秒影片就緒。此為時間上限（upper bound），因頁面僅在該時間點重新讀取對話。
+- **讀取 RPC**：頁面呼叫 read-chat RPC `hNvQHb`（`GRPC.LIST_CONVERSATION_TURNS`），payload 為 `[cid, 10, null, 1, [1], [4], null, 1]`。此與上游 `read_chat`（`components/chat_mixin.py` 第 151 行）完全一致。
+- **影片在最新 model turn 的位置**：
+  - 取得 candidate `conv_turn[3][0][0]`，進入其 rich-content container `[12]`。
+  - 該 container 在索引 0 包含一個 sparse bundle。其 key `"60"` 即對應 `Field.VIDEO`（59），經上游 `get_field` 的 key 偏移 +1（`utils/parsing.py` 第 111–131 行，`bundle.get(str(index + 1))`）讀取。
+  - `video_info = bundle["60"][0][0][0]`，此即上游路徑 `[0, 0, 0]`。
+- **影片檔案項目（The video file entry）**：`video_info[0]` 共有 25 個元素：
+  - `[2]` = `"video.mp4"`
+  - `[11]` = `"video/mp4"`
+  - `[24]` = `3530649`（位元組，約 3.5 MB）
+  - `[7]` = 3 個 URLs：
+    - `[0]`：googleusercontent 於 `/gg/` 路徑下的圖片 URL，無 query string（thumbnail 縮圖）；
+    - `[1]`：`https://contribution.usercontent.google.com/download?…`，共 216 字元（含 164 字元 query string，影片本體下載網址）；
+    - `[2]`：另一個 `/gg/` 圖片 URL，無 query string。
+- **bundle 內的其他項目**：
+  - `bundle["60"][0][0][2][0]` 為 70 字元的 `googleusercontent.com/generated_video_content/…` URL。
+  - `bundle["60"][0][0][8]` 為第二個檔案項目：`"omni_context.pb"`、`"application/protobuf"`、3,537,040 位元組，其自身下載 URL 位於 `[8][7][1]`。
+  - 相同影片結構亦出現在 payload 的另外兩處位置。
+
+### 五、上游 2.1.1 現有支援度
+
+- `read_chat` 透過 `_parse_candidate`（`client.py` 第 2069 行起）解析每個 candidate，建構 `GeneratedVideo(url=urls[1], thumbnail=urls[0], cid, rid, rcid, client_ref)`（`client.py` 第 2164–2181 行），影片會正確存入 `ModelOutput.videos`；URL `[2]` 則被忽略。
+- `ChatHistory`（`types/chathistory.py` 第 33–53 行）具有 `cid` 與 `turns`；每個 `ChatTurn`（第 8–31 行）具有 `role`、`text` 與 `model_output`。
+- `fetch_latest_chat_response(cid, limit=5, match=None)`（`components/chat_mixin.py` 第 270–300 行）可回傳符合條件之最新 model output。
+- `GeneratedVideo.save()`（`types/video.py` 第 47–107 行、第 177–202 行）：
+  - 使用 client 的 cookies（第 87 行）與 Referer header（第 125 行）下載。
+  - 當伺服器回應 206（"still generating"）時，每 10 秒自動重試輪詢（第 177–201 行）。
+- **上游完全沒有請求生成影片的參數**：`generate_content`、`generate_content_stream`、`send_message` 與 `send_message_stream` 皆無影片旗標。要送出官方影片請求，需要實作類似 `ThinkingLevelGeminiClient`（§二之二）的請求轉接層（request adapter）。
+
+### 六、下載實測
+
+Commander 於頁面內以 `Range: bytes=0-0` 對 `URL [1]` 進行 fetch 測試：
+- 帶瀏覽器憑證時，回傳 206 `video/mp4`。
+- 未帶憑證時，fetch 失敗。原因可能是 CORS 或身份認證，目前尚無定論（inconclusive）。
+
+因此 Telegram 伺服器是否能直接抓取該 URL 仍屬未知。實作規劃需考慮兩種路徑：
+- 由 Bot 帶 cookie 下載後上傳檔案至 Telegram（每部影片約 3.5 MB egress）；或
+- 優先嘗試直接傳送 URL，失敗時自動回退至下載上傳路徑（如生成圖片之模式）。
+
+### 七、配額（Quota）
+
+- 公開資訊顯示 Google AI Pro 每日約 3 部影片，Ultra 約 5 部。
+- 觀測到的 RPC `qpEbW`（payload `[[[2,5]]]`) 在生成前後回傳完全相同的數值，因此無法作為可用的剩餘配額計數器。
+- Bot 自身使用的帳號與測試帳號不同，Bot 帳號是否具備影片生成權限仍待驗證。
+
+### 八、尚待確認事項
+
+- Bot 帳號端的實際請求驗證（HUMAN gate）。
+- 達到每日配額上限時的錯誤回傳格式。
+- 請求欄位中哪些為嚴格必填。
+- 長寬比（aspect ratio）之編碼格式。
+
+---
+
 ## 六、Deep Research（T3.3 依據）
 
 | 方法 | 型態 | 簽章 |
@@ -949,7 +1071,7 @@ output = ModelOutput.model_validate_json(payload)   # client 還原為 None，�
 
 以下尚未反射確認，需要時**必須回報 Commander 補做偵察，不得猜測**：
 
-- `Citation`、`ChatHistory` 的欄位結構
-- `GeneratedVideo` / `GeneratedMedia` 的屬性與 `save()` 簽章（T3.2b 若處理影音需補）
+- `Citation` 的欄位結構仍未涵蓋（`ChatHistory` 已由 §五之二 涵蓋）
+- `GeneratedVideo` 的屬性與 `save()` 簽章已由 §五之二 涵蓋；`GeneratedMedia`（音樂）仍未涵蓋（T3.2b 若處理音樂需補）
 - `Image.url` 的對外可存取性 → **由 T3.2a HUMAN gate 實測回答**
 - 各例外的實際觸發條件與 HTTP 狀態碼對應 → 需 live 觀察，屬 G1/G2 範圍
