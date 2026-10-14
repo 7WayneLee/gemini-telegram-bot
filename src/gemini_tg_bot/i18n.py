@@ -172,6 +172,54 @@ MESSAGES: dict[str, dict[str, str]] = {
         LANGUAGE_ENGLISH: "Selected model: {model} · {level}",
         LANGUAGE_CHINESE: "已選擇模型：{model} · {level}",
     },
+    "group_model.current": {
+        LANGUAGE_ENGLISH: "Current group model: {model} · {level}\nSource: {source}\nChoose a model:",
+        LANGUAGE_CHINESE: "目前群組模型：{model} · {level}\n來源：{source}\n請選擇模型：",
+    },
+    "group_model.source_default": {
+        LANGUAGE_ENGLISH: "Env default",
+        LANGUAGE_CHINESE: "環境設定預設值",
+    },
+    "group_model.source_override": {
+        LANGUAGE_ENGLISH: "/group_model",
+        LANGUAGE_CHINESE: "/group_model",
+    },
+    "group_model.reset": {
+        LANGUAGE_ENGLISH: "Reset to default",
+        LANGUAGE_CHINESE: "重設為預設值",
+    },
+    "group_model.choose_thinking": {
+        LANGUAGE_ENGLISH: "Choose a thinking level for group model {model}:",
+        LANGUAGE_CHINESE: "請選擇群組模型 {model} 的思考等級：",
+    },
+    "group_model.selected": {
+        LANGUAGE_ENGLISH: (
+            "Group model set by /group_model: {model} · {level}\n"
+            "Applies to all groups from the next group message."
+        ),
+        LANGUAGE_CHINESE: (
+            "已透過 /group_model 設定群組模型：{model} · {level}\n"
+            "從下一則群組訊息起套用至所有群組。"
+        ),
+    },
+    "group_model.reset_done": {
+        LANGUAGE_ENGLISH: (
+            "Group model reset to env default: {model} · {level}\n"
+            "Applies to all groups from the next group message."
+        ),
+        LANGUAGE_CHINESE: (
+            "群組模型已重設為環境設定預設值：{model} · {level}\n"
+            "從下一則群組訊息起套用至所有群組。"
+        ),
+    },
+    "group_model.invalid": {
+        LANGUAGE_ENGLISH: "Invalid group model option. Please run /group_model again.",
+        LANGUAGE_CHINESE: "無效的群組模型選項，請重新執行 /group_model。",
+    },
+    "group_model.unavailable": {
+        LANGUAGE_ENGLISH: "This model is no longer available. Please run /group_model again.",
+        LANGUAGE_CHINESE: "此模型已無法使用，請重新執行 /group_model。",
+    },
     "temp.enabled": {
         LANGUAGE_ENGLISH: "Temporary mode is on.",
         LANGUAGE_CHINESE: "Temporary mode 已開啟。",

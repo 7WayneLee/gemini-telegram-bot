@@ -130,6 +130,7 @@ async def _run_polling(settings: Settings) -> None:
         from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
 
         sessions = ChatSessionRegistry(service, database)
+        await sessions.load_group_model_override()
         auth = AuthMiddleware(
             admin_user_id=settings.admin_user_id,
             allowed_user_ids=settings.allowed_user_ids,

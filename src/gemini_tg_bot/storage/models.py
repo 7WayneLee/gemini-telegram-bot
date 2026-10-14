@@ -21,6 +21,16 @@ CREATE TABLE IF NOT EXISTS group_threads (
 """
 
 
+GROUP_MODEL_OVERRIDE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS group_model_override (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    model_name     TEXT NOT NULL,
+    thinking_level TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+"""
+
+
 SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS chat_sessions (
     chat_id       INTEGER PRIMARY KEY,
@@ -114,6 +124,46 @@ class GroupThread:
     cid: str | None = None
     metadata: ChatMetadata | None = None
     created_at: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GroupModelOverride:
+    model_name: str
+    thinking_level: str
+    updated_at: str
+
+
+class GroupModelOverrideDAO:
+    """Store the single administrator override for every group."""
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def get(self) -> GroupModelOverride | None:
+        async with self._connection.execute(
+            "SELECT model_name, thinking_level, updated_at "
+            "FROM group_model_override WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return GroupModelOverride(**dict(row)) if row is not None else None
+
+    async def set(self, override: GroupModelOverride) -> None:
+        await self._connection.execute(
+            """
+            INSERT INTO group_model_override (id, model_name, thinking_level, updated_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                model_name = excluded.model_name,
+                thinking_level = excluded.thinking_level,
+                updated_at = excluded.updated_at
+            """,
+            (override.model_name, override.thinking_level, override.updated_at),
+        )
+        await self._connection.commit()
+
+    async def clear(self) -> None:
+        await self._connection.execute("DELETE FROM group_model_override WHERE id = 1")
+        await self._connection.commit()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -12,13 +12,14 @@ from .models import (
     ADMIN_NOTIFICATION_SCHEMA_SQL,
     CHAT_SESSION_LANGUAGE_COLUMN,
     CHAT_SESSION_THINKING_COLUMN,
+    GROUP_MODEL_OVERRIDE_SCHEMA_SQL,
     GROUP_THREAD_SCHEMA_SQL,
     SCHEMA_SQL,
     TELEGRAM_CHAT_ACCESS_SCHEMA_SQL,
 )
 
 
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 
 _TELEGRAM_ACCESS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS telegram_user_access (
@@ -49,6 +50,7 @@ async def migrate(connection: aiosqlite.Connection) -> None:
         7: _migrate_to_v7,
         8: _migrate_to_v8,
         9: _migrate_to_v9,
+        10: _migrate_to_v10,
     }
     for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
         await migrations[version](connection)
@@ -158,6 +160,14 @@ async def _migrate_to_v9(connection: aiosqlite.Connection) -> None:
     except BaseException:
         await connection.rollback()
         raise
+
+
+async def _migrate_to_v10(connection: aiosqlite.Connection) -> None:
+    await _run_schema_migration(
+        connection,
+        GROUP_MODEL_OVERRIDE_SCHEMA_SQL,
+        version=10,
+    )
 
 
 async def _run_schema_migration(

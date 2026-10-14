@@ -23,6 +23,8 @@ from gemini_tg_bot.storage.db import Database
 from gemini_tg_bot.storage.models import (
     ChatSession as StoredChatSession,
     ChatSessionDAO,
+    GroupModelOverride,
+    GroupModelOverrideDAO,
     GroupThread,
     GroupThreadDAO,
 )
@@ -46,6 +48,15 @@ class ChatState:
     updated_at: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class GroupModelSettings:
+    """One immutable model/effort pair, also identifying its configuration source."""
+
+    model_name: str
+    thinking_level: ThinkingLevel
+    overridden: bool = False
+
+
 class ChatSessionRegistry:
     """Map Telegram chat IDs to Gemini sessions and persist their metadata."""
 
@@ -62,15 +73,17 @@ class ChatSessionRegistry:
         self._service = service
         self._dao = ChatSessionDAO(database.connection)
         self._group_threads = GroupThreadDAO(database.connection)
+        self._group_override = GroupModelOverrideDAO(database.connection)
+        self._group_settings_lock = asyncio.Lock()
         self._sessions: dict[int, ChatSession] = {}
         self._lock = asyncio.Lock()
         settings = getattr(service, "_settings", None)
-        self._group_model = group_model or getattr(
+        default_group_model = group_model or getattr(
             settings,
             "group_model",
             DEFAULT_GROUP_MODEL,
         )
-        self._group_thinking_level = ThinkingLevel(
+        default_group_level = ThinkingLevel(
             getattr(settings, "group_thinking_level", DEFAULT_THINKING_LEVEL)
         )
         self._group_thread_retention_days = (
@@ -91,25 +104,70 @@ class ChatSessionRegistry:
                 DEFAULT_GROUP_THREAD_MAX_PER_CHAT,
             )
         )
-        if not self._group_model:
+        if not default_group_model:
             raise ValueError("group_model must not be empty")
         if self._group_thread_retention_days <= 0:
             raise ValueError("group_thread_retention_days must be positive")
         if self._group_thread_max_per_chat <= 0:
             raise ValueError("group_thread_max_per_chat must be positive")
         self._now = now or (lambda: datetime.now(UTC))
+        self._group_defaults = GroupModelSettings(default_group_model, default_group_level)
+        self._group_settings = self._group_defaults
+
+    @property
+    def group_settings(self) -> GroupModelSettings:
+        """Capture the current pair once before a request performs any awaits."""
+
+        return self._group_settings
 
     @property
     def group_model_name(self) -> str:
         """Return the configured group model name used for usage records."""
 
-        return self._group_model
+        return self._group_settings.model_name
 
     @property
     def group_thinking_level(self) -> ThinkingLevel:
-        """Return the fixed configured effort for group conversations."""
+        """Return the current effort for group conversations."""
 
-        return self._group_thinking_level
+        return self._group_settings.thinking_level
+
+    async def load_group_model_override(self) -> None:
+        """Load a persisted pair at startup without contacting Gemini."""
+
+        async with self._group_settings_lock:
+            override = await self._group_override.get()
+            self._group_settings = self._group_defaults
+            if override is None:
+                return
+            try:
+                level = ThinkingLevel(override.thinking_level)
+            except (ValueError, TypeError):
+                LOGGER.warning("Ignoring invalid group model override field: thinking_level")
+                return
+            self._group_settings = GroupModelSettings(override.model_name, level, True)
+
+    async def set_group_model(self, model_name: str, level: ThinkingLevel) -> None:
+        """Commit both values before making one atomic in-memory replacement."""
+
+        if not model_name:
+            raise ValueError("model_name must not be empty")
+        level = ThinkingLevel(level)
+        async with self._group_settings_lock:
+            await self._group_override.set(GroupModelOverride(
+                model_name=model_name,
+                thinking_level=level.value,
+                updated_at=_timestamp(self._now),
+            ))
+            self._group_settings = GroupModelSettings(model_name, level, True)
+
+    async def reset_group_model(self) -> GroupModelSettings:
+        """Delete the override and restore the original env defaults together."""
+
+        async with self._group_settings_lock:
+            await self._group_override.clear()
+            self._group_settings = self._group_defaults
+            return self._group_settings
 
     async def get_state(self, chat_id: int) -> ChatState:
         """Return persisted state, or defaults for a chat not seen before."""
@@ -177,16 +235,19 @@ class ChatSessionRegistry:
         self,
         chat_id: int,
         bot_message_id: int | None = None,
+        *,
+        settings: GroupModelSettings | None = None,
     ) -> tuple[ChatSession, bool]:
-        """Start a fixed-settings group session, restoring a known reply."""
+        """Start a group session with one captured pair, restoring a known reply."""
 
+        settings = settings if settings is not None else self.group_settings
         async with self._lock:
             thread = (
                 await self._group_threads.get(chat_id, bot_message_id)
                 if bot_message_id is not None
                 else None
             )
-            return self._start_group_chat(thread), thread is not None
+            return self._start_group_chat(thread, settings), thread is not None
 
     async def persist_group_session(
         self,
@@ -326,17 +387,19 @@ class ChatSessionRegistry:
             gem=record.gem_id if record is not None else None,
         )
 
-    def _start_group_chat(self, thread: GroupThread | None) -> ChatSession:
+    def _start_group_chat(
+        self, thread: GroupThread | None, settings: GroupModelSettings
+    ) -> ChatSession:
         """Construct one group session without consulting private-chat state."""
 
         try:
-            model: Any = self._service.client.resolve_model(self._group_model)
+            model: Any = self._service.client.resolve_model(settings.model_name)
             if model is None:
                 raise ValueError("model resolver returned no model")
         except Exception as error:
             LOGGER.warning(
                 "Unable to resolve group model %r (%s); using account default",
-                self._group_model,
+                settings.model_name,
                 type(error).__name__,
             )
             model = None

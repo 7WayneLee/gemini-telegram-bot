@@ -18,6 +18,7 @@ from telegram.error import NetworkError, RetryAfter
 from gemini_tg_bot.config import Settings
 from gemini_tg_bot.gemini import service as service_module
 from gemini_tg_bot.gemini.service import GeminiService
+from gemini_tg_bot.gemini.sessions import GroupModelSettings
 from gemini_tg_bot.gemini.thinking import ThinkingLevel
 from gemini_tg_bot.queue import QueueAcquireTimeout, RateLimitExceeded
 from gemini_tg_bot.telegram import handlers as handlers_module
@@ -117,7 +118,7 @@ class Harness:
             self.clock.advance(0.5)
             return self.session
 
-        async def group_session(*args):
+        async def group_session(*args, **kwargs):
             return await get_session(), False
 
         async def persist(*args):
@@ -159,8 +160,8 @@ class Harness:
         self.sessions = SimpleNamespace(
             get_state=get_state, get_or_create=get_session, start_new=get_session,
             start_group_session=group_session, persist=persist,
-            persist_group_session=persist, group_model_name="FAKE_GROUP_MODEL",
-            group_thinking_level=ThinkingLevel.LOW,
+            persist_group_session=persist,
+            group_settings=GroupModelSettings("FAKE_GROUP_MODEL", ThinkingLevel.LOW),
         )
 
         @asynccontextmanager

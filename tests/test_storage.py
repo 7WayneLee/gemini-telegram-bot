@@ -21,6 +21,12 @@ from gemini_tg_bot.storage.models import (
 
 
 EXPECTED_SCHEMA = {
+    "group_model_override": [
+        ("id", "INTEGER", 0, None, 1),
+        ("model_name", "TEXT", 1, None, 0),
+        ("thinking_level", "TEXT", 1, None, 0),
+        ("updated_at", "TEXT", 1, None, 0),
+    ],
     "chat_sessions": [
         ("chat_id", "INTEGER", 0, None, 1),
         ("cid", "TEXT", 0, None, 0),
@@ -523,7 +529,7 @@ async def test_v9_migrates_legacy_thinking_and_matches_fresh_columns(tmp_path) -
 
     async with Database(path) as migrated:
         columns = await _column_names(migrated, "chat_sessions")
-        assert await _user_version(migrated) == 9
+        assert await _user_version(migrated) == LATEST_SCHEMA_VERSION
         dao = ChatSessionDAO(migrated.connection)
         assert (await dao.get(1)).thinking_level == "high"
         assert (await dao.get(2)).thinking_level is None

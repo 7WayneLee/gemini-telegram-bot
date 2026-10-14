@@ -29,6 +29,7 @@ from gemini_tg_bot.__main__ import (
 )
 from gemini_tg_bot.config import RUNTIME_CREDENTIALS_FILENAME
 from gemini_tg_bot.gemini.service import DegradedReason, ServiceState
+from gemini_tg_bot.gemini.sessions import GroupModelSettings
 from gemini_tg_bot.gemini.thinking import ThinkingLevel, MEDIUM_WIRE_VALUE
 from gemini_tg_bot.gemini import thinking as thinking_module
 from gemini_tg_bot.i18n import (
@@ -298,7 +299,7 @@ class _StreamingSession:
 def registry() -> AsyncMock:
     mocked = AsyncMock(spec=_RegistrySpec)
     mocked.get_state.return_value = _state()
-    mocked.group_thinking_level = ThinkingLevel.MEDIUM
+    mocked.group_settings = GroupModelSettings("flash", ThinkingLevel.MEDIUM)
     return mocked
 
 
@@ -589,8 +590,8 @@ async def test_each_group_gemini_command_starts_and_records_a_fresh_thread(
     await handlers.gemini(second, SimpleNamespace(args=["second"]))
 
     assert registry.start_group_session.await_args_list == [
-        call(-1001, None),
-        call(-1001, None),
+        call(-1001, None, settings=registry.group_settings),
+        call(-1001, None, settings=registry.group_settings),
     ]
     assert sessions[0].calls == [
         ("first", {"temporary": False, "extended_thinking": True})
@@ -772,8 +773,8 @@ async def test_group_reply_restores_and_extends_the_referenced_thread(
     await handlers.text_message(follow_up, _bot_context())
 
     assert registry.start_group_session.await_args_list == [
-        call(-1001, None),
-        call(-1001, 301),
+        call(-1001, None, settings=registry.group_settings),
+        call(-1001, 301, settings=registry.group_settings),
     ]
     registry.persist_group_session.assert_has_awaits(
         [
@@ -808,7 +809,7 @@ async def test_unknown_group_reply_starts_a_new_conversation_without_notice(
 
     await handlers.text_message(update, _bot_context())
 
-    registry.start_group_session.assert_awaited_once_with(-1001, 999)
+    registry.start_group_session.assert_awaited_once_with(-1001, 999, settings=registry.group_settings)
     assert [
         call_.args[0]
         for call_ in update.effective_message.reply_text.await_args_list
@@ -865,8 +866,8 @@ async def test_failed_group_restore_notifies_then_retries_fresh(
     await handlers.text_message(update, _bot_context())
 
     assert registry.start_group_session.await_args_list == [
-        call(-1001, 450),
-        call(-1001),
+        call(-1001, 450, settings=registry.group_settings),
+        call(-1001, settings=registry.group_settings),
     ]
     failed_placeholder.delete.assert_awaited_once_with()
     assert update.effective_message.reply_text.await_args_list[1] == call(
@@ -1009,7 +1010,7 @@ async def test_group_media_reply_uses_fixed_settings_and_extends_thread(
 
     await handlers.media_message(update, _bot_context())
 
-    registry.start_group_session.assert_awaited_once_with(-1001, 600)
+    registry.start_group_session.assert_awaited_once_with(-1001, 600, settings=registry.group_settings)
     session.send_message.assert_awaited_once_with(
         "analyze",
         files=["prepared-file"],
@@ -1854,7 +1855,7 @@ async def test_gemini_quoting_own_answer_still_opens_a_new_conversation(
 
     await handlers.gemini(update, SimpleNamespace(args=["why"]))
 
-    registry.start_group_session.assert_awaited_once_with(-1001, None)
+    registry.start_group_session.assert_awaited_once_with(-1001, None, settings=registry.group_settings)
     assert session.calls == [
         (
             "Quoted message from Gemini Bot:\n"
@@ -2157,7 +2158,7 @@ async def test_group_text_reply_to_this_bot_continues_without_scaffolding(
 
     await handlers.text_message(update, _bot_context())
 
-    registry.start_group_session.assert_awaited_once_with(-1001, 700)
+    registry.start_group_session.assert_awaited_once_with(-1001, 700, settings=registry.group_settings)
     assert session.calls == [
         (
             "and what about the cache?",
@@ -3272,7 +3273,7 @@ async def test_stream_uses_chat_or_group_level_and_scopes_iteration(handlers_fac
     registry.get_or_create.return_value = session
     registry.start_group_session.return_value = (session, False)
     registry.get_state.return_value = _state(thinking_level=ThinkingLevel.HIGH if is_group else level)
-    registry.group_thinking_level = level
+    registry.group_settings = GroupModelSettings("flash", level)
     handlers, _ = handlers_factory()
     update = _update(text="question", chat_id=-1001 if is_group else 202,
                      chat_type=ChatType.GROUP if is_group else ChatType.PRIVATE,
@@ -3309,7 +3310,7 @@ async def test_attachment_uses_chat_or_group_level_and_scopes_send(handlers_fact
     registry.get_or_create.return_value = session
     registry.start_group_session.return_value = (session, False)
     registry.get_state.return_value = _state(thinking_level=ThinkingLevel.HIGH if is_group else level)
-    registry.group_thinking_level = level
+    registry.group_settings = GroupModelSettings("flash", level)
     handlers, _ = handlers_factory(media_handler=media)
     update = _update(text="caption", chat_id=-1001 if is_group else 202,
                      chat_type=ChatType.GROUP if is_group else ChatType.PRIVATE,

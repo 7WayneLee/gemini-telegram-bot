@@ -25,6 +25,7 @@ from telegram.ext import Application, ExtBot
 from gemini_tg_bot.config import Settings
 from gemini_tg_bot.gemini import service as service_module
 from gemini_tg_bot.gemini.service import GeminiService, ServiceState
+from gemini_tg_bot.gemini.sessions import GroupModelSettings
 from gemini_tg_bot.gemini.thinking import (
     HIGH_WIRE_VALUE,
     MEDIUM_WIRE_VALUE,
@@ -135,8 +136,7 @@ class Harness:
         self.sessions = AsyncMock()
         self.levels: dict[int, ThinkingLevel] = {}
         self.languages: dict[int, str] = {}
-        self.sessions.group_thinking_level = ThinkingLevel.MEDIUM
-        self.sessions.group_model_name = "fake-model"
+        self.sessions.group_settings = GroupModelSettings("fake-model", ThinkingLevel.MEDIUM)
         self.chat_sessions: dict[int, Any] = {}
 
         async def state(chat_id: int) -> Any:
@@ -149,7 +149,7 @@ class Harness:
         async def session(chat_id: int) -> Any:
             return self.chat_sessions.setdefault(chat_id, FakeChatSession(chat_id, self.gate))
 
-        async def group_session(chat_id: int, parent: Any = None) -> Any:
+        async def group_session(chat_id: int, parent: Any = None, *, settings: Any = None) -> Any:
             return await session(chat_id), False
 
         self.sessions.get_state.side_effect = state

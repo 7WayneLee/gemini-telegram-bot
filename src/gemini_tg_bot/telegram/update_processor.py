@@ -14,7 +14,7 @@ from telegram.ext import BaseUpdateProcessor
 LOCK_FREE_COMMANDS = frozenset(
     {
         "start", "help", "status", "setcookie", "allow",
-        "deny", "allow_chat", "deny_chat", "access", "health",
+        "deny", "allow_chat", "deny_chat", "access", "health", "group_model",
     }
 )
 

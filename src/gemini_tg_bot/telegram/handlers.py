@@ -83,6 +83,15 @@ ACCESS_NAME_LOOKUP_LIMIT = 50
 MODEL_CALLBACK_PREFIX = "model:"
 MODEL_LEVEL_CALLBACK_PREFIX = "mlvl:"
 LANGUAGE_CALLBACK_PREFIX = "lang:"
+GROUP_MODEL_CALLBACK_PREFIX = "gmdl:"
+GROUP_MODEL_LEVEL_CALLBACK_PREFIX = "glvl:"
+GROUP_MODEL_RESET_CALLBACK_PREFIX = "grst:"
+GROUP_MODEL_RESET_CALLBACK = f"{GROUP_MODEL_RESET_CALLBACK_PREFIX}default"
+GROUP_MODEL_CALLBACK_PREFIXES = (
+    GROUP_MODEL_CALLBACK_PREFIX,
+    GROUP_MODEL_LEVEL_CALLBACK_PREFIX,
+    GROUP_MODEL_RESET_CALLBACK_PREFIX,
+)
 
 HELP_COMMAND = "help"
 
@@ -754,9 +763,76 @@ class TelegramHandlers:
             "deny_chat": self.deny_chat,
             "access": self.access,
             "health": self.health,
+            "group_model": self.group_model,
         }.get(command)
         if handler is not None:
             await handler(update, context)
+
+    async def group_model(self, update: Update, context: CallbackContext) -> None:
+        """Offer the administrator a global group model picker without a queue slot."""
+
+        del context
+        identity = await self._require_admin(update)
+        if identity is None:
+            return
+        _, chat_id, message = identity
+        language = await self._chat_language(update, chat_id)
+        settings = self._sessions.group_settings
+
+        def listing(client: Any) -> tuple[Any, str]:
+            models = client.list_models()
+            return models, _resolved_model_label(client, settings.model_name)
+
+        try:
+            self._ensure_service_accepting_requests()
+            models, current_label = await self._service.execute(listing)
+        except ServiceUnavailableError as error:
+            await send_text_or_busy(
+                message, _service_unavailable_message(error, language), language=language
+            )
+            return
+        except Exception as error:
+            _log_handler_error("group model list", error)
+            await send_text_or_busy(
+                message, translate("model.list_unavailable", language), language=language
+            )
+            return
+
+        buttons = []
+        for model in models or ():
+            if not model.is_available:
+                continue
+            callback_data = f"{GROUP_MODEL_CALLBACK_PREFIX}{model.model_name}"
+            # Ensure the longest level callback fits before offering a model.
+            level_data = (
+                f"{GROUP_MODEL_LEVEL_CALLBACK_PREFIX}{ThinkingLevel.MEDIUM.value}:"
+                f"{model.model_name}"
+            )
+            if not (_valid_callback_data(callback_data) and _valid_callback_data(level_data)):
+                LOGGER.warning(
+                    "Skipping model whose Telegram callback data exceeds %d bytes",
+                    CALLBACK_DATA_LIMIT,
+                )
+                continue
+            buttons.append([InlineKeyboardButton(model.display_name, callback_data=callback_data)])
+        if _valid_callback_data(GROUP_MODEL_RESET_CALLBACK):
+            buttons.append([InlineKeyboardButton(
+                translate("group_model.reset", language),
+                callback_data=GROUP_MODEL_RESET_CALLBACK,
+            )])
+        await send_text_or_busy(
+            message,
+            translate(
+                "group_model.current", language, model=current_label,
+                level=translate(f"thinking.level.{settings.thinking_level.value}", language),
+                source=translate(
+                    "group_model.source_override" if settings.overridden
+                    else "group_model.source_default", language,
+                ),
+            ),
+            language=language,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     async def setcookie(
         self,
@@ -1130,7 +1206,7 @@ class TelegramHandlers:
         )
 
     async def callback(self, update: Update, context: CallbackContext) -> None:
-        """Apply a model, Gem, or language selected by an inline keyboard."""
+        """Apply a private model, group setting, or language from an inline keyboard."""
 
         query = update.callback_query
         user = update.effective_user
@@ -1148,6 +1224,11 @@ class TelegramHandlers:
             )
             return
         data = query.data
+        if isinstance(data, str) and data.startswith(GROUP_MODEL_CALLBACK_PREFIXES):
+            await self._group_model_callback(
+                query, user.id, data, language, is_group=_is_group_update(update)
+            )
+            return
         if not isinstance(data, str) or not _valid_callback_data(data):
             await edit_message_text_or_busy(
                 query,
@@ -1304,8 +1385,9 @@ class TelegramHandlers:
         if is_group:
             language = LANGUAGE_ENGLISH
             temporary = False
-            level = self._sessions.group_thinking_level
-            usage_model = getattr(self._sessions, "group_model_name", None)
+            group_settings = self._sessions.group_settings
+            level = group_settings.thinking_level
+            usage_model = group_settings.model_name
         else:
             state = await self._sessions.get_state(chat_id)
             language = resolve_language(_stored_language(state), telegram_code)
@@ -1355,6 +1437,7 @@ class TelegramHandlers:
                                 await self._sessions.start_group_session(
                                     chat_id,
                                     group_parent_message_id,
+                                    settings=group_settings,
                                 )
                             )
                         elif new_private:
@@ -1402,7 +1485,7 @@ class TelegramHandlers:
                                 do_quote=True,
                             )
                             session, _ = await self._sessions.start_group_session(
-                                chat_id
+                                chat_id, settings=group_settings
                             )
                             stream_message = _StreamingMessageProxy(
                                 message,
@@ -1576,8 +1659,9 @@ class TelegramHandlers:
         if is_group:
             language = LANGUAGE_ENGLISH
             temporary = False
-            level = self._sessions.group_thinking_level
-            usage_model = getattr(self._sessions, "group_model_name", None)
+            group_settings = self._sessions.group_settings
+            level = group_settings.thinking_level
+            usage_model = group_settings.model_name
         else:
             state = await self._sessions.get_state(chat_id)
             language = resolve_language(
@@ -1611,6 +1695,7 @@ class TelegramHandlers:
                                 await self._sessions.start_group_session(
                                     chat_id,
                                     group_parent_message_id,
+                                    settings=group_settings,
                                 )
                             )
                         else:
@@ -1654,7 +1739,7 @@ class TelegramHandlers:
                                 do_quote=True,
                             )
                             session, _ = await self._sessions.start_group_session(
-                                chat_id
+                                chat_id, settings=group_settings
                             )
                             output = await send_upload()
                 self._media.record_upload(upload)
@@ -1789,6 +1874,138 @@ class TelegramHandlers:
         )
         if images:
             await self._media.send_output_images(message, output, caption=caption)
+
+    async def _group_model_callback(
+        self, query: Any, user_id: int, data: str, language: str, *, is_group: bool
+    ) -> None:
+        """Reauthorize every step before validating or changing the global setting."""
+
+        try:
+            is_admin = self._auth is not None and self._auth.is_admin(user_id)
+        except ValueError:
+            is_admin = False
+        if not is_admin:
+            await edit_message_text_or_busy(
+                query, translate("admin.only", language), language=language
+            )
+            return
+        if is_group:
+            await edit_message_text_or_busy(
+                query, translate("command.private_only", language), language=language
+            )
+            return
+        if not _valid_callback_data(data):
+            await edit_message_text_or_busy(
+                query, translate("group_model.invalid", language), language=language
+            )
+            return
+        if data == GROUP_MODEL_RESET_CALLBACK:
+            try:
+                settings = await self._sessions.reset_group_model()
+            except Exception as error:
+                _log_handler_error("group model reset", error)
+                await edit_message_text_or_busy(
+                    query, translate("generic.failure", language), language=language
+                )
+                return
+            # Reset remains usable if Gemini is unavailable; the configured name
+            # still identifies the restored default when resolution fails.
+            label = settings.model_name
+            try:
+                label = await self._service.execute(
+                    lambda client: _resolved_model_label(client, settings.model_name)
+                )
+            except Exception:
+                pass
+            await edit_message_text_or_busy(
+                query, translate(
+                    "group_model.reset_done", language, model=label,
+                    level=translate(f"thinking.level.{settings.thinking_level.value}", language),
+                ), language=language,
+            )
+            return
+
+        level = None
+        try:
+            if data.startswith(GROUP_MODEL_LEVEL_CALLBACK_PREFIX):
+                raw_level, model_name = data[len(GROUP_MODEL_LEVEL_CALLBACK_PREFIX):].split(":", 1)
+                level = ThinkingLevel(raw_level)
+            elif data.startswith(GROUP_MODEL_CALLBACK_PREFIX):
+                model_name = data[len(GROUP_MODEL_CALLBACK_PREFIX):]
+            else:
+                raise ValueError("Invalid reset callback")
+            if not model_name:
+                raise ValueError("Missing model name")
+        except ValueError:
+            await edit_message_text_or_busy(
+                query, translate("group_model.invalid", language), language=language
+            )
+            return
+
+        def resolve(client: Any) -> Any | None:
+            models = client.list_models()
+            if models is None or not any(
+                model.is_available and model.model_name == model_name for model in models
+            ):
+                return None
+            return client.resolve_model(model_name)
+
+        try:
+            self._ensure_service_accepting_requests()
+            selected = await self._service.execute(resolve)
+        except ServiceUnavailableError as error:
+            await edit_message_text_or_busy(
+                query, _service_unavailable_message(error, language), language=language
+            )
+            return
+        except Exception as error:
+            _log_handler_error("group model selection", error)
+            await edit_message_text_or_busy(
+                query, translate("model.list_unavailable", language), language=language
+            )
+            return
+        if selected is None:
+            await edit_message_text_or_busy(
+                query, translate("group_model.unavailable", language), language=language
+            )
+            return
+
+        if level is not None:
+            try:
+                await self._sessions.set_group_model(selected.model_name, level)
+            except Exception as error:
+                _log_handler_error("group model persistence", error)
+                await edit_message_text_or_busy(
+                    query, translate("generic.failure", language), language=language
+                )
+                return
+            await edit_message_text_or_busy(
+                query, translate(
+                    "group_model.selected", language, model=selected.display_name,
+                    level=translate(f"thinking.level.{level.value}", language),
+                ), language=language,
+            )
+            return
+
+        current_level = self._sessions.group_settings.thinking_level
+        buttons = []
+        for option in ThinkingLevel:
+            callback_data = (
+                f"{GROUP_MODEL_LEVEL_CALLBACK_PREFIX}{option.value}:{selected.model_name}"
+            )
+            if not _valid_callback_data(callback_data):
+                await edit_message_text_or_busy(
+                    query, translate("group_model.invalid", language), language=language
+                )
+                return
+            label = translate(f"thinking.level.{option.value}", language)
+            if option is current_level:
+                label = translate("thinking.level.current", language, level=label)
+            buttons.append(InlineKeyboardButton(label, callback_data=callback_data))
+        await edit_message_text_or_busy(
+            query, translate("group_model.choose_thinking", language, model=selected.display_name),
+            language=language, reply_markup=InlineKeyboardMarkup([buttons]),
+        )
 
     async def _select_model(
         self,
@@ -2241,6 +2458,7 @@ def register_handlers(
                 "deny_chat",
                 "access",
                 "health",
+                "group_model",
             ],
             handlers.admin_command,
         ),
@@ -2251,7 +2469,8 @@ def register_handlers(
             handlers.callback,
             pattern=(
                 rf"^(?:{MODEL_CALLBACK_PREFIX}|{MODEL_LEVEL_CALLBACK_PREFIX}|"
-                rf"{LANGUAGE_CALLBACK_PREFIX})"
+                rf"{LANGUAGE_CALLBACK_PREFIX}|{GROUP_MODEL_CALLBACK_PREFIX}|"
+                rf"{GROUP_MODEL_LEVEL_CALLBACK_PREFIX}|{GROUP_MODEL_RESET_CALLBACK_PREFIX})"
             ),
         )
     )
@@ -2310,6 +2529,16 @@ async def register_command_menu(
             "Unable to register group Telegram command menu (%s)",
             type(error).__name__,
         )
+
+
+def _resolved_model_label(client: Any, model_name: str) -> str:
+    """Use the upstream display name when resolvable, otherwise the saved name."""
+
+    try:
+        model = client.resolve_model(model_name)
+        return model.display_name if model is not None else model_name
+    except Exception:
+        return model_name
 
 
 def _message_identity(update: Update) -> tuple[int, int, Any] | None:
