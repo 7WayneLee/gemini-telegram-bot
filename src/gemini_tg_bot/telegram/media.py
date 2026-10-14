@@ -285,7 +285,12 @@ class MediaHandler:
             return DeliveryResult(DeliveryMode.URL)
 
         with TemporaryDirectory(prefix="gemini-tg-video-", dir=self._temp_root) as directory:
-            saved_path = Path(await video.save(path=directory))
+            saved = await video.save(path=directory)
+            video_path = saved.get("video")
+            if not video_path:
+                raise ValueError("Video download did not produce a video file")
+            # Any video_thumbnail stays in the temporary directory for cleanup.
+            saved_path = Path(video_path)
             num_bytes = saved_path.stat().st_size
             if num_bytes > MAX_VIDEO_BYTES:
                 raise VideoTooLargeError

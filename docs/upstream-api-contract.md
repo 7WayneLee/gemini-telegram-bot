@@ -876,6 +876,7 @@ async def save(
 - `ChatHistory`（`types/chathistory.py` 第 33–53 行）具有 `cid` 與 `turns`；每個 `ChatTurn`（第 8–31 行）具有 `role`、`text` 與 `model_output`。
 - `fetch_latest_chat_response(cid, limit=5, match=None)`（`components/chat_mixin.py` 第 270–300 行）可回傳符合條件之最新 model output。
 - `GeneratedVideo.save()`（`types/video.py` 第 47–107 行、第 177–202 行）：
+  - 回傳型別為 `dict[str, str | None]`（第 73–74 行），包含 `"video"` 與 `"video_thumbnail"` 兩個路徑欄位（第 198 行）；若設定 `thumbnail`，會先下載縮圖（第 182–187 行）。
   - 使用 client 的 cookies（第 87 行）與 Referer header（第 125 行）下載。
   - 當伺服器回應 206（"still generating"）時，每 10 秒自動重試輪詢（第 177–201 行）。
 - **上游完全沒有請求生成影片的參數**：`generate_content`、`generate_content_stream`、`send_message` 與 `send_message_stream` 皆無影片旗標。要送出官方影片請求，需要實作類似 `ThinkingLevelGeminiClient`（§二之二）的請求轉接層（request adapter）。

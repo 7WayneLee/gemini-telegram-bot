@@ -386,6 +386,7 @@ class TelegramHandlers:
         self._enable_video_generation = enable_video_generation
         self._video_jobs = VideoJobManager(
             service=service, media=self._media, timeout_sec=video_timeout_sec,
+            delivery_timeout_sec=request_timeout_sec,
             clock=self._clock,
         )
 

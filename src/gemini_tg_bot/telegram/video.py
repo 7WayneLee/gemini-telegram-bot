@@ -41,6 +41,7 @@ class VideoJobManager:
         service: Any,
         media: MediaHandler,
         timeout_sec: int = 300,
+        delivery_timeout_sec: int = 600,
         poll_interval: float = 10,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -48,6 +49,7 @@ class VideoJobManager:
         self._service = service
         self._media = media
         self._timeout_sec = timeout_sec
+        self._delivery_timeout_sec = delivery_timeout_sec
         self._poll_interval = poll_interval
         self._sleep = sleep
         self._clock = clock
@@ -106,13 +108,14 @@ class VideoJobManager:
                     # Upstream returns the newest output even if match failed.
                     if output is None or not output.videos:
                         continue
-                    await self._media.send_video(message, output.videos[0])
-                    try:
-                        await delete_message(status)
-                    except Exception as error:
-                        LOGGER.warning("Unable to delete video status (%s)", type(error).__name__)
-                    ok, error_kind = True, None
                     break
+            async with asyncio.timeout(self._delivery_timeout_sec):
+                await self._media.send_video(message, output.videos[0])
+            try:
+                await delete_message(status)
+            except Exception as error:
+                LOGGER.warning("Unable to delete video status (%s)", type(error).__name__)
+            ok, error_kind = True, None
         except asyncio.CancelledError:
             raise
         except TimeoutError:

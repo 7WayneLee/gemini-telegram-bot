@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
@@ -74,6 +75,7 @@ class ManualClock:
     def __init__(self):
         self.now = 100.0
         self.sleeps = asyncio.Queue()
+        self.timeouts = []
 
     def __call__(self):
         return self.now
@@ -83,29 +85,53 @@ class ManualClock:
         await self.sleeps.put((delay, future))
         await future
 
+    @asynccontextmanager
+    async def timeout(self, delay):
+        # Use asyncio's cancellation/TimeoutError handling with a manual deadline.
+        async with asyncio.timeout_at(None) as timer:
+            entry = (self.now + delay, timer)
+            self.timeouts.append(entry)
+            try:
+                yield timer
+            finally:
+                self.timeouts.remove(entry)
+
+    def advance(self, delay):
+        self.now += delay
+        for deadline, timer in self.timeouts:
+            if self.now >= deadline and not timer.expired():
+                timer.reschedule(asyncio.get_running_loop().time() - 1)
+
     async def tick(self):
         delay, future = await asyncio.wait_for(self.sleeps.get(), 1)
-        self.now += delay
+        self.advance(delay)
         future.set_result(None)
         return delay
 
 
 class FakeVideo:
-    def __init__(self, size=12):
+    def __init__(self, size=12, *, with_thumbnail=False):
         self.url = URL
         self.size = size
         self.paths = []
+        self.thumbnail = "https://example.invalid/FAKE_THUMBNAIL" if with_thumbnail else ""
 
     async def save(self, *, path):
+        thumbnail = None
+        if self.thumbnail:
+            thumbnail_path = Path(path) / "video.jpg"
+            thumbnail_path.write_bytes(b"FAKE_THUMBNAIL_BYTES")
+            self.paths.append(thumbnail_path)
+            thumbnail = str(thumbnail_path)
         destination = Path(path) / "video.mp4"
         self.paths.append(destination)
         with destination.open("wb") as file:
             file.truncate(self.size)
-        return str(destination)
+        return {"video": str(destination), "video_thumbnail": thumbnail}
 
 
 class Harness:
-    def __init__(self, tmp_path, database, *, enabled=True, timeout=300, malformed=False):
+    def __init__(self, tmp_path, database, *, enabled=True, timeout=300, delivery_timeout=600, malformed=False):
         self.clock = ManualClock()
         self.session = SimpleNamespace(cid=CID, send_message=AsyncMock(side_effect=self.initial_send))
         self.client = SimpleNamespace(
@@ -126,6 +152,7 @@ class Harness:
             usage_dao=self.usage, egress_meter=self.egress, cookie_path=tmp_path,
             secure_1psid=SecretStr("FAKE_1PSID_FOR_TEST"), media_handler=self.media,
             clock=self.clock, enable_video_generation=enabled, video_timeout_sec=timeout,
+            request_timeout_sec=delivery_timeout,
         )
         self.handlers._video_jobs._sleep = self.clock.sleep
         self.malformed = malformed
@@ -462,6 +489,109 @@ async def test_url_success_skips_relay(harness):
     h.message.reply_video.assert_awaited_once_with(URL)
     assert not video.paths and h.egress.month_to_date_bytes == 0
     assert (await h.rows())[0].ok
+
+
+async def test_relay_uses_video_path_and_cleans_thumbnail(harness):
+    """Real save results include a thumbnail that must never be uploaded or metered."""
+
+    h = harness()
+    video = FakeVideo(size=19, with_thumbnail=True)
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    task = await h.start()
+    await h.clock.tick()
+    await asyncio.wait_for(task, 1)
+
+    assert h.relay_payloads == [(bytes(19), str(video.paths[1]), {"supports_streaming": True})]
+    assert video.paths[0].suffix == ".jpg" and video.paths[1].suffix == ".mp4"
+    assert h.egress.month_to_date_bytes == 19
+    assert all(not path.exists() and not path.parent.exists() for path in video.paths)
+    h.status.delete.assert_awaited_once_with()
+    rows = await h.rows()
+    assert len(rows) == 1 and rows[0].ok
+
+
+@pytest.mark.parametrize("missing_key", [False, True])
+async def test_save_without_video_is_unavailable(harness, missing_key):
+    """A missing video path must fail delivery without attempting a file upload."""
+
+    class MissingVideo(FakeVideo):
+        async def save(self, *, path):
+            result = await super().save(path=path)
+            result["video"] = None
+            if missing_key:
+                del result["video"]
+            return result
+
+    h = harness()
+    video = MissingVideo(with_thumbnail=True)
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    task = await h.start()
+    await h.clock.tick()
+    await asyncio.wait_for(task, 1)
+
+    # The optimistic URL attempt was rejected; no subsequent file send occurs.
+    h.message.reply_video.assert_awaited_once_with(URL)
+    assert h.relay_payloads == [] and h.egress.month_to_date_bytes == 0
+    assert h.status.edit_text.await_args == call(translate("video.unavailable", "en"), parse_mode=None)
+    h.status.delete.assert_not_awaited()
+    assert all(not path.exists() for path in video.paths)
+    rows = await h.rows()
+    assert len(rows) == 1 and not rows[0].ok and rows[0].error_kind is not None
+
+
+async def test_late_video_has_a_separate_delivery_deadline(harness, monkeypatch):
+    """A video found before polling expires deserves the full delivery budget."""
+
+    h = harness(timeout=25, delivery_timeout=60)
+    monkeypatch.setattr(asyncio, "timeout", h.clock.timeout)
+
+    class SlowVideo(FakeVideo):
+        async def save(self, *, path):
+            await h.clock.sleep(20)
+            return await super().save(path=path)
+
+    video = SlowVideo(with_thumbnail=True)
+    h.client.fetch_latest_chat_response.side_effect = [SimpleNamespace(videos=[]), SimpleNamespace(videos=[video])]
+    task = await h.start()
+    assert await h.clock.tick() == 10
+    assert await h.clock.tick() == 10
+    # Five polling seconds remain, but the relay needs another twenty seconds.
+    assert await h.clock.tick() == 20
+    await asyncio.wait_for(task, 1)
+
+    assert len(h.relay_payloads) == 1 and h.egress.month_to_date_bytes == 12
+    h.status.delete.assert_awaited_once_with()
+    rows = await h.rows()
+    assert len(rows) == 1 and rows[0].ok and rows[0].latency_ms == 42000
+
+
+async def test_delivery_deadline_reports_timeout_and_cleans_files(harness, monkeypatch):
+    """A relay stuck in upstream save retries must stop at REQUEST_TIMEOUT_SEC."""
+
+    h = harness(timeout=300, delivery_timeout=7)
+    monkeypatch.setattr(asyncio, "timeout", h.clock.timeout)
+
+    class SlowVideo(FakeVideo):
+        async def save(self, *, path):
+            result = await super().save(path=path)
+            await h.clock.sleep(8)
+            return result
+
+    video = SlowVideo(with_thumbnail=True)
+    h.client.fetch_latest_chat_response.return_value = SimpleNamespace(videos=[video])
+    task = await h.start()
+    assert await h.clock.tick() == 10
+    assert await h.clock.tick() == 8
+    await asyncio.wait_for(task, 1)
+
+    assert h.status.edit_text.await_args == call(translate("video.timeout", "en"), parse_mode=None)
+    h.status.delete.assert_not_awaited()
+    h.message.reply_video.assert_awaited_once_with(URL)
+    assert not h.relay_payloads and h.egress.month_to_date_bytes == 0
+    assert all(not path.exists() and not path.parent.exists() for path in video.paths)
+    assert not h.handlers._video_jobs._jobs
+    rows = await h.rows()
+    assert len(rows) == 1 and not rows[0].ok and rows[0].error_kind == "timeout"
 
 
 async def test_large_video_is_not_uploaded(harness):
