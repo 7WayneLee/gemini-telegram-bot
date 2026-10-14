@@ -128,6 +128,12 @@ async def send_photo(message: Any, photo: Any, **kwargs: Any) -> Any:
     return await call_telegram(message.reply_photo, photo, **kwargs)
 
 
+async def send_video(message: Any, video: Any, **kwargs: Any) -> Any:
+    """Send a video reply through the protected transport."""
+
+    return await call_telegram(message.reply_video, video, **kwargs)
+
+
 async def send_document(message: Any, document: Any, **kwargs: Any) -> Any:
     """Send a document reply through the protected transport."""
 
@@ -208,6 +214,7 @@ __all__ = [
     "send_document",
     "send_media_group",
     "send_photo",
+    "send_video",
     "send_text",
     "send_text_or_busy",
 ]

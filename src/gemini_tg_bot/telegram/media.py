@@ -24,12 +24,13 @@ from telegram.error import BadRequest
 
 from gemini_tg_bot.i18n import DEFAULT_LANGUAGE, translate
 
-from .sending import send_document, send_media_group, send_photo
+from .sending import send_document, send_media_group, send_photo, send_video
 
 
 LOGGER = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_VIDEO_BYTES = 50 * 1024 * 1024
 CAPTION_LENGTH_SAFETY_MARGIN = 16
 MAX_CAPTION_VISIBLE_LENGTH = (
     MessageLimit.CAPTION_LENGTH - CAPTION_LENGTH_SAFETY_MARGIN
@@ -84,6 +85,10 @@ class MediaUploadError(ValueError):
 
 class UploadTooLargeError(MediaUploadError):
     """Raised when Telegram metadata reports a file above the hard limit."""
+
+
+class VideoTooLargeError(ValueError):
+    """Raised before relaying a video above Telegram's bot upload limit."""
 
 
 class UploadSizeUnknownError(MediaUploadError):
@@ -266,6 +271,26 @@ class MediaHandler:
                     **send_kwargs,
                 )
 
+        self._egress_meter.record(num_bytes)
+        return DeliveryResult(DeliveryMode.RELAY, relayed_bytes=num_bytes)
+
+    async def send_video(self, message: Any, video: Any) -> DeliveryResult:
+        """Try the video URL, then relay a bounded file with measured egress."""
+
+        try:
+            await send_video(message, video.url)
+        except BadRequest:
+            LOGGER.warning("Telegram rejected video URL; falling back to VM relay")
+        else:
+            return DeliveryResult(DeliveryMode.URL)
+
+        with TemporaryDirectory(prefix="gemini-tg-video-", dir=self._temp_root) as directory:
+            saved_path = Path(await video.save(path=directory))
+            num_bytes = saved_path.stat().st_size
+            if num_bytes > MAX_VIDEO_BYTES:
+                raise VideoTooLargeError
+            with saved_path.open("rb") as media_file:
+                await send_video(message, media_file, supports_streaming=True)
         self._egress_meter.record(num_bytes)
         return DeliveryResult(DeliveryMode.RELAY, relayed_bytes=num_bytes)
 

@@ -222,6 +222,11 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="ENABLE_VIDEO_GENERATION",
     )
+    video_timeout_sec: int = Field(
+        default=300,
+        validation_alias="VIDEO_TIMEOUT_SEC",
+        gt=0,
+    )
     enable_audio_generation: bool = Field(
         default=False,
         validation_alias="ENABLE_AUDIO_GENERATION",

@@ -2858,8 +2858,8 @@ def test_registration_places_auth_in_first_group(
     calls = application.add_handler.call_args_list
     assert calls[0].kwargs == {"group": -1}
     assert calls[1].kwargs == {"group": 0}
-    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:11])
-    assert len(calls) == 13
+    assert all(call_.kwargs == {"group": 1} for call_ in calls[2:12])
+    assert len(calls) == 14
     registered_commands = {
         command
         for registered in calls
@@ -2870,6 +2870,7 @@ def test_registration_places_auth_in_first_group(
     assert "lang" not in registered_commands
     assert "think" not in registered_commands
     assert "img" in registered_commands
+    assert "video" in registered_commands
     assert {"gem", "research", "research_status"}.isdisjoint(registered_commands)
     assert {"allow_chat", "deny_chat", "access"} <= registered_commands
 

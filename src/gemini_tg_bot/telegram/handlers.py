@@ -45,7 +45,7 @@ from gemini_tg_bot.gemini.service import (
     ServiceUnavailableError,
     account_status_guidance,
 )
-from gemini_tg_bot.gemini.thinking import ThinkingLevel, thinking_request
+from gemini_tg_bot.gemini.thinking import ThinkingLevel, thinking_request, video_request
 from gemini_tg_bot.i18n import (
     DEFAULT_LANGUAGE,
     LANGUAGE_CHINESE,
@@ -66,10 +66,12 @@ from .sending import (
     call_telegram,
     delete_message,
     edit_message_text_or_busy,
+    edit_text,
     send_text_or_busy,
 )
 from .streaming import stream_response
 from .timing import CURRENT_TIMING, RequestTiming
+from .video import VideoJobManager
 
 if TYPE_CHECKING:
     from gemini_tg_bot.gemini.sessions import ChatSessionRegistry
@@ -116,18 +118,27 @@ GROUP_COMMANDS = frozenset({"start", HELP_COMMAND, "img", "gemini"})
 GROUP_MENU_COMMANDS = GROUP_COMMANDS - {HELP_COMMAND}
 
 
-def _available_commands_for_language(language: str) -> tuple[BotCommand, ...]:
+def _available_commands_for_language(
+    language: str, *, enable_video_generation: bool = False
+) -> tuple[BotCommand, ...]:
+    keys = _AVAILABLE_PUBLIC_COMMAND_KEYS
+    if enable_video_generation:
+        keys += (("video", "command.video.description"),)
     return tuple(
         BotCommand(command, translate(description_key, language))
-        for command, description_key in _AVAILABLE_PUBLIC_COMMAND_KEYS
+        for command, description_key in keys
     )
 
 
-def _commands_for_language(language: str) -> tuple[BotCommand, ...]:
+def _commands_for_language(
+    language: str, *, enable_video_generation: bool = False
+) -> tuple[BotCommand, ...]:
     return tuple(
         command
-        for command in _available_commands_for_language(language)
-        if command.command in PUBLIC_MENU_COMMANDS
+        for command in _available_commands_for_language(
+            language, enable_video_generation=enable_video_generation
+        )
+        if command.command in PUBLIC_MENU_COMMANDS or command.command == "video"
     )
 
 
@@ -139,7 +150,9 @@ def _group_commands_for_language(language: str) -> tuple[BotCommand, ...]:
     )
 
 
-def _help_text(language: str, *, group_only: bool = False) -> str:
+def _help_text(
+    language: str, *, group_only: bool = False, enable_video_generation: bool = False
+) -> str:
     commands = (
         tuple(
             command
@@ -147,7 +160,9 @@ def _help_text(language: str, *, group_only: bool = False) -> str:
             if command.command in GROUP_COMMANDS
         )
         if group_only
-        else _available_commands_for_language(language)
+        else _available_commands_for_language(
+            language, enable_video_generation=enable_video_generation
+        )
     )
     footer_key = "help.footer_group" if group_only else "help.footer"
     return "\n".join(
@@ -351,6 +366,8 @@ class TelegramHandlers:
         now: Callable[[], datetime] | None = None,
         request_timeout_sec: int = 600,
         clock: Callable[[], float] | None = None,
+        enable_video_generation: bool = False,
+        video_timeout_sec: int = 300,
     ) -> None:
         self._service = service
         self._sessions = sessions
@@ -366,6 +383,20 @@ class TelegramHandlers:
         self._now = now or (lambda: datetime.now(UTC))
         self._request_timeout_sec = request_timeout_sec
         self._clock = clock or time.monotonic
+        self._enable_video_generation = enable_video_generation
+        self._video_jobs = VideoJobManager(
+            service=service, media=self._media, timeout_sec=video_timeout_sec,
+            clock=self._clock,
+        )
+
+    @property
+    def video_generation_enabled(self) -> bool:
+        return self._enable_video_generation
+
+    async def close(self) -> None:
+        """Stop disposable background generations before closing the client."""
+
+        await self._video_jobs.close()
 
     def bind_auth(self, auth: AuthMiddleware) -> None:
         """Bind the application-scoped authorization middleware."""
@@ -383,7 +414,10 @@ class TelegramHandlers:
         language = await self._chat_language(update, chat_id)
         await send_text_or_busy(
             message,
-            _help_text(language, group_only=_is_group_update(update)),
+            _help_text(
+                language, group_only=_is_group_update(update),
+                enable_video_generation=self._enable_video_generation,
+            ),
             language=language,
         )
 
@@ -708,6 +742,114 @@ class TelegramHandlers:
             attachment_message=attachment_message,
             command="img",
         )
+
+    async def video(self, update: Update, context: CallbackContext) -> None:
+        """Send a fresh Low-effort video request, then release the chat to polling."""
+
+        identity = _message_identity(update)
+        if identity is None:
+            return
+        user_id, chat_id, message = identity
+        started = self._clock()
+        language = await self._chat_language(update, chat_id)
+        timing = RequestTiming(self._clock)
+        token = CURRENT_TIMING.set(timing)
+        handed_off = reserved = False
+        error_kind: str | None = "cancelled"
+        placeholder = None
+        keep_status = False
+
+        async def finish(ok: bool, kind: str | None) -> None:
+            total = self._clock() - started
+            await self._record_usage(
+                user_id=user_id, chat_id=chat_id, model=None, command="video",
+                ok=ok, error_kind=kind, latency_ms=round(total * 1000),
+            )
+            timing.log(
+                chat="private", command="video", model=None, level=ThinkingLevel.LOW.value,
+                outcome="ok" if ok else (kind or "unknown"), total=total,
+            )
+
+        try:
+            if not self._enable_video_generation:
+                error_kind = "disabled"
+                await send_text_or_busy(message, translate("video.disabled", language), language=language)
+                return
+            if not self._video_jobs.reserve(chat_id):
+                error_kind = "already_generating"
+                await send_text_or_busy(message, translate("video.already_generating", language), language=language)
+                return
+            reserved = True
+            prompt = _prompt_with_quoted_context(
+                _command_prompt(context), message, label=QUOTED_REQUEST_LABEL,
+                default_prompt=translate("command.video.description", language),
+            )
+            if prompt is None:
+                error_kind = "usage"
+                await send_text_or_busy(message, translate("video.usage", language), language=language)
+                return
+            self._ensure_service_accepting_requests()
+            slot_started = self._clock()
+            async with self._request_queue.request(user_id):
+                timing.slot_wait = self._clock() - slot_started
+                placeholder = await send_text_or_busy(
+                    message, translate("stream.placeholder", language), language=language,
+                )
+                async with self._generation_timeout():
+                    async def initial_send(client: Any) -> tuple[Any, Any]:
+                        session = client.start_chat(metadata=None, model=None, gem=None)
+                        return session, await session.send_message(prompt, extended_thinking=False)
+
+                    with video_request() as adaptation:
+                        upstream_started = self._clock()
+                        try:
+                            session, output = await self._service.execute(initial_send)
+                        finally:
+                            timing.upstream = self._clock() - upstream_started
+            if adaptation.failed or not adaptation.applied:
+                error_kind = "unavailable"
+                await edit_text(placeholder, translate("video.unavailable", language), parse_mode=None)
+                keep_status = True
+                return
+            status_text = translate("video.generating", language)
+            if output.text:
+                status_text += "\n\n" + output.text
+            status_text = status_text.encode("utf-16-le")[:4096 * 2].decode("utf-16-le", errors="ignore")
+            await edit_text(placeholder, status_text, parse_mode=None)
+            self._video_jobs.start(
+                chat_id, cid=session.cid, message=message, status=placeholder,
+                language=language, finish=finish,
+            )
+            handed_off = True
+        except _GenerationTimeout:
+            error_kind = "timeout"
+            await self._reply_request_timeout(message, language)
+        except RateLimitExceeded as error:
+            error_kind = "rate_limit"
+            await _reply_rate_limited(message, error, language)
+        except QueueAcquireTimeout:
+            error_kind = "queue_timeout"
+            await send_text_or_busy(message, translate("generic.service_busy", language), language=language)
+        except FloodControlExceeded:
+            error_kind = "flood_control"
+            await send_text_or_busy(message, translate("generic.service_busy", language), language=language)
+        except ServiceUnavailableError:
+            error_kind = "unavailable"
+            await send_text_or_busy(message, translate("video.unavailable", language), language=language)
+        except Exception as error:
+            error_kind = classify_error(error).value
+            LOGGER.warning("Video request failed (%s)", type(error).__name__)
+            await send_text_or_busy(message, translate("video.unavailable", language), language=language)
+        finally:
+            try:
+                if not handed_off:
+                    if reserved:
+                        self._video_jobs.release(chat_id)
+                    if not keep_status:
+                        await _delete_placeholder(placeholder)
+                    await finish(False, error_kind)
+            finally:
+                CURRENT_TIMING.reset(token)
 
     async def gemini(self, update: Update, context: CallbackContext) -> None:
         """Ask a question in a new conversation in private or group chat."""
@@ -2129,7 +2271,10 @@ class TelegramHandlers:
         try:
             await call_telegram(
                 bot.set_my_commands,
-                _commands_for_language(language),
+                _commands_for_language(
+                    language,
+                    enable_video_generation=self._enable_video_generation and chat_id > 0,
+                ),
                 scope=BotCommandScopeChat(chat_id=chat_id),
             )
         except Exception as error:
@@ -2190,6 +2335,7 @@ class TelegramHandlers:
         ok: bool,
         error_kind: str | None,
         latency_ms: int,
+        command: str = "message",
     ) -> None:
         if self._usage_dao is None:
             return
@@ -2198,7 +2344,7 @@ class TelegramHandlers:
                 UsageLog(
                     user_id=user_id,
                     chat_id=chat_id,
-                    command="message",
+                    command=command,
                     model=model,
                     ok=ok,
                     error_kind=error_kind,
@@ -2447,6 +2593,7 @@ def register_handlers(
     )
     application.add_handler(CommandHandler("status", handlers.status), group=1)
     application.add_handler(CommandHandler("img", handlers.img), group=1)
+    application.add_handler(CommandHandler("video", handlers.video), group=1)
     application.add_handler(CommandHandler("gemini", handlers.gemini), group=1)
     application.add_handler(
         CommandHandler(
@@ -2482,6 +2629,8 @@ def register_handlers(
 
 async def register_command_menu(
     application: Application[Any, Any, Any, Any, Any, Any],
+    *,
+    enable_video_generation: bool = False,
 ) -> None:
     """Publish the English default without making startup depend on its menu.
 
@@ -2508,7 +2657,7 @@ async def register_command_menu(
     try:
         await call_telegram(
             application.bot.set_my_commands,
-            _commands_for_language(LANGUAGE_ENGLISH),
+            _commands_for_language(LANGUAGE_ENGLISH, enable_video_generation=enable_video_generation),
         )
     except Exception as error:
         LOGGER.warning(

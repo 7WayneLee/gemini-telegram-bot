@@ -124,6 +124,7 @@ async def _run_polling(settings: Settings) -> None:
         )
 
     service = GeminiService(settings, admin_notifier=notify_admin)
+    handlers: TelegramHandlers | None = None
     try:
         # Deliberately delayed: T2.3 owns this implementation and may land in
         # the shared worktree after this entry point is imported by unit tests.
@@ -158,6 +159,8 @@ async def _run_polling(settings: Settings) -> None:
             secure_1psid=settings.gemini_secure_1psid,
             database=database,
             request_timeout_sec=settings.request_timeout_sec,
+            enable_video_generation=settings.enable_video_generation,
+            video_timeout_sec=settings.video_timeout_sec,
         )
         register_handlers(application, auth=auth, handlers=handlers)
 
@@ -190,12 +193,15 @@ async def _run_polling(settings: Settings) -> None:
                         await updater.stop()
                     if application.running:
                         await application.stop()
+                    await handlers.close()
                     await service.close()
         finally:
             for signum in installed_signals:
                 loop.remove_signal_handler(signum)
     finally:
         try:
+            if handlers is not None:
+                await handlers.close()
             await service.close()
         finally:
             await database.close()
@@ -220,7 +226,12 @@ async def _start_application(
 ) -> None:
     """Register the optional command menu, then start update processing."""
 
-    await register_command_menu(application)
+    await register_command_menu(
+        application,
+        enable_video_generation=(
+            handlers.video_generation_enabled if handlers is not None else False
+        ),
+    )
     if handlers is not None:
         await handlers.republish_chat_command_menus(application.bot)
     await application.start()

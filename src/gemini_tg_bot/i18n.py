@@ -639,6 +639,38 @@ MESSAGES: dict[str, dict[str, str]] = {
             "附件無法一併傳送給 Gemini，將繼續只處理文字內容。"
         ),
     },
+    "command.video.description": {
+        LANGUAGE_ENGLISH: "Generate a video",
+        LANGUAGE_CHINESE: "生成影片",
+    },
+    "video.disabled": {
+        LANGUAGE_ENGLISH: "Video generation is disabled.",
+        LANGUAGE_CHINESE: "影片生成功能已停用。",
+    },
+    "video.usage": {
+        LANGUAGE_ENGLISH: "Usage: /video <prompt>",
+        LANGUAGE_CHINESE: "用法：/video <提示詞>",
+    },
+    "video.unavailable": {
+        LANGUAGE_ENGLISH: "Video generation is unavailable right now. Please try again later.",
+        LANGUAGE_CHINESE: "目前無法生成影片，請稍後再試。",
+    },
+    "video.generating": {
+        LANGUAGE_ENGLISH: "Your video is being generated. This usually takes about a minute.",
+        LANGUAGE_CHINESE: "正在生成影片，通常需要約一分鐘。",
+    },
+    "video.already_generating": {
+        LANGUAGE_ENGLISH: "A video is already being generated in this chat.",
+        LANGUAGE_CHINESE: "這個聊天室已有影片正在生成中。",
+    },
+    "video.timeout": {
+        LANGUAGE_ENGLISH: "Video generation timed out. Please try again later.",
+        LANGUAGE_CHINESE: "影片生成逾時，請稍後再試。",
+    },
+    "video.too_large": {
+        LANGUAGE_ENGLISH: "The video exceeds Telegram's 50 MB upload limit.",
+        LANGUAGE_CHINESE: "影片超過 Telegram 的 50 MB 上傳限制。",
+    },
     "stream.placeholder": {
         LANGUAGE_ENGLISH: "Thinking…",
         LANGUAGE_CHINESE: "思考中…",
