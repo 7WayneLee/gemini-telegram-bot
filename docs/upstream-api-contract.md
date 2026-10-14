@@ -333,6 +333,60 @@ T3.4 的 `/setcookie` 熱更新可能需要。
 
 > **注意**：`f.req` inner list 索引 17 是每次對話輪次的計數器（per-conversation turn counter），並非思考等級。
 
+### 4 Argon（2026-10-14 擷取）
+
+> 偵察背景：Gemini 網頁版現已推出第四個模型「4 Argon」。Commander 依使用者明確指示，於使用者的瀏覽器 session 中親自操作頁面並送出測試 prompts 進行偵察（HUMAN-gated）。
+
+#### 模型選擇器（Model picker）
+
+網頁版模型選擇器列出四個模型及其說明：
+- **3.5 Flash-Lite**（Fastest answers）
+- **3.8 Flash**（All-around help）
+- **3.1 Pro**（Advanced reasoning）
+- **4 Argon**（Complex tasks）
+
+針對 4 Argon，「Thinking level」（思考等級）子選單提供 Low（Quick and efficient）、Medium（Balanced depth）與 High（Extra thorough）三檔，網頁 UI 預設為 Low。
+
+#### User-status RPC（`otAQ7b`）
+
+官方 User-status RPC `otAQ7b`（從 `part_body[15]` 讀取）包含下列模型項目：
+
+| model_id | category ([1]) | display ([11]) | description ([12]) | [17] | [9] |
+|---|---|---|---|---|---|
+| 8c46e95b1a07cecc | Flash-Lite | 3.5 Flash-Lite | Fastest answers | 6 | 1 |
+| 56fdd199312815e2 | Flash | 3.8 Flash | All-around help | 1 | 20 |
+| e6fa609c3fa255c0 | Pro | 3.1 Pro | Advanced reasoning | 3 | 4 |
+| 95a4c0abcba24364 | Argon | 4 Argon | Complex tasks | 8 | 4 |
+
+回應中亦包含 `part_body[24]`（提及 Argon 的 mode-picker 清單），上游 `gemini-webapi` 2.1.1 並未讀取 `[24]`。
+
+#### 上游解析機制
+
+- `AvailableModel.from_rpc`（`gemini_webapi/types/availablemodel.py`）通用解析每一個 `[15]` 項目。`_derive_name_and_aliases` 將 category "Argon" 轉換為標準名稱 `gemini-argon`，並將 `[17]` = 8 作為模型編號（model number）。
+- `client.py` 約第 943 行的 `list_models()` 會回傳於 `init()` 時建置的模型註冊表（`_model_registry`）。
+- 因此 Bot 在下次 client 初始化（`init()`）後即可直接列出 "4 Argon"，無需修改程式碼。
+
+#### StreamGenerate 擷取與思考等級
+
+在 4 Argon 上分別針對三個思考等級各取樣一次：
+
+| Level | `f.req` inner index 80 | model header index 15 |
+|---|---|---|
+| Low | 1 | 1 |
+| Medium | 4 | 4 |
+| High | 2 | 2 |
+
+- 這些數值與 3.x 模型完全一致，因此本專案的思考等級轉接層（thinking-level adapter）適用且無需變更：改寫 inner index 80 以及 model header 中位於 session id 前的元素。
+- 在官方 header（共 20 個元素）中，索引 4 為 model id `95a4c0abcba24364`，索引 11 為 2，索引 14 為 8（模型編號），索引 15 為思考等級，索引 16 為 session id。
+
+#### 與上游 Header 之差異
+
+對比上游實作（`constants.py` 約第 69 行，以及 `client.py` 約第 1513–1514 行附加的 flag 與 session id）：
+- 上游在索引 8 的 capability list 為 `[4,5,6,8]`；官方真實 header 則為 `[4,5,6,8,16,19,20,4,5,6,8,16,19,20]`。
+- 上游組出的 header 共有 17 個元素；官方 header 則有 20 個元素。
+- 現有 3.x 模型在上游 header 存在相同差異的情況下已能正常運作。
+- **驗證狀態**：Bot 透過上游向 Argon 發送請求的行為目前仍待驗證（pending verification）。
+
 ### 上游 `gemini-webapi` 2.1.1 的限制
 
 上游 `gemini-webapi` 2.1.1 僅提供 `extended_thinking: bool` 參數：
