@@ -39,6 +39,7 @@ from telegram.ext import (
 
 from gemini_tg_bot.config import persist_runtime_credentials
 from gemini_tg_bot.gemini.errors import AccountStatusError, classify_error
+from gemini_tg_bot.gemini.model_label import model_label
 from gemini_tg_bot.gemini.service import (
     DegradedReason,
     GeminiService,
@@ -538,7 +539,7 @@ class TelegramHandlers:
                 buttons.append(
                     [
                         InlineKeyboardButton(
-                            model.display_name,
+                            model_label(model),
                             callback_data=callback_data,
                         )
                     ]
@@ -966,7 +967,7 @@ class TelegramHandlers:
                     CALLBACK_DATA_LIMIT,
                 )
                 continue
-            buttons.append([InlineKeyboardButton(model.display_name, callback_data=callback_data)])
+            buttons.append([InlineKeyboardButton(model_label(model), callback_data=callback_data)])
         if _valid_callback_data(GROUP_MODEL_RESET_CALLBACK):
             buttons.append([InlineKeyboardButton(
                 translate("group_model.reset", language),
@@ -2133,7 +2134,7 @@ class TelegramHandlers:
                 return
             await edit_message_text_or_busy(
                 query, translate(
-                    "group_model.selected", language, model=selected.display_name,
+                    "group_model.selected", language, model=model_label(selected),
                     level=translate(f"thinking.level.{level.value}", language),
                 ), language=language,
             )
@@ -2155,7 +2156,7 @@ class TelegramHandlers:
                 label = translate("thinking.level.current", language, level=label)
             buttons.append(InlineKeyboardButton(label, callback_data=callback_data))
         await edit_message_text_or_busy(
-            query, translate("group_model.choose_thinking", language, model=selected.display_name),
+            query, translate("group_model.choose_thinking", language, model=model_label(selected)),
             language=language, reply_markup=InlineKeyboardMarkup([buttons]),
         )
 
@@ -2234,7 +2235,7 @@ class TelegramHandlers:
             await edit_message_text_or_busy(
                 query,
                 translate(
-                    "model.selected", language, model=selected.display_name,
+                    "model.selected", language, model=model_label(selected),
                     level=translate(f"thinking.level.{level.value}", language),
                 ),
                 language=language,
@@ -2258,7 +2259,7 @@ class TelegramHandlers:
             buttons.append(InlineKeyboardButton(label, callback_data=callback_data))
         await edit_message_text_or_busy(
             query,
-            translate("model.choose_thinking", language, model=selected.display_name),
+            translate("model.choose_thinking", language, model=model_label(selected)),
             language=language,
             reply_markup=InlineKeyboardMarkup([buttons]),
         )
@@ -2691,11 +2692,11 @@ async def register_command_menu(
 
 
 def _resolved_model_label(client: Any, model_name: str) -> str:
-    """Use the upstream display name when resolvable, otherwise the saved name."""
+    """Use the upstream model label when resolvable, otherwise the saved name."""
 
     try:
         model = client.resolve_model(model_name)
-        return model.display_name if model is not None else model_name
+        return model_label(model) if model is not None else model_name
     except Exception:
         return model_name
 

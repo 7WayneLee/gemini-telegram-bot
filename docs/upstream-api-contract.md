@@ -366,6 +366,10 @@ T3.4 的 `/setcookie` 熱更新可能需要。
 - `client.py` 約第 943 行的 `list_models()` 會回傳於 `init()` 時建置的模型註冊表（`_model_registry`）。
 - 因此 Bot 在下次 client 初始化（`init()`）後即可直接列出 "4 Argon"，無需修改程式碼。
 
+> ⚠️ **已過時（2026-11-15）**：上一點僅適用於 2026-10-14 的清單。2026-11-15 起 `part_body[15]`
+> 已不再包含 Argon（網頁版改以 slug `argon` 經新的 `processSession` 傳輸選用），且 `[11]`/`[12]`
+> 語意互換。現況見〈七之一、2026-11-15 model list change〉。本節保留作為歷史紀錄。
+
 #### StreamGenerate 擷取與思考等級
 
 在 4 Argon 上分別針對三個思考等級各取樣一次：
@@ -1012,6 +1016,75 @@ Telegram `callback_data` 上限 **64 bytes**。因此：
   `chat_sessions.model` 存 `model_name`，`NULL` = 帳號預設。
 - Gem：`callback_data = f"gem:{gem.id}"`，同樣驗證長度。`chat_sessions.gem_id` 存 `gem.id`。
 - 清單只顯示 `is_available` 為 `True` 者；顯示用 `display_name`，識別用 `model_name`。
+  > ⚠️ **「顯示用 `display_name`」已過時（2026-11-15）**：顯示改用 `model_label(model)`，
+  > 規則見〈七之一〉。識別仍只用 `model_name`，`callback_data` 格式不變。
+
+---
+
+## 七之一、2026-11-15 model list change（模型清單變更與顯示名稱規則）
+
+> 事實由 Commander 於 2026-11-15 確認（HUMAN-gated 偵察）。本節不得作為發出 live 請求的依據。
+
+### `otAQ7b` `part_body[15]` 的新內容
+
+Google 變更了 user-status RPC `otAQ7b` 回傳的模型清單（`part_body[15]`）。每個項目（index = 清單位置）：
+
+| model_id | [1] category | [2] | [11] | [12] | [17] | [19] |
+|---|---|---|---|---|---|---|
+| 8c46e95b1a07cecc | Flash-Lite | 3.5 Flash-Lite | Quick answers | 3.5 Flash-Lite | 6 | 3.5 Flash-Lite |
+| 56fdd199312815e2 | 4 Hydrogen | 4 Hydrogen | Everyday help | 4 Hydrogen | 1 | 4 Hydrogen |
+| e6fa609c3fa255c0 | Pro | 3.1 Pro | Detailed research | 3.1 Pro | 3 | 3.1 Pro |
+| 95a4c0abcba24364 | Carbon | 4 Carbon | Most complex work | 4 Carbon | 8 | 4 Carbon |
+
+- 正式環境的註冊表現在解析為 `model_name`：`gemini-flash-lite`、`gemini-4-hydrogen`、`gemini-pro`、`gemini-carbon`。
+- 與〈二之二〉2026-10-14 的表格相比，同一 `model_id` 現對應不同名稱
+  （`56fdd199312815e2`：3.8 Flash → 4 Hydrogen；`95a4c0abcba24364`：4 Argon → 4 Carbon），
+  因此舊的 `model_name`（例如 `gemini-flash`、`gemini-argon`）不在新註冊表中。
+
+### `[11]` / `[12]` 語意互換
+
+上游 `gemini-webapi` 2.1.1 的 `AvailableModel.from_rpc`（`gemini_webapi/types/availablemodel.py`）：
+
+- `display_name` = `[11]`（空值時退回 `[19]`，再退回 `[1]`）
+- `description` = `[12]`（空值時退回 `[2]`）
+
+| | `[11]` → `display_name` | `[12]` → `description` |
+|---|---|---|
+| 2026-11-15 之前 | 模型名稱（"4 Argon"） | 任務說明（"Complex tasks"） |
+| 2026-11-15 起 | 任務說明（"Everyday help"） | 模型名稱（"4 Hydrogen"） |
+
+直接顯示 `display_name` 會讓選單出現 "Everyday help" 這類任務標籤，而非模型名稱。
+
+### 本專案的顯示名稱規則（T22）
+
+`src/gemini_tg_bot/gemini/model_label.py::model_label(model) -> str`，新舊兩種排列皆適用：
+
+1. 候選為 `display_name` 與 `description`；`None`、空字串（含純空白）或非 `str` 視為缺值。
+2. 若**恰好一個**候選含有獨立的版本號 token（regex `(?<!\S)\d+(?:\.\d+)?(?!\S)`，
+   例如 "4 Hydrogen"、"3.5 Flash-Lite"、"3.1 Pro"），回傳該候選。
+3. 否則依序回傳非空的 `display_name`、非空的 `description`，最後退回 `model_name`。
+4. 不硬編碼任何模型名稱或標籤（不變量 8）。
+
+適用位置：`/model` 選單按鈕與「已選擇」／「選擇思考等級」訊息、`/group_model` 選單按鈕、
+目前設定與其各步驟訊息（`_resolved_model_label`）。`callback_data` 仍只用 `model_name`。
+
+`_log_model_registry` 改為同時記錄兩個欄位，例如
+`gemini-4-hydrogen(Everyday help / 4 Hydrogen, number=1, capacity=2/12)`，便於日後判斷排列方式。
+
+### 4 Argon 與 `processSession` 傳輸（未實作）
+
+網頁版（Pro 帳號）的模型選擇器另有第五個項目「Code and analysis / 4 Argon」，**不在** `part_body[15]` 中；
+「4 Carbon」對 Pro 帳號顯示為鎖定。偵察所見：
+
+- 網頁以 slug `argon` 選用該模型，並經新的 WebChannel 傳輸送出：`.../v1/processSession`，`VER=8`。
+- 請求本體為二進位 protobuf，欄位編號 = 舊 `f.req` inner list 的索引 + 1。
+- 標頭：`Authorization` 帶 `SAPISIDHASH` / `SAPISID1PHASH` / `SAPISID3PHASH`
+  （需要 `SAPISID` / `__Secure-1PAPISID` / `__Secure-3PAPISID` cookies；本專案的設定與 `/setcookie`
+  都不接收這三個 cookie），
+  另有 `X-Server-Token`（取自 `WIZ_global_data` 的 `PI9WOb` 鍵）、`X-Goog-Api-Key` 與數個 `x-goog-ext-*-bin` 標頭。
+- 上游 issue HanaokaYuzu/Gemini-API#374 回報：自 2026-11-12 的網頁版 build 起，Argon 經 `StreamGenerate` 會停滯。
+
+**使用者決策（2026-11-15）**：不實作新傳輸，等待上游支援。本專案不得自行組裝 `processSession` 請求。
 
 ---
 

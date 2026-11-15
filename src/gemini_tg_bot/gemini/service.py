@@ -482,7 +482,7 @@ class GeminiService:
                 "unavailable"
                 if models is None
                 else ", ".join(
-                    f"{model.model_name}({model.display_name}, "
+                    f"{model.model_name}({model.display_name} / {model.description}, "
                     f"number={model.model_number}, "
                     f"capacity={model.capacity}/{model.capacity_field})"
                     for model in models

@@ -418,8 +418,8 @@ def fake_settings(tmp_path):
 async def test_registry_logs_models_after_init_and_reinit(tmp_path, caplog, monkeypatch):
     """Every successful service initialization must expose the dynamic model numbers and capacity."""
     models = [
-        SimpleNamespace(model_name="gemini-flash", display_name="3.8 Flash", model_number=1, capacity=2, capacity_field=12),
-        SimpleNamespace(model_name="gemini-argon", display_name="4 Argon", model_number=8, capacity=1, capacity_field=12),
+        SimpleNamespace(model_name="gemini-4-hydrogen", display_name="Everyday help", description="4 Hydrogen", model_number=1, capacity=2, capacity_field=12),
+        SimpleNamespace(model_name="gemini-argon", display_name="4 Argon", description="Complex tasks", model_number=8, capacity=1, capacity_field=12),
     ]
     first, second = fake_client(models), fake_client(models)
     monkeypatch.setattr(service_module, "GeminiClient", MagicMock(side_effect=[first, second]))
@@ -428,7 +428,10 @@ async def test_registry_logs_models_after_init_and_reinit(tmp_path, caplog, monk
         await service.init()
         await service.reinit()
         lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Model registry:")]
-        expected = "Model registry: gemini-flash(3.8 Flash, number=1, capacity=2/12), gemini-argon(4 Argon, number=8, capacity=1/12)"
+        expected = (
+            "Model registry: gemini-4-hydrogen(Everyday help / 4 Hydrogen, number=1, capacity=2/12), "
+            "gemini-argon(4 Argon / Complex tasks, number=8, capacity=1/12)"
+        )
         assert lines == [expected, expected]
         first.list_models.assert_called_once_with()
         second.list_models.assert_called_once_with()
